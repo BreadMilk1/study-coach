@@ -1,0 +1,66 @@
+<script setup lang="ts">
+import { ref, nextTick, useTemplateRef } from 'vue'
+import { useChat } from '../stores/chat'
+import { useSettings } from '../stores/settings'
+import { streamChat } from '../lib/api'
+
+const chat = useChat()
+const settings = useSettings()
+const input = ref('')
+const scrollEl = useTemplateRef<HTMLDivElement>('scrollEl')
+
+async function send() {
+  const text = input.value.trim()
+  if (!text || chat.streaming) return
+  chat.pushUser(text)
+  input.value = ''
+  const assistant = chat.startAssistant()
+  await nextTick()
+  scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight })
+  await streamChat(text, settings.$state, {
+    onCitations: (cs) => chat.setCitations(assistant, cs),
+    onToken: (t) => {
+      chat.appendToken(assistant, t)
+      scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight })
+    },
+    onDone: () => chat.finish(),
+    onError: (e) => {
+      chat.appendToken(assistant, `\n[error: ${e}]`)
+      chat.finish()
+    },
+  })
+}
+</script>
+
+<template>
+  <div class="h-full flex flex-col">
+    <div ref="scrollEl" class="flex-1 overflow-y-auto p-6 space-y-4">
+      <div v-if="chat.messages.length === 0" class="text-white/40 text-center mt-20">
+        Upload a PDF in <RouterLink to="/library" class="underline">Library</RouterLink>, then ask a question.
+      </div>
+      <div v-for="m in chat.messages" :key="m.id" class="max-w-3xl mx-auto">
+        <div :class="m.role === 'user' ? 'text-right' : ''">
+          <div :class="[
+            'inline-block px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap',
+            m.role === 'user' ? 'bg-indigo-600/30' : 'bg-white/5'
+          ]">{{ m.content || (chat.streaming && m === chat.messages[chat.messages.length - 1] ? '…' : '') }}</div>
+        </div>
+        <div v-if="m.role === 'assistant' && m.citations && m.citations.length"
+             class="mt-2 flex flex-wrap gap-2 max-w-3xl">
+          <span v-for="(c, i) in m.citations" :key="c.chunk_id"
+                class="text-xs px-2 py-1 rounded-md bg-indigo-400/10 text-indigo-200 border border-indigo-400/20">
+            [{{ i + 1 }}] {{ c.source }} · p.{{ c.page }}
+          </span>
+        </div>
+      </div>
+    </div>
+    <form @submit.prevent="send" class="border-t border-white/5 p-4 flex gap-2">
+      <input v-model="input" :disabled="chat.streaming" placeholder="Ask anything about your sources…"
+             class="flex-1 bg-white/5 px-4 py-2 rounded-lg outline-none border border-transparent focus:border-indigo-400/40" />
+      <button type="submit" :disabled="chat.streaming || !input.trim()"
+              class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed">
+        {{ chat.streaming ? '…' : 'Send' }}
+      </button>
+    </form>
+  </div>
+</template>

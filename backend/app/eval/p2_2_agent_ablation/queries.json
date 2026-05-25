@@ -1,0 +1,30 @@
+{
+  "single_turn_plan": [
+    {"id": "plan_hyde", "message": "帮我做学习计划 on HyDE"},
+    {"id": "plan_bm25", "message": "make a plan on BM25"},
+    {"id": "plan_reranking", "message": "make a study plan on reranking"},
+    {"id": "plan_chunking", "message": "帮我做学习计划 on chunking strategies"},
+    {"id": "plan_eval", "message": "plan on evaluation metrics for retrieval"},
+    {"id": "plan_judge", "message": "make a plan on LLM-as-judge"},
+    {"id": "plan_embeddings", "message": "帮我做学习计划 on embedding models"},
+    {"id": "plan_hybrid", "message": "make a plan on hybrid retrieval"},
+    {"id": "plan_mindmap", "message": "make a plan on HyDE 画脑图"},
+    {"id": "plan_mindmap_en", "message": "make a plan on BM25 with mindmap"}
+  ],
+  "multi_turn_check_in": [
+    {
+      "id": "check_in_progress",
+      "messages": [
+        "帮我做学习计划 on HyDE",
+        "进度怎么样了"
+      ]
+    },
+    {
+      "id": "check_in_edit",
+      "messages": [
+        "make a plan on BM25",
+        "调整第二个里程碑标记为完成"
+      ]
+    }
+  ]
+}

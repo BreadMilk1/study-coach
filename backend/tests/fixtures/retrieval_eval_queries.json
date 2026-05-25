@@ -1,0 +1,552 @@
+[
+  {
+    "query": "hallucinations",
+    "classification": "short_kw",
+    "expected": [
+      {
+        "source": "Topic 2 - Understanding LLMs.pdf",
+        "pages": [
+          2,
+          6,
+          8,
+          9,
+          11,
+          46
+        ]
+      },
+      {
+        "source": "Topic 3 - Moving to Chat.pdf",
+        "pages": [
+          4,
+          11,
+          12,
+          13,
+          22
+        ]
+      },
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          33,
+          40,
+          43
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "hallucinat"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "token budget",
+    "classification": "short_kw",
+    "expected": [
+      {
+        "source": "Topic 6 - Assembling the Prompt.pdf",
+        "pages": [
+          37,
+          38,
+          52
+        ]
+      },
+      {
+        "source": "Quiz_with_answers.pdf",
+        "pages": [
+          8
+        ]
+      },
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          27
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "token budget"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "ReAct",
+    "classification": "short_kw",
+    "expected": [
+      {
+        "source": "Topic 8 - Agency  Autonomy Part 1.pdf",
+        "pages": [
+          2,
+          3,
+          7,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          45
+        ]
+      },
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          39
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "ReAct"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "temperature",
+    "classification": "short_kw",
+    "expected": [
+      {
+        "source": "Topic 2 - Understanding LLMs.pdf",
+        "pages": [
+          2,
+          43,
+          44,
+          45,
+          46
+        ]
+      },
+      {
+        "source": "Topic 10 - Evaluating LLM Applications.pdf",
+        "pages": [
+          6,
+          25,
+          31
+        ]
+      },
+      {
+        "source": "Topic 8 - Agency  Autonomy Part 1.pdf",
+        "pages": [
+          11,
+          12
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "temperature"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "What is prompt engineering and why is it important?",
+    "classification": "vocab_gap",
+    "expected": [
+      {
+        "source": "Topic 1 - Introduction to Prompt Engineering.pdf",
+        "pages": [
+          1,
+          2,
+          25,
+          29,
+          30,
+          31,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          44
+        ]
+      },
+      {
+        "source": "Topic 0 - General Introduction.pdf",
+        "pages": [
+          1,
+          2,
+          5,
+          12,
+          13,
+          15,
+          16,
+          18,
+          21,
+          25
+        ]
+      },
+      {
+        "source": "COMP7125.pdf",
+        "pages": [
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "prompt engineering"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "How does a large language model work?",
+    "classification": "vocab_gap",
+    "expected": [
+      {
+        "source": "Quiz_with_answers.pdf",
+        "pages": [
+          3,
+          5,
+          11
+        ]
+      },
+      {
+        "source": "Topic 7 - Taming the Model.pdf",
+        "pages": [
+          26,
+          27,
+          29
+        ]
+      },
+      {
+        "source": "COMP7125.pdf",
+        "pages": [
+          1,
+          2
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "large language model"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "What is context engineering and how does it improve LLM applications?",
+    "classification": "vocab_gap",
+    "expected": [
+      {
+        "source": "Topic 5 - Context Engineering.pdf",
+        "pages": [
+          1
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "context engineering"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "What are the key methods for evaluating LLM applications?",
+    "classification": "vocab_gap",
+    "expected": [
+      {
+        "source": "Topic 10 - Evaluating LLM Applications.pdf",
+        "pages": [
+          1,
+          2,
+          4,
+          6,
+          10,
+          11,
+          15,
+          16,
+          17,
+          18,
+          19,
+          23,
+          27,
+          28,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          38,
+          39,
+          40
+        ]
+      },
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          1,
+          2,
+          3,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          50,
+          51
+        ]
+      },
+      {
+        "source": "Topic 9 - Agency  Autonomy Part 2.pdf",
+        "pages": [
+          2,
+          8,
+          9,
+          23
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "evaluat\\w*",
+      "LLM applications?"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "Can you explain the autoregressive nature of text generation and what specific limitations it has regarding error correction?",
+    "classification": "long_specific",
+    "expected": [
+      {
+        "source": "Topic 2 - Understanding LLMs.pdf",
+        "pages": [
+          2,
+          40,
+          46
+        ]
+      },
+      {
+        "source": "Topic 8 - Agency  Autonomy Part 1.pdf",
+        "pages": [
+          25
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "autoregressive"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "According to the text, what are the first three steps in the Cycle of Quality?",
+    "classification": "long_specific",
+    "expected": [
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          50
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "Cycle of Quality"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "What are the different tiers of importance listed for prioritizing items within the Token Budget?",
+    "classification": "long_specific",
+    "expected": [
+      {
+        "source": "Topic 6 - Assembling the Prompt.pdf",
+        "pages": [
+          37,
+          38,
+          52
+        ]
+      },
+      {
+        "source": "Quiz_with_answers.pdf",
+        "pages": [
+          8
+        ]
+      },
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          27
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "tiers of importance|Token Budget"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "Given that IT support assistance in this scenario involves a voice-over-the-phone application and is constrained by available documentation, what type of problem is the application *not* designed to handle?",
+    "classification": "long_specific",
+    "expected": [
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          8
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "IT support",
+      "voice[- ]over[- ]the[- ]phone"
+    ],
+    "_candidates_truncated": false
+  },
+  {
+    "query": "什么是 prompt engineering 提示工程?",
+    "classification": "cross_lang",
+    "expected": [
+      {
+        "source": "Topic 1 - Introduction to Prompt Engineering.pdf",
+        "pages": [
+          1,
+          2,
+          25,
+          29,
+          30,
+          31,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          44
+        ]
+      },
+      {
+        "source": "Topic 0 - General Introduction.pdf",
+        "pages": [
+          1,
+          2,
+          5,
+          12,
+          13,
+          15,
+          16,
+          18,
+          21,
+          25
+        ]
+      },
+      {
+        "source": "COMP7125.pdf",
+        "pages": [
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "prompt engineering"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "解释少样本学习 few-shot learning",
+    "classification": "cross_lang",
+    "expected": [
+      {
+        "source": "Topic 5 - Context Engineering.pdf",
+        "pages": [
+          2,
+          6,
+          9,
+          11,
+          12,
+          13,
+          15,
+          48
+        ]
+      },
+      {
+        "source": "Topic 1 - Introduction to Prompt Engineering.pdf",
+        "pages": [
+          2,
+          29,
+          32,
+          44
+        ]
+      },
+      {
+        "source": "Topic 7 - Taming the Model.pdf",
+        "pages": [
+          2,
+          29,
+          30,
+          31
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "few-shot",
+      "few shot"
+    ],
+    "_candidates_truncated": true
+  },
+  {
+    "query": "如何评估 LLM 应用?",
+    "classification": "cross_lang",
+    "expected": [
+      {
+        "source": "Topic 10 - Evaluating LLM Applications.pdf",
+        "pages": [
+          1,
+          2,
+          4,
+          6,
+          10,
+          11,
+          15,
+          16,
+          17,
+          18,
+          19,
+          23,
+          27,
+          28,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          38,
+          39,
+          40
+        ]
+      },
+      {
+        "source": "Topic 4 - LLM Application.pdf",
+        "pages": [
+          1,
+          2,
+          3,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          50,
+          51
+        ]
+      },
+      {
+        "source": "Topic 9 - Agency  Autonomy Part 2.pdf",
+        "pages": [
+          2,
+          8,
+          9,
+          23
+        ]
+      }
+    ],
+    "_grep_keywords": [
+      "evaluat\\w*",
+      "LLM applications?"
+    ],
+    "_candidates_truncated": true
+  }
+]

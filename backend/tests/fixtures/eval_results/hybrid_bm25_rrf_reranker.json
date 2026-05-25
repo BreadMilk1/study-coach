@@ -1,0 +1,131 @@
+{
+  "variant": "hybrid_bm25_rrf_reranker",
+  "label": "+C — Hybrid + jina-reranker-v2 (depth=20→top-K)",
+  "top_k": 10,
+  "aggregate": {
+    "hit_rate@5": 0.9333333333333333,
+    "mrr": 0.8222222222222223
+  },
+  "per_query": [
+    {
+      "query": "hallucinations",
+      "classification": "short_kw",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "token budget",
+      "classification": "short_kw",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "ReAct",
+      "classification": "short_kw",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "temperature",
+      "classification": "short_kw",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "What is prompt engineering and why is it important?",
+      "classification": "vocab_gap",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "How does a large language model work?",
+      "classification": "vocab_gap",
+      "returned_count": 10,
+      "hit_rank": 2,
+      "hit_rate@5": 1.0,
+      "mrr": 0.5
+    },
+    {
+      "query": "What is context engineering and how does it improve LLM applications?",
+      "classification": "vocab_gap",
+      "returned_count": 10,
+      "hit_rank": null,
+      "hit_rate@5": 0.0,
+      "mrr": 0.0
+    },
+    {
+      "query": "What are the key methods for evaluating LLM applications?",
+      "classification": "vocab_gap",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "Can you explain the autoregressive nature of text generation and what specific limitations it has regarding error correction?",
+      "classification": "long_specific",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "According to the text, what are the first three steps in the Cycle of Quality?",
+      "classification": "long_specific",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "What are the different tiers of importance listed for prioritizing items within the Token Budget?",
+      "classification": "long_specific",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "Given that IT support assistance in this scenario involves a voice-over-the-phone application and is constrained by available documentation, what type of problem is the application *not* designed to handle?",
+      "classification": "long_specific",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "什么是 prompt engineering 提示工程?",
+      "classification": "cross_lang",
+      "returned_count": 10,
+      "hit_rank": 2,
+      "hit_rate@5": 1.0,
+      "mrr": 0.5
+    },
+    {
+      "query": "解释少样本学习 few-shot learning",
+      "classification": "cross_lang",
+      "returned_count": 10,
+      "hit_rank": 1,
+      "hit_rate@5": 1.0,
+      "mrr": 1.0
+    },
+    {
+      "query": "如何评估 LLM 应用?",
+      "classification": "cross_lang",
+      "returned_count": 10,
+      "hit_rank": 3,
+      "hit_rate@5": 1.0,
+      "mrr": 0.3333333333333333
+    }
+  ]
+}

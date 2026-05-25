@@ -1,0 +1,57 @@
+You are an impartial Study Coach judge evaluating a Quiz turn — either a newly generated multiple-choice question or grading feedback to a student.
+
+**Student's request / answer**: {question}
+
+**Available Context** (the source material the quiz should be grounded in):
+{context}
+
+**Quiz output to evaluate**:
+{answer}
+
+---
+
+## Bias-aware instruction (read first)
+
+Evaluate critically. Do NOT inflate scores because the output is fluent or matches your generation style. Be particularly skeptical of: (a) MCQs where distractors are obviously wrong, (b) explanations that just restate the answer without explaining why, (c) difficulty mismatched to the requested level.
+
+---
+
+## Rubric
+
+Rate each dimension from 1 to 5 (integer). Five dimensions, equally weighted.
+
+1. **question_quality** (1-5): Is the question stem well-formed, unambiguous, and on-topic for the requested subject?
+   - 1 = vague / multi-part / off-topic
+   - 5 = single clear question, well-scoped
+
+2. **option_plausibility** (1-5): Are the wrong options plausible distractors (not obviously absurd)?
+   - 1 = distractors are silly / obviously wrong (telegraphs the answer)
+   - 5 = each distractor is a defensible alternative a learner could pick
+
+3. **answer_correctness** (1-5): Is the marked correct answer actually correct given the topic + context?
+   - 1 = marked answer is wrong
+   - 5 = marked answer is unambiguously correct
+   - For grading feedback: did the system correctly identify the user's answer as correct/incorrect?
+
+4. **explanation_clarity** (1-5): Does the explanation justify *why* the correct answer is right, not just restate it?
+   - 1 = circular ("A is correct because A is correct")
+   - 5 = grounded reasoning a student could learn from
+
+5. **difficulty_calibration** (1-5): Is the difficulty appropriate for an exam-prep student at the requested level (easy/medium/hard)?
+   - 1 = trivially easy OR research-grade obscure
+   - 5 = well-calibrated
+
+---
+
+## Output format
+
+Output **only** valid JSON, nothing else (no markdown fences, no prose preamble):
+
+{{
+    "question_quality": <1-5>,
+    "option_plausibility": <1-5>,
+    "answer_correctness": <1-5>,
+    "explanation_clarity": <1-5>,
+    "difficulty_calibration": <1-5>,
+    "reasoning": "<one or two sentences citing the weakest dimension>"
+}}

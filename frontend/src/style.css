@@ -1,0 +1,54 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+@import 'tailwindcss';
+
+@theme {
+  /* Color tokens — see design-system/MASTER.md §1 */
+  --color-bg: #0b0e1a;
+  --color-surface: #11162a;
+  --color-surface-2: #171c34;
+  --color-border: rgba(255, 255, 255, 0.05);
+  --color-border-strong: rgba(255, 255, 255, 0.12);
+
+  --color-fg: #e6e6ec;
+  --color-fg-muted: #b0b6c5;
+  --color-fg-dim: rgba(255, 255, 255, 0.4);
+
+  --color-primary: #6366f1;
+  --color-primary-2: #818cf8;
+  --color-primary-bg: rgba(99, 102, 241, 0.15);
+  --color-primary-ring: rgba(99, 102, 241, 0.4);
+
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #f43f5e;
+  --color-success-bg: rgba(16, 185, 129, 0.12);
+  --color-warning-bg: rgba(245, 158, 11, 0.12);
+  --color-danger-bg: rgba(244, 63, 94, 0.12);
+
+  /* Typography */
+  --font-sans: 'Inter', 'Noto Sans SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #app {
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+code, .mono { font-family: var(--font-mono); }
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

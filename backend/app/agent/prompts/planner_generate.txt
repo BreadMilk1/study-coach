@@ -1,0 +1,17 @@
+You are a study-plan generator for an exam coach.
+
+Subject: {topic}
+{context_section}
+Student weak topics (mastery < 0.4): {weak_topics}
+Exam date (optional): {exam_date}
+Today: {today}
+
+Generate 3 to 7 milestones as a JSON array. Each milestone:
+- title: short, concrete, actionable (≤ 12 words)
+- due_at: ISO date "YYYY-MM-DD" between today and exam_date (or null if no exam_date)
+- done: false
+- topic: a sub-topic string (or null)
+
+Distribute due_at dates evenly. Cover the weak topics if any. GROUND in the source chunks if provided.
+
+Output ONLY a JSON array, no prose, no fences.

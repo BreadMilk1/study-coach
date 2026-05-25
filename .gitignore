@@ -1,0 +1,32 @@
+# OS / editor
+.DS_Store
+
+# Local agent state
+.superpowers/
+
+# Python runtime / cache
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local environment files
+.env
+.env.*
+
+# Backend runtime data
+backend/chroma_data/
+backend/chroma_eval_data/
+backend/*.sqlite
+backend/*.db
+backend/*.db.*
+
+# Eval outputs
+backend/app/eval/**/output/
+
+# Frontend build / deps
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/

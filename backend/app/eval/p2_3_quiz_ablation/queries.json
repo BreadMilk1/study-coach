@@ -1,0 +1,18 @@
+{
+  "single_turn_quiz": [
+    {"id": "quiz_hyde", "message": "quiz me on HyDE"},
+    {"id": "quiz_bm25", "message": "测一下 BM25"},
+    {"id": "quiz_reranking", "message": "quiz me on reranking"},
+    {"id": "quiz_chunking", "message": "考一下 chunking strategies"},
+    {"id": "quiz_eval", "message": "quiz me on retrieval evaluation"},
+    {"id": "quiz_judge", "message": "测一下 LLM-as-judge"},
+    {"id": "quiz_embeddings", "message": "quiz me on embedding models"},
+    {"id": "quiz_hybrid", "message": "quiz me on hybrid retrieval"},
+    {"id": "quiz_hyde_zh", "message": "测我一下 HyDE"},
+    {"id": "quiz_rrf", "message": "quiz me on reciprocal rank fusion"}
+  ],
+  "multi_turn_grade": [
+    {"id": "quiz_hyde_then_grade", "messages": ["quiz me on HyDE", "A"]},
+    {"id": "quiz_bm25_then_grade", "messages": ["quiz me on BM25", "A"]}
+  ]
+}
