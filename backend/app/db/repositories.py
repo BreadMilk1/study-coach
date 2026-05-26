@@ -629,6 +629,48 @@ class ChatSessionRepository:
     def get_by_id(self, chat_id: str) -> ChatSession | None:
         return self.session.get(ChatSession, chat_id)
 
+    def count_active_days(self, user_id: str, *, since_days: int = 30) -> int:
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=since_days)
+        stmt = (
+            select(ChatSession.started_at)
+            .where(ChatSession.user_id == user_id, ChatSession.started_at >= cutoff)
+            .order_by(ChatSession.started_at.desc())
+        )
+        dates = {row.date() for row in self.session.execute(stmt).scalars()}
+        if not dates:
+            return 0
+        today = datetime.utcnow().date()
+        streak = 0
+        check = today
+        for d in sorted(dates, reverse=True):
+            if d == check:
+                streak += 1
+                check = check - timedelta(days=1)
+            elif d == check - timedelta(days=1):
+                streak += 1
+                check = d
+            elif d < check:
+                break
+        return streak
+
+    def activity_daily(self, user_id: str, *, days: int = 30) -> list[dict]:
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        stmt = (
+            select(ChatSession.started_at)
+            .where(ChatSession.user_id == user_id, ChatSession.started_at >= cutoff)
+        )
+        counts: dict[str, int] = {}
+        for row in self.session.execute(stmt).scalars():
+            d = row.date().isoformat()
+            counts[d] = counts.get(d, 0) + 1
+        result = []
+        for i in range(days):
+            d = (datetime.utcnow() - timedelta(days=days - 1 - i)).date().isoformat()
+            result.append({"date": d, "count": counts.get(d, 0)})
+        return result
+
 
 class MessageRepository:
     def __init__(self, session: Session):

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Goal, Plan
+from app.db.models import ChatSession, Goal, Plan, Topic
 from app.db.repositories import DocumentRepository, GoalRepository, PlanRepository
 from app.db.session import get_session
 from app.llm.provider import LLMConfig
@@ -138,6 +138,16 @@ class MasteryOut(BaseModel):
     scores: list[MasteryScoreOut]
     weak_topics: list[str]
     overdue_milestones_count: int
+    streak_days: int = 0
+    coverage: float = 0.0
+
+
+class UserStatsOut(BaseModel):
+    streak_days: int
+    coverage: float
+    total_sessions: int
+    last_active_date: str | None
+    activity_daily: list[dict]
 
 
 class GoalCreateIn(BaseModel):
@@ -604,4 +614,56 @@ def get_mastery(
             for m in plan.milestones_json:
                 if not m.get("done") and m.get("due_at") and m["due_at"] < now:
                     overdue += 1
-    return MasteryOut(scores=scores, weak_topics=weak_names, overdue_milestones_count=overdue)
+    # Streak & coverage
+    from app.db.repositories import ChatSessionRepository
+    sessions_repo = ChatSessionRepository(session)
+    streak = sessions_repo.count_active_days(user_id)
+    docs = DocumentRepository(session).list_for_user(user_id)
+    total_chunks = sum(d.chunks_count for d in docs)
+    grounded = 0
+    if goals:
+        topic_rows = session.execute(
+            select(Topic).where(Topic.goal_id == goals[0].id)
+        ).scalars().all()
+        grounded = sum(1 for t in topic_rows if t.source_chunks)
+    coverage = grounded / max(total_chunks, 1)
+
+    return MasteryOut(
+        scores=scores,
+        weak_topics=weak_names,
+        overdue_milestones_count=overdue,
+        streak_days=streak,
+        coverage=round(coverage, 3),
+    )
+
+
+@router.get("/users/me/stats", response_model=UserStatsOut)
+def get_user_stats(
+    user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    from app.db.repositories import ChatSessionRepository
+    sessions_repo = ChatSessionRepository(session)
+    streak = sessions_repo.count_active_days(user_id)
+    activity = sessions_repo.activity_daily(user_id)
+    docs = DocumentRepository(session).list_for_user(user_id)
+    total_chunks = sum(d.chunks_count for d in docs)
+    goals = GoalRepository(session).list_active_for_user(user_id)
+    grounded = 0
+    if goals:
+        topic_rows = session.execute(
+            select(Topic).where(Topic.goal_id == goals[0].id)
+        ).scalars().all()
+        grounded = sum(1 for t in topic_rows if t.source_chunks)
+    coverage = grounded / max(total_chunks, 1)
+    last_stmt = select(ChatSession.started_at).where(
+        ChatSession.user_id == user_id
+    ).order_by(ChatSession.started_at.desc()).limit(1)
+    last_row = session.execute(last_stmt).scalar_one_or_none()
+    return UserStatsOut(
+        streak_days=streak,
+        coverage=round(coverage, 3),
+        total_sessions=0,
+        last_active_date=last_row.isoformat() if last_row else None,
+        activity_daily=activity,
+    )

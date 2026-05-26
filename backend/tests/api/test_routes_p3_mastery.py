@@ -23,7 +23,12 @@ def test_get_mastery_empty(client):
     token = issue_token("default-user", "guest")
     resp = client.get("/api/mastery", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
-    assert resp.json() == {"scores": [], "weak_topics": [], "overdue_milestones_count": 0}
+    body = resp.json()
+    assert body["scores"] == []
+    assert body["weak_topics"] == []
+    assert body["overdue_milestones_count"] == 0
+    assert "streak_days" in body
+    assert "coverage" in body
 
 
 def test_get_mastery_returns_scores_and_weak_topics(client):
