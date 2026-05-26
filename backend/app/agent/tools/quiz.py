@@ -35,6 +35,10 @@ Example shape:
 [
   {{"prompt": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "A", "explanation": "..."}}
 ]
+
+CRITICAL FORMATTING: Each option MUST start with exactly "A) " / "B) " / "C) " / "D) "
+(letter, closing paren, space). Never output bare option text without the prefix.
+Do NOT number with "1) " "2) " or use bullet points.
 """
 
 _GROUNDED_CONTEXT_TEMPLATE = """
