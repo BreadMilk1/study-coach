@@ -13,6 +13,8 @@ from .models import (
     Message,
     Mistake,
     Plan,
+    PlanEvent,
+    PlanMilestone,
     Question,
     Topic,
     User,
@@ -21,6 +23,25 @@ from .models import (
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _parse_due_at(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _due_to_json(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime) and value.time() == datetime.min.time():
+        return value.date().isoformat()
+    return value.isoformat()
 
 
 class UserRepository:
@@ -152,16 +173,209 @@ class PlanRepository:
         stmt = select(Plan).where(Plan.goal_id == goal_id)
         return self.session.execute(stmt).scalar_one_or_none()
 
+    def list_milestones(self, plan_id: str) -> list[PlanMilestone]:
+        stmt = (
+            select(PlanMilestone)
+            .where(PlanMilestone.plan_id == plan_id)
+            .order_by(PlanMilestone.sort_order.asc(), PlanMilestone.created_at.asc())
+        )
+        return list(self.session.execute(stmt).scalars())
+
+    def _milestone_json(self, row: PlanMilestone) -> dict:
+        return {
+            "id": row.id,
+            "title": row.title,
+            "due_at": _due_to_json(row.due_at),
+            "done": row.done,
+            "topic": row.topic_name,
+            "topic_id": row.topic_id,
+        }
+
+    def _sync_milestones_json(self, plan: Plan) -> None:
+        plan.milestones_json = [self._milestone_json(m) for m in self.list_milestones(plan.id)]
+        plan.updated_at = datetime.utcnow()
+
+    def _find_topic_id(self, *, plan: Plan, raw: dict) -> str | None:
+        if raw.get("topic_id"):
+            return raw["topic_id"]
+        name = raw.get("topic") or raw.get("topic_name")
+        if not name:
+            return None
+        stmt = select(Topic.id).where(Topic.goal_id == plan.goal_id, Topic.name == name).limit(1)
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def _log_event(
+        self,
+        *,
+        plan_id: str,
+        milestone_id: str | None,
+        actor: str,
+        action: str,
+        before: dict | None = None,
+        after: dict | None = None,
+        reason: str | None = None,
+    ) -> PlanEvent:
+        event = PlanEvent(
+            id=_uuid(),
+            plan_id=plan_id,
+            milestone_id=milestone_id,
+            actor=actor,
+            action=action,
+            before_json=before,
+            after_json=after,
+            reason=reason,
+            created_at=datetime.utcnow(),
+        )
+        self.session.add(event)
+        return event
+
+    def list_events(self, plan_id: str, *, limit: int = 20) -> list[PlanEvent]:
+        stmt = (
+            select(PlanEvent)
+            .where(PlanEvent.plan_id == plan_id)
+            .order_by(PlanEvent.created_at.desc(), PlanEvent.id.desc())
+            .limit(limit)
+        )
+        return list(self.session.execute(stmt).scalars())
+
     def update_milestones(self, *, goal_id: str, milestones: list) -> Plan:
-        """Upsert: overwrite milestones_json on the goal's plan, else create."""
         existing = self.get_by_goal(goal_id)
-        if existing is None:
-            return self.create(goal_id=goal_id, milestones_json=milestones)
-        existing.milestones_json = list(milestones)
-        existing.updated_at = datetime.utcnow()
+        plan = existing if existing is not None else self.create(goal_id=goal_id, milestones_json=[])
+
+        existing_rows = self.list_milestones(plan.id)
+        by_id = {m.id: m for m in existing_rows}
+        by_key = {(m.title, m.topic_name): m for m in existing_rows}
+        seen_ids: set[str] = set()
+        event_entries: list[dict] = []
+
+        for idx, raw in enumerate(milestones):
+            title = str(raw.get("title") or "").strip()
+            if not title:
+                continue
+            topic_name = raw.get("topic") or raw.get("topic_name")
+            row = by_id.get(raw.get("id")) if raw.get("id") else None
+            if row is None:
+                row = by_key.get((title, topic_name))
+            before = self._milestone_json(row) if row is not None else None
+            if row is None:
+                row = PlanMilestone(
+                    id=raw.get("id") or _uuid(),
+                    plan_id=plan.id,
+                    topic_id=self._find_topic_id(plan=plan, raw=raw),
+                    topic_name=topic_name,
+                    title=title,
+                    due_at=_parse_due_at(raw.get("due_at")),
+                    done=bool(raw.get("done", False)),
+                    completed_at=None,
+                    sort_order=idx,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    source=raw.get("source") or "ai",
+                )
+                self.session.add(row)
+            row.topic_id = self._find_topic_id(plan=plan, raw=raw)
+            row.topic_name = topic_name
+            row.title = title
+            row.due_at = _parse_due_at(raw.get("due_at"))
+            row.done = bool(raw.get("done", False))
+            row.completed_at = datetime.utcnow() if row.done and row.completed_at is None else (row.completed_at if row.done else None)
+            row.sort_order = idx
+            row.updated_at = datetime.utcnow()
+            seen_ids.add(row.id)
+            event_entries.append(
+                {
+                    "plan_id": plan.id,
+                    "milestone_id": row.id,
+                    "actor": "ai",
+                    "action": "created" if before is None else "applied",
+                    "before": before,
+                    "after": self._milestone_json(row),
+                    "reason": "Planner updated study plan",
+                }
+            )
+
+        # Ensure milestone rows exist before FK-backed events reference them.
+        self.session.flush()
+
+        removed_rows = [row for row in existing_rows if row.id not in seen_ids]
+        for row in removed_rows:
+            stmt = select(PlanEvent).where(PlanEvent.milestone_id == row.id)
+            for event in self.session.execute(stmt).scalars():
+                event.milestone_id = None
+        self.session.flush()
+
+        for row in removed_rows:
+            self.session.delete(row)
+        self.session.flush()
+
+        for entry in event_entries:
+            self._log_event(**entry)
+        self.session.flush()
+
+        self._sync_milestones_json(plan)
         self.session.commit()
-        self.session.refresh(existing)
-        return existing
+        self.session.refresh(plan)
+        return plan
+
+    def get_milestone(self, *, plan_id: str, milestone_id: str) -> PlanMilestone | None:
+        stmt = select(PlanMilestone).where(
+            PlanMilestone.plan_id == plan_id,
+            PlanMilestone.id == milestone_id,
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def set_milestone_done(
+        self,
+        *,
+        plan_id: str,
+        milestone_id: str,
+        done: bool,
+        actor: str,
+        reason: str,
+    ) -> PlanMilestone:
+        row = self.get_milestone(plan_id=plan_id, milestone_id=milestone_id)
+        if row is None:
+            raise ValueError(f"milestone {milestone_id} not found")
+        plan = self.session.get(Plan, plan_id)
+        if plan is None:
+            raise ValueError(f"plan {plan_id} not found")
+        before = self._milestone_json(row)
+        row.done = done
+        row.completed_at = datetime.utcnow() if done else None
+        row.updated_at = datetime.utcnow()
+        self._log_event(
+            plan_id=plan_id,
+            milestone_id=milestone_id,
+            actor=actor,
+            action="completed" if done else "reopened",
+            before=before,
+            after=self._milestone_json(row),
+            reason=reason,
+        )
+        self.session.flush()
+        self._sync_milestones_json(plan)
+        self.session.commit()
+        self.session.refresh(row)
+        return row
+
+    def list_milestone_dicts(self, plan_id: str, *, user_id: str | None = None) -> list[dict]:
+        rows = self.list_milestones(plan_id)
+        mastery_by_topic_id: dict[str, float] = {}
+        if user_id:
+            stmt = select(Mastery.topic_id, Mastery.score).where(Mastery.user_id == user_id)
+            mastery_by_topic_id = {topic_id: score for topic_id, score in self.session.execute(stmt)}
+        out = []
+        for row in rows:
+            item = self._milestone_json(row)
+            item["completed_at"] = row.completed_at.isoformat() if row.completed_at else None
+            item["sort_order"] = row.sort_order
+            item["source"] = row.source
+            item["mastery_score"] = mastery_by_topic_id.get(row.topic_id) if row.topic_id else None
+            item["validation_recommended"] = row.done and (
+                item["mastery_score"] is None or item["mastery_score"] < 0.5
+            )
+            out.append(item)
+        return out
 
 
 class QuestionRepository:
