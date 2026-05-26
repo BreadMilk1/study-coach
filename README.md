@@ -1,40 +1,96 @@
+<div align="center">
+
 # Study Coach
 
-> HKBU_StudyCompanion 课程项目的 portfolio-grade 重构 —— Exam Coach Agent。
-> 当前已推进到 P3 productized shell：后端 agent / eval 基础稳定，前端 7-view app 已交付。完整阶段记录见 `docs/ROADMAP.md`。
+**AI-Powered Exam Coach Agent**
+
+Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery — all grounded in your materials.
+
+[![Python](https://img.shields.io/badge/Python-3.11-3776ab)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)](https://fastapi.tiangolo.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1c3c3c)](https://langchain.com/langgraph)
+[![Vue](https://img.shields.io/badge/Vue-3.5-4fc08d)](https://vuejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
+[![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
+[![Tests](https://img.shields.io/badge/Tests-245%20passed-10b981)]()
+
+[中文文档](./README.zh-CN.md)
+
+</div>
+
+---
 
 ## Portfolio Thesis
 
-`../HKBU_StudyCompanion 2/` 是一份 Prompt Engineering 课程项目：本地 PDF RAG、HyDE、CoT study plan、MCQ quiz、LLM-as-Judge，但架构本质是 **chain-of-prompts**。
+`../HKBU_StudyCompanion 2/` is a Prompt Engineering course project: local PDF RAG, HyDE, CoT study plan, MCQ quiz, LLM-as-Judge — but architecturally a **chain-of-prompts** with no persistent state, no agent loop, and no empirical evaluation.
 
-`../JadeAI/` 是参考工程：BYOK header、repository pattern、DB persistence、tool-calling agent loop、长期维护型 `ARCHITECTURE.md`。
+`../JadeAI/` is the engineering reference: BYOK headers, repository pattern, DB persistence, tool-calling agent loop, and long-maintenance `ARCHITECTURE.md`.
 
-`study-coach/` 的目标是把课程项目重构成一个可放进个人简历的 **Exam Coach Agent**：旧四件套保留，但改造成 LangGraph router + tools + memory + judge + eval 的现代 agent 产品。
+**Study Coach** is the portfolio-grade refactor that bridges both worlds: the course project's four features (HyDE, CoT plan, MCQ, Judge) fully redesigned as a modern **LangGraph agent** with persistent memory, empirical agent-loop ablation, and a production-quality frontend.
 
-## Stack
+## Screenshots
 
-- **Backend**: Python 3.11 · FastAPI · LangChain · LangGraph · Chroma · SQLAlchemy 2.x · Alembic · uv
-- **Retrieval**: Dense embedding · BM25 · RRF · cross-encoder reranking (`jina-reranker-v2-base-multilingual`)
-- **Frontend**: Vue 3 · TypeScript · Vite · Pinia · Tailwind 4 · vue-router · Chart.js · Mermaid
-- **LLM**: dual-track —— Ollama 本地（默认）/ BYOK 云端（OpenAI · Anthropic · Gemini）via HTTP headers
+| Overview Dashboard | Chat with Agent Trace |
+|:---:|:---:|
+| ![Overview](docs/screenshots/overview.png) | ![Chat](docs/screenshots/chat.png) |
 
-## Current Capabilities
+| Plan Timeline + Gantt | Quiz Adaptive |
+|:---:|:---:|
+| ![Plan](docs/screenshots/plan.png) | ![Quiz](docs/screenshots/quiz.png) |
 
-1. 上传 PDF → concat-then-split chunking → Chroma 持久化索引
-2. Chat 输入问题 → hybrid retrieval + rerank → LangGraph Tutor → Judge Guard → SSE 流式回答
-3. Citation 显示 source / page / span metadata
-4. Planner：生成 study plan、持久化 milestones、输出 mindmap
-5. QuizMaster：RAG-grounded MCQ 生成、自动 grading、错题记录、mastery 更新
-6. Memory Updater：hydrator / writer 节点读写 mastery、mistakes、plan state
-7. Mode dispatch：Plan / Quiz 支持 `deterministic` 与 `agent_loop` 双路径 A/B
-8. P3 frontend：Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings 七页产品壳
+| Mistake Bank (SM-2 SRS) | Settings + Google Sign-In |
+|:---:|:---:|
+| ![Mistakes](docs/screenshots/mistakes.png) | ![Settings](docs/screenshots/settings.png) |
 
-## What This Project Demonstrates
+| Goal Setup Wizard | Mobile View |
+|:---:|:---:|
+| ![Onboarding](docs/screenshots/onboarding.png) | ![Mobile](docs/screenshots/mobile.png) |
 
-- **From prompt pipeline to agent graph**: fixed chain-of-prompts → LangGraph router → Tutor / Planner / QuizMaster branches → Judge → Memory Writer.
-- **JadeAI patterns ported to Python**: BYOK header, repository-style DB access, tool wrappers, persistence-first architecture, contract docs.
-- **Agent loop is treated empirically**: P2.2 / P2.3 compare `deterministic` vs `agent_loop` across small Ollama models instead of assuming agent loop is always better.
-- **Product around eval**: P3 UI exposes mode switching and alignment-safety behavior so the research result is visible in the app, not only in docs.
+> Screenshot placeholders — capture from `http://localhost:5173` and save to `docs/screenshots/`.
+
+## Features
+
+### Core Agent Loop
+
+- **LangGraph StateGraph** — Refactored from chain-of-prompts to a 7-node graph: MemoryHydrator → Router → {Tutor, QuizMaster, Planner} → Judge Guard → MemoryWriter
+- **Keyword-based Router** — Classifies user intent (quiz > plan > tutor) with state-aware overrides for multi-turn flows
+- **Judge Guard with PDCA** — 6-dimension tutor rubric, 5-dimension quiz/plan rubrics. Up to 2 retries with weak-dimension hints, degrade with disclaimer on exhaustion
+- **Dual-mode dispatch** — Deterministic state-machine (predictable, fast) and agent-loop (LLM tool-calling) for both Planner and QuizMaster, switchable via HTTP headers
+
+### Retrieval-Augmented Generation
+
+- **Hybrid Retrieval** — Dense embedding + BM25 + Reciprocal Rank Fusion (RRF)
+- **Cross-Encoder Reranking** — `jina-reranker-v2-base-multilingual` via FastEmbed
+- **Hit@5: 0.933, MRR: 0.822** on 15-query HKBU eval set (up from 0.733 / 0.633)
+- **Grounded Quiz Generation** — Questions drawn from indexed PDF chunks, not model training distribution
+
+### Adaptive Learning
+
+- **SM-2 Spaced Repetition** — Lite variant with implicit repetition count, ease factor floor 1.3
+- **Quiz → Mistake → Mastery pipeline** — Wrong answers create SM-2 scheduled mistakes; redo cycles update mastery scores
+- **Mark as Understood** — One-click permanent dismissal of mastered mistakes
+- **Mastery Radar** — 5-axis profile: Mastery, Plan Progress, Quiz Accuracy, Streak, Coverage
+
+### BYOK Multi-Model
+
+- **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers, never persisted server-side
+- **Cross-model Judge** — `x-judge-model` header mitigates self-preference bias (empirical delta: 0.20–0.40)
+- **Tool-call detection** — `GET /api/models/tool-check` probes model capability; agent-loop locked to deterministic when unsupported
+- **Supported providers**: Ollama (local), OpenAI, Anthropic, Google Gemini
+
+### Frontend
+
+- **8 views**: Overview (dashboard + radar + heatmap), Chat (SSE streaming + Agent Trace debug panel), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + OAuth + language), Onboarding (3-step goal setup wizard)
+- **Dark Cinema design system** — Inter / JetBrains Mono / Noto Sans SC, indigo primary
+- **i18n bilingual** — English / 中文 (zh-CN), switchable in Settings
+- **Mobile responsive** — Bottom tab bar for Chat / Quiz / Plan on <768px viewports
+- **Google One Tap Sign-In** — Real GIS integration with JWT Bearer token on all API calls
+
+### Deployment
+
+- **Docker Compose** — `docker compose up` starts backend + frontend + Ollama with pre-pulled models
+- **fly.io fallback** — Single-container cloud deploy with BYOK cloud-only mode (`OLLAMA_ENABLED=false`)
 
 ## Quickstart
 
@@ -69,91 +125,106 @@ pnpm dev
 
 Visit <http://localhost:5173>. Library → upload a PDF → Chat / Plan / Quiz.
 
+### Docker
+
+```bash
+docker compose up
+# backend :8000, frontend :5173, ollama :11434
+```
+
 ### Tests
 
 ```bash
 cd backend
-uv run pytest -q        # 214 tests, no live Ollama required for the suite
+uv run pytest -q        # 245 tests, no live Ollama required
 
 cd ../frontend
 pnpm build              # typecheck + production build
 ```
 
-## BYOK (cloud providers)
+## Key Empirical Results
 
-Open Settings, pick provider, paste your API key. The key lives only in your browser's `localStorage` and is sent per-request via `x-api-key` header. The server never persists it (same pattern as JadeAI).
+| Experiment | Runs | Key Finding |
+|-----------|------|-------------|
+| P2.0 Retrieval | 15 queries | Hit@5 0.733 → 0.933 (+27%), MRR 0.633 → 0.822 (+30%) |
+| P2.2 Plan Ablation | 396 runs | Agent loop: +0.05–0.16 quality on capable models, 3–20× latency cost. Tool schemas substitute for in-model reasoning when `reasoning=False` |
+| P2.3 Quiz Ablation | 792 runs | Strict schemas invert P2.2 rescue effect. Agent loop creates alignment safety net via tool-feedback channel |
 
-Supported headers:
+Full reports: `docs/EVAL.md`, `docs/agent_loop_vs_deterministic.md`, `docs/quiz_ablation_followup.md`.
 
-- `x-provider`: `ollama` / `openai` / `anthropic` / `gemini`
-- `x-model`: provider-specific model id
-- `x-api-key`: required for cloud providers
-- `x-base-url`: optional custom endpoint
-- `x-judge-model`: optional cross-model Judge Guard
-- `x-planner-mode` / `x-quiz-mode`: `deterministic` / `agent_loop`
+## Architecture
 
-## Key Results
+See `docs/ARCHITECTURE.md` v2 for:
+- **Mermaid ER diagram** — 14 tables, 13 relationships
+- **5 Architecture Decision Records** — LangGraph vs chain-of-prompts, SM-2 vs Leitner, deterministic vs agent loop, SQLite-only, BYOK header pattern
+- **Security model** — JWT auth, API key handling, CORS, XSS prevention
+- **Deployment topology** — Docker Compose (local) + fly.io (cloud fallback)
 
-- **P2.0 Retrieval rebuild**: Hit@5 `0.733 → 0.933`, MRR `0.633 → 0.822` on 15 HKBU eval queries.
-- **P2.2 Plan ablation**: agent loop helps thinking/tool-capable models, but adds 3-20x latency and can underperform deterministic on weaker tool-use models.
-- **P2.3 Quiz ablation**: strict schemas invert the P2.2 rescue effect; agent loop has better per-success quality but lower completion rate on small models.
-- **Alignment-safety finding**: agent loop with `retriever_search` can refuse off-corpus quiz generation instead of fabricating, which P3 surfaces via `EmptyCorpusBanner`.
-
-Full reports:
-
-- `docs/PHASE_2.0_REPORT.md`
-- `docs/EVAL.md`
-- `docs/agent_loop_vs_deterministic.md`
-- `docs/quiz_ablation_followup.md`
-- `docs/p3_frontend_productize.md`
-
-## Layout
+## Project Layout
 
 ```
 study-coach/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                         # FastAPI app factory + retriever wiring
-│   │   ├── api/{routes,deps}.py            # /api/chat, documents, plans, mistakes, mastery
+│   │   ├── api/{routes,deps,auth_routes}.py # /api/chat, auth, documents, plans, mistakes, mastery
 │   │   ├── agent/
-│   │   │   ├── graph.py                    # LangGraph: memory → router → tutor/quiz/plan → judge
-│   │   │   ├── planner{,_agent}.py         # deterministic + agent_loop plan paths
-│   │   │   ├── quiz_master{,_agent}.py     # deterministic + agent_loop quiz paths
-│   │   │   ├── judge.py                    # Tutor / Quiz / Plan rubrics
+│   │   │   ├── graph.py                    # LangGraph: memory → router → {tutor,quiz,plan} → judge → memory
+│   │   │   ├── planner{,_agent}.py         # Deterministic + agent_loop plan paths
+│   │   │   ├── quiz_master{,_agent}.py     # Deterministic + agent_loop quiz paths
+│   │   │   ├── judge.py                    # 6-dim tutor / 5-dim quiz / 5-dim plan rubrics
+│   │   │   ├── agent_trace.py              # Shared agent-loop instrumentation
 │   │   │   └── tools/                      # Pydantic tool schemas + side-effect tools
-│   │   ├── rag/                            # dense, BM25/RRF hybrid, reranking retriever
-│   │   ├── llm/provider.py                 # BYOK headers → LLMConfig → chat model
-│   │   ├── db/{models,repositories,session}.py
+│   │   ├── rag/                            # Dense, BM25/RRF hybrid, reranking retriever
+│   │   ├── llm/provider.py                 # BYOK headers → LLMConfig → init_chat_model
+│   │   ├── db/{models,repositories,session}.py # SQLAlchemy + Alembic
 │   │   ├── eval/                           # P2.2 / P2.3 ablation harnesses
-│   │   └── srs/sm2.py                      # Mistake Bank scheduling
-│   └── tests/                              # 214 backend tests
+│   │   └── srs/sm2.py                      # SM-2 spaced repetition scheduler
+│   └── tests/                              # 245 backend tests
 ├── frontend/
 │   └── src/
-│       ├── views/                          # Overview / Chat / Plan / Quiz / Mistakes / Library / Settings
-│       ├── components/                     # ModeChip, MCQCard, MindmapPanel, RadarChart, ...
-│       ├── stores/                         # Pinia resource stores
-│       └── lib/                            # API, parsing, fingerprint
-├── design-system/MASTER.md                 # P3 visual system
-└── docs/
-    ├── ARCHITECTURE.md                     # contract-level spec
-    ├── ROADMAP.md                          # phase history + backlog
-    └── EVAL.md                             # judge + ablation reports
+│       ├── views/                          # 8 views: Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding
+│       ├── components/                     # ~20 shared + view-specific components
+│       ├── stores/                         # 9 Pinia stores (settings, chat, plan, quiz, mistakes, mastery, documents, overview, goal)
+│       ├── composables/                    # useMediaQuery
+│       ├── locales/                        # en.json, zh-CN.json
+│       └── lib/                            # api.ts, parse.ts, quiz.ts, fingerprint.ts
+├── docs/
+│   ├── ARCHITECTURE.md                     # v2 — ER diagram + 5 ADRs + deployment topology
+│   ├── ROADMAP.md                          # P0–P4 phase history
+│   ├── EVAL.md                             # Judge guard + ablation methodology + empirical results
+│   ├── agent_loop_vs_deterministic.md      # P2.2 portfolio blog
+│   ├── quiz_ablation_followup.md           # P2.3 portfolio blog
+│   ├── p3_frontend_productize.md           # P3 portfolio blog
+│   └── screenshots/                        # UI screenshots (add before GitHub push)
+├── design-system/MASTER.md                 # Modern Dark Cinema design tokens
+├── docker-compose.yml                      # Local 3-service deployment
+├── fly.toml                                # Cloud fallback config
+└── .env.example                            # Environment variable template
 ```
 
-## Phase Status
+## BYOK Headers
 
-- [x] **Phase 0** — `PROJECTS_OVERVIEW.md` (HKBU_StudyCompanion vs JadeAI comparison)
-- [x] **Phase 0.5** — `docs/ARCHITECTURE.md` + `docs/ROADMAP.md` (contract-level specs)
-- [x] **Phase 1** — Minimal closed loop: upload PDF → chat → streamed answer + citation
-- [x] **Phase 2.0** — Retrieval foundation rebuild: hybrid retrieval + reranker + eval harness
-- [x] **Phase 2.1** — Agent-ify: router, Judge Guard, memory schema, QuizMaster, Planner
-- [x] **Phase 2.2** — Plan agent loop ablation
-- [x] **Phase 2.3** — Quiz agent loop ablation
-- [x] **Phase 3** — Productized frontend shell: 7 views + dashboard / quiz / plan / mistake bank
-- [ ] **Phase 4** — deploy, ARCHITECTURE.md v2, demo readiness, i18n, mobile, shared plans
+| Header | Default | Notes |
+|--------|---------|-------|
+| `x-provider` | `ollama` | `openai` / `anthropic` / `google_genai` |
+| `x-model` | `gemma3:4b` | Provider-specific model ID |
+| `x-api-key` | — | Required for cloud providers; never persisted server-side |
+| `x-base-url` | — | Custom endpoint / proxy |
+| `x-judge-model` | same as `x-model` | Distinct model for Judge Guard |
+| `x-planner-mode` | `deterministic` | `deterministic` or `agent_loop` |
+| `x-quiz-mode` | `deterministic` | `deterministic` or `agent_loop` |
+
+## What This Project Demonstrates
+
+- **From prompt pipeline to agent graph**: Fixed chain-of-prompts → LangGraph with typed state, conditional routing, retry loops, and persistent memory
+- **Agent loop treated empirically**: 792 ablation runs comparing deterministic vs agent-loop across local models — not assumed, measured
+- **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, tool-calling agent loop, SSE streaming
+- **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace, and EmptyCorpusBanner
+- **Portfolio-grade engineering**: 245 tests, Alembic migrations, i18n, OAuth, Docker Compose, mobile responsive
 
 ## Origin
 
-This is a portfolio refactor of the **HKBU_StudyCompanion** class project (course: COMP4146/7125 Prompt Engineering). The original (Gradio + chain-of-prompts) is preserved at `../HKBU_StudyCompanion 2/`.
+This is a portfolio refactor of the **HKBU_StudyCompanion** class project (COMP4146/7125 Prompt Engineering, HKBU). The original (Gradio + chain-of-prompts) is preserved at `../HKBU_StudyCompanion 2/`.
 
-Reference engineering patterns are drawn from `../JadeAI/`: BYOK header pattern, repository pattern, persistent DB state, tool-calling loop, AI output hardening, and long-form architecture documentation.
+Engineering patterns drawn from `../JadeAI/`: BYOK header, repository pattern, persistent DB state, tool-calling agent loop, SSE streaming, and long-form architecture documentation.
