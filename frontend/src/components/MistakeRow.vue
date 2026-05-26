@@ -2,7 +2,9 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { RotateCcw } from 'lucide-vue-next'
-import type { MistakeDueDto } from '../lib/api'
+import { markMistakeUnderstood, type MistakeDueDto } from '../lib/api'
+import { useMistakes } from '../stores/mistakes'
+import { useMastery } from '../stores/mastery'
 
 const props = defineProps<{ row: MistakeDueDto }>()
 const router = useRouter()
@@ -25,6 +27,12 @@ const nextReview = computed(() => {
 function redo() {
   router.push({ path: '/quiz', query: { mistake_id: props.row.mistake_id } })
 }
+
+async function markUnderstood(id: string) {
+  await markMistakeUnderstood(id)
+  useMistakes().fetch()
+  useMastery().fetch()
+}
 </script>
 
 <template>
@@ -39,9 +47,15 @@ function redo() {
         <span class="font-mono text-fg-dim">interval {{ row.srs_interval_days }}d · ease {{ row.srs_ease.toFixed(2) }}</span>
       </div>
     </div>
-    <button @click="redo"
-            class="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-2 inline-flex items-center gap-1.5 transition-colors">
-      <RotateCcw class="w-4 h-4" /> Redo
-    </button>
+    <div class="flex items-center gap-2">
+      <button @click="markUnderstood(row.mistake_id)"
+              class="text-xs text-fg-muted hover:text-success transition-colors">
+        Mark understood
+      </button>
+      <button @click="redo"
+              class="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-2 inline-flex items-center gap-1.5 transition-colors">
+        <RotateCcw class="w-4 h-4" /> Redo
+      </button>
+    </div>
   </div>
 </template>
