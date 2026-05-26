@@ -1,0 +1,21 @@
+app = "study-coach"
+primary_region = "hkg"
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+[env]
+  OLLAMA_ENABLED = "false"
+  DATABASE_URL = "sqlite:///data/study_coach.db"
+
+[mounts]
+  source = "study_coach_data"
+  destination = "/app/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8000
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]

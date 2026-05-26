@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports: ["8000:8000"]
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///data/study_coach.db
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-me}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - CORS_ORIGINS=http://localhost:5173
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports: ["5173:5173"]
+    depends_on: [backend]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: /bin/sh -c "ollama serve & sleep 3 && ollama pull gemma3:4b && ollama pull qwen2.5:7b && wait"
+
+volumes:
+  ollama_data:

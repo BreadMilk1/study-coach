@@ -1,0 +1,10 @@
+node_modules
+dist
+.venv
+__pycache__
+*.pyc
+.git
+chroma_data
+study_coach.db
+*.db
+data

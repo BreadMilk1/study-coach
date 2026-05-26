@@ -15,6 +15,7 @@ __pycache__/
 # Local environment files
 .env
 .env.*
+!.env.example
 
 # Backend runtime data
 backend/chroma_data/
