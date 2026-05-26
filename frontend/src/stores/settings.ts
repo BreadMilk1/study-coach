@@ -12,6 +12,8 @@ interface SettingsState {
   defaultPlannerMode: Mode
   defaultQuizMode: Mode
   toolCapable: boolean | null  // null = untested, true/false = tested result
+  debugMode: boolean
+  language: 'en' | 'zh-CN'
 }
 
 const STORAGE_KEY = 'study-coach:settings'
@@ -40,6 +42,8 @@ function loadInitial(): SettingsState {
         defaultPlannerMode: 'agent_loop' as Mode,
         defaultQuizMode: 'agent_loop' as Mode,
         toolCapable: null as boolean | null,
+        debugMode: parsed.debugMode ?? false,
+        language: parsed.language ?? 'en',
         ...parsed,
       }
       // Restore per-model tool-capable cache (not stored in settings JSON)
@@ -58,6 +62,8 @@ function loadInitial(): SettingsState {
     defaultPlannerMode: 'agent_loop' as Mode,
     defaultQuizMode: 'agent_loop' as Mode,
     toolCapable: null,
+    debugMode: false,
+    language: 'en',
   }
 }
 

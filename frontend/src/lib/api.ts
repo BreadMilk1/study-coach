@@ -264,3 +264,50 @@ export async function pingModel(s: any): Promise<PingDto> {
   if (!resp.ok) throw new Error(`ping failed: ${resp.status}`)
   return resp.json() as Promise<PingDto>
 }
+
+// --- P4b new endpoints ---
+
+export interface ActivityDayDto {
+  date: string
+  count: number
+}
+
+export interface UserStatsDto {
+  streak_days: number
+  coverage: number
+  total_sessions: number
+  last_active_date: string | null
+  activity_daily: ActivityDayDto[]
+}
+
+export function getUserStats(): Promise<UserStatsDto> {
+  return getJSON<UserStatsDto>('/api/users/me/stats')
+}
+
+export async function reorderMilestones(
+  planId: string,
+  milestoneIds: string[],
+): Promise<PlanCurrentDto> {
+  const resp = await fetch(`/api/plans/${planId}/milestones/reorder`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-fingerprint': getFingerprint(),
+    },
+    body: JSON.stringify({ milestone_ids: milestoneIds }),
+  })
+  if (!resp.ok) throw new Error(`reorder failed: ${resp.status}`)
+  return resp.json() as Promise<PlanCurrentDto>
+}
+
+export async function markMistakeUnderstood(mistakeId: string): Promise<{
+  mastery_score: number
+  next_due_at: string | null
+}> {
+  const resp = await fetch(`/api/mistakes/${mistakeId}/mark-understood`, {
+    method: 'POST',
+    headers: { 'x-fingerprint': getFingerprint() },
+  })
+  if (!resp.ok) throw new Error(`mark-understood failed: ${resp.status}`)
+  return resp.json()
+}
