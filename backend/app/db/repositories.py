@@ -59,6 +59,39 @@ class UserRepository:
         self.session.refresh(user)
         return user
 
+    def get_or_create_google(self, *, google_id: str, email: str) -> User:
+        stmt = select(User).where(User.google_id == google_id)
+        existing = self.session.execute(stmt).scalar_one_or_none()
+        if existing:
+            if existing.email != email:
+                existing.email = email
+                self.session.commit()
+            return existing
+        user = User(
+            id=_uuid(),
+            fingerprint=f"google-{google_id}",
+            google_id=google_id,
+            email=email,
+        )
+        self.session.add(user)
+        self.session.commit()
+        self.session.refresh(user)
+        return user
+
+    def upgrade_anonymous(self, *, fingerprint: str, google_id: str, email: str) -> User:
+        stmt = select(User).where(User.fingerprint == fingerprint, User.google_id.is_(None))
+        existing = self.session.execute(stmt).scalar_one_or_none()
+        if existing is None:
+            return self.get_or_create_google(google_id=google_id, email=email)
+        existing.google_id = google_id
+        existing.email = email
+        self.session.commit()
+        self.session.refresh(existing)
+        return existing
+
+    def get_by_id(self, user_id: str) -> User | None:
+        return self.session.get(User, user_id)
+
 
 class DocumentRepository:
     def __init__(self, session: Session):
