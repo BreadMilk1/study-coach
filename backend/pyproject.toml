@@ -22,6 +22,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "fastembed>=0.8.0",
     "alembic>=1.13",
+    "langchain-anthropic>=1.4.3",
 ]
 
 [dependency-groups]

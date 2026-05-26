@@ -14,11 +14,13 @@ from sqlalchemy.orm import Session
 from app.db.models import Goal, Plan
 from app.db.repositories import DocumentRepository, GoalRepository, PlanRepository
 from app.db.session import get_session
+from app.llm.provider import LLMConfig
 
 from .deps import (
     get_document_processor,
     get_graph,
     get_judge_dependencies,
+    get_llm_config,
     get_memory_hydrator,
     get_memory_writer,
     get_planner,
@@ -166,6 +168,99 @@ def _plan_current_out(session: Session, *, user_id: str, goal, plan) -> PlanCurr
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+class ToolCapableOut(BaseModel):
+    tool_capable: bool
+    model: str
+    note: str
+
+
+@router.get("/models/tool-check", response_model=ToolCapableOut)
+async def tool_check(
+    llm_config: Annotated[LLMConfig, Depends(get_llm_config)],
+):
+    """Ping the configured model with a dummy tool to detect tool-call support.
+
+    Local models like gemma3:4b don't support tool calling at all —
+    llm.bind_tools() returns a Runnable that silently ignores the tools,
+    and the LLM never returns tool_calls. Cloud providers (OpenAI, Anthropic,
+    Gemini) reliably support it.
+    """
+    from langchain_core.messages import HumanMessage
+    from langchain_core.tools import tool
+
+    from app.llm.provider import get_chat_model
+
+    # cloud-adapt: cloud BYOK will always return True here; we could
+    # short-circuit by provider instead of calling the LLM.
+
+    @tool
+    def ping() -> str:
+        """Respond with 'pong' when called."""
+        return "pong"
+
+    try:
+        llm = get_chat_model(llm_config)
+        llm_with_tools = llm.bind_tools([ping])
+        response = await llm_with_tools.ainvoke(
+            [HumanMessage(content="Call the ping tool")]
+        )
+        tool_calls = getattr(response, "tool_calls", None) or []
+        capable = len(tool_calls) > 0
+        note = (
+            "Model supports tool calling"
+            if capable
+            else "Model did not return any tool_calls — agent_loop mode unavailable"
+        )
+    except Exception as exc:
+        capable = False
+        note = f"Tool check failed: {type(exc).__name__}"
+
+    return ToolCapableOut(
+        tool_capable=capable,
+        model=llm_config.model,
+        note=note,
+    )
+
+
+class PingOut(BaseModel):
+    ok: bool
+    model: str
+    latency_ms: float
+    note: str
+
+
+@router.get("/models/ping", response_model=PingOut)
+async def ping_model(
+    llm_config: Annotated[LLMConfig, Depends(get_llm_config)],
+):
+    """Lightweight connectivity test — single ping message, no tools."""
+    import time
+
+    from langchain_core.messages import HumanMessage
+
+    from app.llm.provider import get_chat_model
+
+    t0 = time.monotonic()
+    try:
+        llm = get_chat_model(llm_config)
+        await llm.ainvoke([HumanMessage(content="ping")])
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        return PingOut(
+            ok=True,
+            model=llm_config.model,
+            latency_ms=latency_ms,
+            note=f"Connected — responded in {latency_ms}ms",
+        )
+    except Exception as exc:
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        return PingOut(
+            ok=False,
+            model=llm_config.model,
+            latency_ms=latency_ms,
+            note=f"Failed: {type(exc).__name__} — {exc}",
+        )
 
 
 @router.post("/documents")
@@ -390,6 +485,68 @@ def get_mistakes_due(
         )
         for m, q, t in rows
     ]
+
+
+class MistakeReviewIn(BaseModel):
+    answer: str  # "A" / "B" / "C" / "D"
+
+
+class MistakeReviewOut(BaseModel):
+    correct: bool
+    correct_answer: str
+    explanation: str
+    new_interval_days: int
+    next_due_at: str
+
+
+@router.post("/mistakes/{mistake_id}/review", response_model=MistakeReviewOut)
+def review_mistake(
+    mistake_id: str,
+    body: MistakeReviewIn,
+    user_id: Annotated[str, Depends(get_user_id)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    from app.db.repositories import MasteryRepository, MistakeRepository, QuestionRepository
+    from app.srs.sm2 import next_schedule
+
+    mistake = MistakeRepository(session).get_by_id(mistake_id)
+    if mistake is None or mistake.user_id != user_id:
+        raise HTTPException(status_code=404, detail="mistake not found")
+
+    question = QuestionRepository(session).get_by_id(mistake.question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="question not found")
+
+    normalized = body.answer.strip().upper()
+    correct = normalized == question.answer.strip().upper()
+    quality = 4 if correct else 2
+
+    sched = next_schedule(
+        quality=quality,
+        previous_interval_days=mistake.srs_interval_days,
+        previous_ease=mistake.srs_ease,
+    )
+    MistakeRepository(session).update_srs(
+        mistake_id=mistake.id,
+        interval_days=sched.interval_days,
+        ease=sched.ease,
+        due_at=sched.due_at,
+    )
+
+    delta = 0.1 if correct else -0.05
+    MasteryRepository(session).apply_delta(
+        user_id=user_id,
+        topic_id=question.topic_id,
+        delta=delta,
+    )
+
+    return MistakeReviewOut(
+        correct=correct,
+        correct_answer=question.answer,
+        explanation=question.explanation,
+        new_interval_days=sched.interval_days,
+        next_due_at=sched.due_at.isoformat(),
+    )
 
 
 @router.get("/mastery", response_model=MasteryOut)
