@@ -50,11 +50,11 @@ async function markUnderstood(id: string) {
     <div class="flex items-center gap-2">
       <button @click="markUnderstood(row.mistake_id)"
               class="text-xs text-fg-muted hover:text-success transition-colors">
-        Mark understood
+        {{ $t('mistakes.markUnderstood') }}
       </button>
       <button @click="redo"
               class="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-2 inline-flex items-center gap-1.5 transition-colors">
-        <RotateCcw class="w-4 h-4" /> Redo
+        <RotateCcw class="w-4 h-4" /> {{ $t('mistakes.redo') }}
       </button>
     </div>
   </div>

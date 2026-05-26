@@ -154,7 +154,7 @@ function nextQuestion() {
 
       <div v-if="quiz.errorMsg"
            class="rounded-lg border border-red-500/30 bg-red-500/10 p-4 flex items-start gap-3 mb-6">
-        <span class="text-sm text-fg flex-1">{{ quiz.errorMsg }}</span>
+        <span class="text-sm text-fg flex-1">{{ $t('quiz.errorBanner') }}</span>
         <button @click="quiz.errorMsg = ''"
                 class="text-fg-muted hover:text-fg shrink-0 text-lg leading-none">&times;</button>
       </div>
@@ -170,7 +170,7 @@ function nextQuestion() {
           </p>
           <button @click="generate"
                   class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-2 transition-colors">
-            Generate a question
+            {{ $t('quiz.generate') }}
           </button>
         </div>
 

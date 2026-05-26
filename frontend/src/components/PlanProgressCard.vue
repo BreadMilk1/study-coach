@@ -14,7 +14,7 @@ const lowMasteryCompleted = computed(() =>
 </script>
 <template>
   <section class="rounded-lg border border-border bg-surface p-6">
-    <h2 class="text-sm font-semibold mb-4 text-fg-muted uppercase tracking-wider">Plan progress</h2>
+    <h2 class="text-sm font-semibold mb-4 text-fg-muted uppercase tracking-wider">{{ $t('overview.planProgress') }}</h2>
     <div v-if="!plan.plan" class="text-fg-dim text-sm">No active plan.</div>
     <template v-else>
       <div class="flex items-baseline gap-2">

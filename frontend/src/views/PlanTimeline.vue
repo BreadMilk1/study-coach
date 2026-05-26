@@ -62,7 +62,7 @@ async function checkIn() {
       <header class="flex items-center justify-between mb-6">
         <div>
           <div class="flex items-center gap-2">
-            <h1 class="text-2xl font-semibold">Plan</h1>
+            <h1 class="text-2xl font-semibold">{{ $t('nav.plan') }}</h1>
             <InfoPopover title="Plan 功能说明">
               <p>Plan 是你的 AI 学习规划器，根据目标考试生成 milestone 时间线。</p>
               <p><strong>关联 Quiz：</strong>每个 milestone 可点击 Validate with quiz 跳转到 Quiz 生成对应主题的测试题。Quiz 的 Mastery Score 反馈回 Plan，决定 milestone 是否"验证通过"。</p>
@@ -99,11 +99,11 @@ async function checkIn() {
           @refresh="planStore.fetch()"
         />
         <section class="mt-6">
-          <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider mb-3">Timeline</h2>
+          <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider mb-3">{{ $t('plan.timeline') }}</h2>
           <PlanGantt :milestones="planStore.plan.milestones" />
         </section>
         <section v-if="planStore.events.length" class="mt-6 rounded-lg border border-border bg-surface p-4">
-          <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider">Recent changes</h2>
+          <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider">{{ $t('plan.recentChanges') }}</h2>
           <ul class="mt-3 flex flex-col gap-2 text-xs text-fg-muted">
             <li v-for="event in planStore.events.slice(0, 5)" :key="event.id">
               <span class="font-mono text-fg">{{ event.action }}</span>

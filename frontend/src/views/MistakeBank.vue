@@ -21,7 +21,7 @@ async function toggleShowAll() {
     <div class="max-w-4xl mx-auto">
       <header class="mb-6">
         <div class="flex items-center gap-2">
-          <h1 class="text-2xl font-semibold">Mistake Bank</h1>
+          <h1 class="text-2xl font-semibold">{{ $t('nav.mistakes') }}</h1>
           <InfoPopover title="Mistake Bank 功能说明">
             <p>Mistake Bank 收集你在 Quiz 中答错的题目，使用 SM-2 间隔重复算法管理复习节奏。</p>
             <p><strong>关联 Quiz：</strong>Quiz 中答错的题目自动进入 Mistake Bank。点击 Redo 可重做原题，答对后 SRS 间隔延长（1 → 6 → 15 → 38+ 天），答错重置为 1 天。复习结果同步更新 Topic Mastery Score。</p>
@@ -35,7 +35,7 @@ async function toggleShowAll() {
           </p>
           <button @click="toggleShowAll"
                   class="text-xs font-mono px-2 py-0.5 rounded border border-white/15 text-fg-muted hover:text-fg hover:border-white/25 transition-colors">
-            {{ showAll ? 'Due only' : 'Show all' }}
+            {{ showAll ? $t('mistakes.dueOnly') : $t('mistakes.showAll') }}
           </button>
         </div>
       </header>

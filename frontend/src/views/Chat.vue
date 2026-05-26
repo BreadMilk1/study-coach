@@ -3,6 +3,7 @@ import { ref, nextTick, useTemplateRef } from 'vue'
 import { useChat } from '../stores/chat'
 import { useSettings } from '../stores/settings'
 import { streamChat } from '../lib/api'
+import TracePanel from '../components/TracePanel.vue'
 
 const chat = useChat()
 const settings = useSettings()
@@ -23,6 +24,7 @@ async function send() {
       chat.appendToken(assistant, t)
       scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight })
     },
+    onTrace: (step) => chat.trace.push(step),
     onDone: () => chat.finish(),
     onError: (e) => {
       chat.appendToken(assistant, `\n[error: ${e}]`)
@@ -55,12 +57,13 @@ async function send() {
       </div>
     </div>
     <form @submit.prevent="send" class="border-t border-white/5 p-4 flex gap-2">
-      <input v-model="input" :disabled="chat.streaming" placeholder="Ask anything about your sources…"
+      <input v-model="input" :disabled="chat.streaming" :placeholder="$t('chat.placeholder')"
              class="flex-1 bg-white/5 px-4 py-2 rounded-lg outline-none border border-transparent focus:border-indigo-400/40" />
       <button type="submit" :disabled="chat.streaming || !input.trim()"
               class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed">
-        {{ chat.streaming ? '…' : 'Send' }}
+        {{ chat.streaming ? '…' : $t('chat.send') }}
       </button>
     </form>
+    <TracePanel v-if="settings.debugMode" />
   </div>
 </template>

@@ -25,7 +25,9 @@
     "errorBanner": "出错了，请重试。"
   },
   "plan": {
-    "dragHint": "拖动以重新排序"
+    "dragHint": "拖动以重新排序",
+    "timeline": "时间线",
+    "recentChanges": "最近变更"
   },
   "onboarding": {
     "step1Title": "你的考试或学习目标是什么？",

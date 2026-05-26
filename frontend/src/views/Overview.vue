@@ -22,7 +22,7 @@ onMounted(() => overview.fetchAll())
   <div class="h-full overflow-y-auto p-8">
     <div class="max-w-6xl mx-auto">
       <header class="mb-8">
-        <h1 class="text-3xl font-bold tracking-tight">Overview</h1>
+        <h1 class="text-3xl font-bold tracking-tight">{{ $t('nav.overview') }}</h1>
         <p class="text-sm text-fg-muted mt-1">
           {{ new Date().toDateString() }} · overdue
           <span class="font-mono text-warning">{{ mastery.data.overdue_milestones_count }}</span>

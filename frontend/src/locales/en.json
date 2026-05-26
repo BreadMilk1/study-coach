@@ -25,7 +25,9 @@
     "errorBanner": "Something went wrong. Try again."
   },
   "plan": {
-    "dragHint": "Drag to reorder milestones"
+    "dragHint": "Drag to reorder milestones",
+    "timeline": "Timeline",
+    "recentChanges": "Recent changes"
   },
   "onboarding": {
     "step1Title": "What's your exam or goal?",

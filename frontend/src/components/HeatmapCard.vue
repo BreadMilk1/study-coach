@@ -19,7 +19,7 @@ function color(count: number): string {
 
 <template>
   <div class="rounded-lg border border-border bg-surface p-4">
-    <h3 class="text-sm font-medium text-fg-muted mb-3">Activity (30 days)</h3>
+    <h3 class="text-sm font-medium text-fg-muted mb-3">{{ $t('overview.activity') }}</h3>
     <div class="flex gap-1 flex-wrap">
       <div v-for="d in days" :key="d.date"
            class="w-3 h-3 rounded-sm"

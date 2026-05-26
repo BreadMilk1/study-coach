@@ -8,7 +8,7 @@ const levels: Difficulty[] = ['easy', 'med', 'hard']
 </script>
 
 <template>
-  <div role="radiogroup" aria-label="Difficulty"
+  <div role="radiogroup" :aria-label="$t('quiz.difficulty')"
        class="inline-flex rounded-md border border-border bg-surface p-0.5">
     <button v-for="level in levels" :key="level"
             role="radio" :aria-checked="props.value === level"

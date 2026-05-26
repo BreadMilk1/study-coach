@@ -9,7 +9,7 @@ function barColor(score: number) {
 </script>
 <template>
   <section class="rounded-lg border border-border bg-surface p-6">
-    <h2 class="text-sm font-semibold mb-4 text-fg-muted uppercase tracking-wider">Top mastery</h2>
+    <h2 class="text-sm font-semibold mb-4 text-fg-muted uppercase tracking-wider">{{ $t('overview.mastery') }}</h2>
     <div v-if="scores.length === 0" class="text-fg-dim text-sm">No quizzes taken yet.</div>
     <div v-else class="flex flex-col gap-3">
       <div v-for="s in scores" :key="s.topic_id">

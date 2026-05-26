@@ -3,7 +3,7 @@ defineProps<{ topics: string[] }>()
 </script>
 <template>
   <section class="rounded-lg border border-border bg-surface p-6">
-    <h2 class="text-sm font-semibold mb-4 text-fg-muted uppercase tracking-wider">Weak topics</h2>
+    <h2 class="text-sm font-semibold mb-4 text-fg-muted uppercase tracking-wider">{{ $t('overview.weakTopics') }}</h2>
     <div v-if="topics.length === 0" class="text-fg-dim text-sm">No weak topics yet.</div>
     <div v-else class="flex flex-wrap gap-2">
       <RouterLink v-for="t in topics" :key="t"

@@ -13,7 +13,7 @@ defineEmits<{ (e: 'next'): void }>()
     <div class="flex items-center gap-2 mb-2">
       <component :is="correct ? CheckCircle2 : XCircle"
                  :class="['w-5 h-5', correct ? 'text-success' : 'text-danger']" />
-      <span class="text-sm font-semibold">{{ correct ? 'Correct' : 'Incorrect' }}</span>
+      <span class="text-sm font-semibold">{{ correct ? $t('quiz.correct') : $t('quiz.incorrect') }}</span>
       <span v-if="!correct && correctAnswer" class="font-mono text-xs text-fg-muted">
         correct answer: {{ correctAnswer }}
       </span>
