@@ -23,6 +23,8 @@ dependencies = [
     "fastembed>=0.8.0",
     "alembic>=1.13",
     "langchain-anthropic>=1.4.3",
+    "python-jose[cryptography]>=3.5.0",
+    "google-auth[oauthlib]>=2.53.0",
 ]
 
 [dependency-groups]
