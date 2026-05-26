@@ -333,6 +333,24 @@ class PlanRepository:
         actor: str,
         reason: str,
     ) -> PlanMilestone:
+        row, _event = self.set_milestone_done_with_event(
+            plan_id=plan_id,
+            milestone_id=milestone_id,
+            done=done,
+            actor=actor,
+            reason=reason,
+        )
+        return row
+
+    def set_milestone_done_with_event(
+        self,
+        *,
+        plan_id: str,
+        milestone_id: str,
+        done: bool,
+        actor: str,
+        reason: str,
+    ) -> tuple[PlanMilestone, PlanEvent]:
         row = self.get_milestone(plan_id=plan_id, milestone_id=milestone_id)
         if row is None:
             raise ValueError(f"milestone {milestone_id} not found")
@@ -343,7 +361,7 @@ class PlanRepository:
         row.done = done
         row.completed_at = datetime.utcnow() if done else None
         row.updated_at = datetime.utcnow()
-        self._log_event(
+        event = self._log_event(
             plan_id=plan_id,
             milestone_id=milestone_id,
             actor=actor,
@@ -356,7 +374,8 @@ class PlanRepository:
         self._sync_milestones_json(plan)
         self.session.commit()
         self.session.refresh(row)
-        return row
+        self.session.refresh(event)
+        return row, event
 
     def list_milestone_dicts(self, plan_id: str, *, user_id: str | None = None) -> list[dict]:
         rows = self.list_milestones(plan_id)

@@ -8,8 +8,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.models import Goal, Plan
 from app.db.repositories import DocumentRepository, GoalRepository, PlanRepository
 from app.db.session import get_session
 
@@ -45,10 +47,17 @@ class ChatRequest(BaseModel):
 
 class MilestoneOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    id: str | None = None
     title: str
     due_at: str | None = None
     done: bool = False
+    completed_at: str | None = None
+    topic_id: str | None = None
     topic: str | None = None
+    mastery_score: float | None = None
+    validation_recommended: bool = False
+    sort_order: int | None = None
+    source: str | None = None
 
 
 class PlanCurrentOut(BaseModel):
@@ -57,6 +66,34 @@ class PlanCurrentOut(BaseModel):
     goal_title: str
     milestones: list[MilestoneOut]
     updated_at: str
+
+
+class MilestonePatchIn(BaseModel):
+    done: bool
+
+
+class PlanEventOut(BaseModel):
+    id: str
+    plan_id: str
+    milestone_id: str | None = None
+    actor: str
+    action: str
+    before_json: dict | None = None
+    after_json: dict | None = None
+    reason: str | None = None
+    created_at: str
+
+
+class ValidationHintOut(BaseModel):
+    show_quick_quiz: bool
+    topic: str | None = None
+    reason: str | None = None
+
+
+class MilestonePatchOut(BaseModel):
+    plan: PlanCurrentOut
+    event: PlanEventOut
+    validation_hint: ValidationHintOut
 
 
 class DocumentOut(BaseModel):
@@ -98,6 +135,32 @@ class MasteryOut(BaseModel):
     scores: list[MasteryScoreOut]
     weak_topics: list[str]
     overdue_milestones_count: int
+
+
+def _plan_belongs_to_user(session: Session, *, user_id: str, plan_id: str):
+    stmt = (
+        select(Goal, Plan)
+        .join(Plan, Plan.goal_id == Goal.id)
+        .where(Plan.id == plan_id, Goal.user_id == user_id, Goal.status == "active")
+    )
+    row = session.execute(stmt).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no active plan for user")
+    return row
+
+
+def _plan_current_out(session: Session, *, user_id: str, goal, plan) -> PlanCurrentOut:
+    repo = PlanRepository(session)
+    milestone_dicts = repo.list_milestone_dicts(plan.id, user_id=user_id)
+    if not milestone_dicts:
+        milestone_dicts = [dict(m) for m in plan.milestones_json]
+    return PlanCurrentOut(
+        plan_id=plan.id,
+        goal_id=goal.id,
+        goal_title=goal.title,
+        milestones=[MilestoneOut(**m) for m in milestone_dicts],
+        updated_at=plan.updated_at.isoformat(),
+    )
 
 
 @router.get("/health")
@@ -212,13 +275,76 @@ def get_plans_current(
     plan = PlanRepository(session).get_by_goal(goal.id)
     if plan is None:
         raise HTTPException(status_code=404, detail="no active plan for user")
-    return PlanCurrentOut(
-        plan_id=plan.id,
-        goal_id=goal.id,
-        goal_title=goal.title,
-        milestones=[MilestoneOut(**m) for m in plan.milestones_json],
-        updated_at=plan.updated_at.isoformat(),
+    return _plan_current_out(session, user_id=user_id, goal=goal, plan=plan)
+
+
+@router.patch("/plans/{plan_id}/milestones/{milestone_id}", response_model=MilestonePatchOut)
+def patch_plan_milestone(
+    plan_id: str,
+    milestone_id: str,
+    body: MilestonePatchIn,
+    user_id: Annotated[str, Depends(get_user_id)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
+    repo = PlanRepository(session)
+    try:
+        updated, event = repo.set_milestone_done_with_event(
+            plan_id=plan.id,
+            milestone_id=milestone_id,
+            done=body.done,
+            actor="user",
+            reason="User marked milestone complete" if body.done else "User reopened milestone",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    refreshed = repo.get_by_goal(goal.id)
+    current = _plan_current_out(session, user_id=user_id, goal=goal, plan=refreshed)
+    milestone_out = next((m for m in current.milestones if m.id == updated.id), None)
+    show_quiz = bool(body.done and milestone_out and milestone_out.validation_recommended)
+    return MilestonePatchOut(
+        plan=current,
+        event=PlanEventOut(
+            id=event.id,
+            plan_id=event.plan_id,
+            milestone_id=event.milestone_id,
+            actor=event.actor,
+            action=event.action,
+            before_json=event.before_json,
+            after_json=event.after_json,
+            reason=event.reason,
+            created_at=event.created_at.isoformat(),
+        ),
+        validation_hint=ValidationHintOut(
+            show_quick_quiz=show_quiz,
+            topic=milestone_out.topic if milestone_out else None,
+            reason="Topic mastery is still below the validation threshold" if show_quiz else None,
+        ),
     )
+
+
+@router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
+def get_plan_events(
+    plan_id: str,
+    user_id: Annotated[str, Depends(get_user_id)],
+    session: Annotated[Session, Depends(get_session)],
+    limit: int = 20,
+):
+    _goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
+    return [
+        PlanEventOut(
+            id=e.id,
+            plan_id=e.plan_id,
+            milestone_id=e.milestone_id,
+            actor=e.actor,
+            action=e.action,
+            before_json=e.before_json,
+            after_json=e.after_json,
+            reason=e.reason,
+            created_at=e.created_at.isoformat(),
+        )
+        for e in PlanRepository(session).list_events(plan.id, limit=limit)
+    ]
 
 
 @router.get("/documents", response_model=list[DocumentOut])
