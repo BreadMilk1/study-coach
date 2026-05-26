@@ -84,10 +84,17 @@ export async function getJSON<T>(path: string): Promise<T> {
 }
 
 export interface MilestoneDto {
+  id: string | null
   title: string
   due_at: string | null
   done: boolean
+  completed_at: string | null
+  topic_id: string | null
   topic: string | null
+  mastery_score: number | null
+  validation_recommended: boolean
+  sort_order: number | null
+  source: string | null
 }
 
 export interface PlanCurrentDto {
@@ -100,6 +107,51 @@ export interface PlanCurrentDto {
 
 export function getCurrentPlan(): Promise<PlanCurrentDto> {
   return getJSON<PlanCurrentDto>('/api/plans/current')
+}
+
+export interface PlanEventDto {
+  id: string
+  plan_id: string
+  milestone_id: string | null
+  actor: string
+  action: string
+  before_json: Record<string, unknown> | null
+  after_json: Record<string, unknown> | null
+  reason: string | null
+  created_at: string
+}
+
+export interface ValidationHintDto {
+  show_quick_quiz: boolean
+  topic: string | null
+  reason: string | null
+}
+
+export interface MilestonePatchDto {
+  plan: PlanCurrentDto
+  event: PlanEventDto
+  validation_hint: ValidationHintDto
+}
+
+export async function patchMilestoneDone(
+  planId: string,
+  milestoneId: string,
+  done: boolean,
+): Promise<MilestonePatchDto> {
+  const resp = await fetch(`/api/plans/${planId}/milestones/${milestoneId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-fingerprint': getFingerprint(),
+    },
+    body: JSON.stringify({ done }),
+  })
+  if (!resp.ok) throw new Error(`milestone update failed: ${resp.status}`)
+  return resp.json() as Promise<MilestonePatchDto>
+}
+
+export function getPlanEvents(planId: string, limit = 20): Promise<PlanEventDto[]> {
+  return getJSON<PlanEventDto[]>(`/api/plans/${planId}/events?limit=${limit}`)
 }
 
 export interface MistakeQuestionDto {
