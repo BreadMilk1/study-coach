@@ -134,7 +134,7 @@ function nextQuestion() {
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-8">
+  <div class="h-full overflow-y-auto p-8 max-md:p-4">
     <div class="max-w-3xl mx-auto">
       <header class="flex items-center justify-between mb-6">
         <div class="flex items-center gap-2">
@@ -169,7 +169,7 @@ function nextQuestion() {
             Topic: <span class="font-mono text-fg">{{ topicHint }}</span>
           </p>
           <button @click="generate"
-                  class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-2 transition-colors">
+                  class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-2 transition-colors max-md:py-3">
             {{ $t('quiz.generate') }}
           </button>
         </div>

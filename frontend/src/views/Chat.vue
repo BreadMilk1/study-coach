@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, nextTick, useTemplateRef } from 'vue'
+import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useChat } from '../stores/chat'
 import { useSettings } from '../stores/settings'
 import { streamChat } from '../lib/api'
@@ -7,8 +8,19 @@ import TracePanel from '../components/TracePanel.vue'
 
 const chat = useChat()
 const settings = useSettings()
+const route = useRoute()
+const router = useRouter()
 const input = ref('')
 const scrollEl = useTemplateRef<HTMLDivElement>('scrollEl')
+
+onMounted(() => {
+  const autoText = route.query.auto as string | undefined
+  if (autoText) {
+    input.value = autoText
+    send()
+    router.replace({ query: { goal_id: route.query.goal_id } })
+  }
+})
 
 async function send() {
   const text = input.value.trim()
@@ -36,11 +48,11 @@ async function send() {
 
 <template>
   <div class="h-full flex flex-col">
-    <div ref="scrollEl" class="flex-1 overflow-y-auto p-6 space-y-4">
+    <div ref="scrollEl" class="flex-1 overflow-y-auto p-6 space-y-4 max-md:p-3">
       <div v-if="chat.messages.length === 0" class="text-white/40 text-center mt-20">
         Upload a PDF in <RouterLink to="/library" class="underline">Library</RouterLink>, then ask a question.
       </div>
-      <div v-for="m in chat.messages" :key="m.id" class="max-w-3xl mx-auto">
+      <div v-for="m in chat.messages" :key="m.id" class="max-w-3xl mx-auto max-md:max-w-full">
         <div :class="m.role === 'user' ? 'text-right' : ''">
           <div :class="[
             'inline-block px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap',
@@ -56,11 +68,11 @@ async function send() {
         </div>
       </div>
     </div>
-    <form @submit.prevent="send" class="border-t border-white/5 p-4 flex gap-2">
+    <form @submit.prevent="send" class="border-t border-white/5 p-4 flex gap-2 max-md:fixed max-md:bottom-14 max-md:left-0 max-md:right-0 max-md:px-3 max-md:py-2 max-md:bg-bg">
       <input v-model="input" :disabled="chat.streaming" :placeholder="$t('chat.placeholder')"
              class="flex-1 bg-white/5 px-4 py-2 rounded-lg outline-none border border-transparent focus:border-indigo-400/40" />
       <button type="submit" :disabled="chat.streaming || !input.trim()"
-              class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed">
+              class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed max-md:min-h-12 max-md:min-w-12">
         {{ chat.streaming ? '…' : $t('chat.send') }}
       </button>
     </form>

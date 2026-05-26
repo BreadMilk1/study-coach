@@ -4,6 +4,10 @@ import {
   LayoutDashboard, MessageSquare, ListTodo, BookOpen,
   AlertTriangle, FolderOpen, Settings as SettingsIcon,
 } from 'lucide-vue-next'
+import { useMediaQuery } from './composables/useMediaQuery'
+import MobileNav from './components/MobileNav.vue'
+
+const isMobile = useMediaQuery('(max-width: 767px)')
 
 const navSections = [
   {
@@ -33,7 +37,7 @@ const navSections = [
 
 <template>
   <div class="h-full flex">
-    <nav class="w-56 bg-surface p-4 flex flex-col gap-1 border-r border-border">
+    <nav v-if="!isMobile" class="w-56 bg-surface p-4 flex flex-col gap-1 border-r border-border">
       <h1 class="text-lg font-semibold mb-4 px-2">Study Coach</h1>
       <template v-for="section in navSections" :key="section.label">
         <div class="px-2 text-[10px] uppercase tracking-wider text-fg-dim mt-3 mb-1">
@@ -52,8 +56,9 @@ const navSections = [
       </template>
       <div class="mt-auto text-xs text-fg-dim px-2">P3 · productized shell</div>
     </nav>
-    <main class="flex-1 overflow-hidden">
+    <main class="flex-1 overflow-hidden" :class="{ 'pb-14': isMobile }">
       <RouterView />
     </main>
+    <MobileNav v-if="isMobile" />
   </div>
 </template>

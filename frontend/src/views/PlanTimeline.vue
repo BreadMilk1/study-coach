@@ -57,7 +57,7 @@ async function checkIn() {
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-8">
+  <div class="h-full overflow-y-auto p-8 max-md:p-4">
     <div class="max-w-4xl mx-auto">
       <header class="flex items-center justify-between mb-6">
         <div>

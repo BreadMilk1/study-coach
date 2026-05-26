@@ -20,7 +20,7 @@ function submit() {
     <div role="radiogroup" aria-label="Options" class="flex flex-col gap-2">
       <label v-for="opt in options" :key="opt"
              :class="[
-               'flex items-start gap-3 rounded-md border p-3 cursor-pointer transition-colors',
+               'flex items-start gap-3 rounded-md border p-3 cursor-pointer transition-colors max-md:min-h-12',
                selected === opt[0]
                  ? 'border-primary-ring bg-primary-bg'
                  : 'border-border hover:bg-white/5'
