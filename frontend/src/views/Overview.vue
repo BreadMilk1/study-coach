@@ -9,6 +9,7 @@ import PlanProgressCard from '../components/PlanProgressCard.vue'
 import MistakesDueCard from '../components/MistakesDueCard.vue'
 import WeakTopicsChips from '../components/WeakTopicsChips.vue'
 import RadarChart from '../components/RadarChart.vue'
+import HeatmapCard from '../components/HeatmapCard.vue'
 
 const overview = useOverview()
 const docs = useDocuments()
@@ -38,6 +39,7 @@ onMounted(() => overview.fetchAll())
       </div>
 
       <RadarChart />
+      <HeatmapCard />
     </div>
   </div>
 </template>
