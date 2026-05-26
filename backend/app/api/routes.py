@@ -1,10 +1,11 @@
 import hashlib
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict
@@ -166,8 +167,9 @@ def _plan_current_out(session: Session, *, user_id: str, goal, plan) -> PlanCurr
 
 
 @router.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+def health(request: Request) -> dict:
+    ollama_enabled = os.environ.get("OLLAMA_ENABLED", "true").lower() == "true"
+    return {"status": "ok", "ollama_enabled": ollama_enabled}
 
 
 class ToolCapableOut(BaseModel):

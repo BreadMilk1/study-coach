@@ -111,7 +111,8 @@ def client(app):
 def test_health_endpoint(client):
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json()["status"] == "ok"
+    assert "ollama_enabled" in r.json()
 
 
 def test_chat_streams_citations_then_tokens_then_done(client):
