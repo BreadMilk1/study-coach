@@ -149,10 +149,32 @@ async def generate_quiz(
 
     questions: list[QuizQuestion] = []
     for item in parsed[:n]:
+        options = item.get("options", [])
+        # Small local LLMs sometimes flatten options into a string ("A) x, B) y, ...")
+        # instead of a proper JSON array. list() on a string splits into characters,
+        # which corrupts the stored data and produces per-character line breaks when
+        # joined with \n for rendering.
+        if isinstance(options, str):
+            # Split on option-letter boundaries: "A) xyz B) abc" → ["A) xyz", "B) abc"]
+            parts = re.split(r'(?=[A-D]\) )', options)
+            parts = [p.strip().rstrip(',') for p in parts if p.strip()]
+            if len(parts) == 4:
+                options = parts
+            else:
+                raise ValueError(
+                    f"LLM returned options as a string but couldn't parse 4 choices "
+                    f"(got {len(parts)}): {options[:200]!r}"
+                )
+        options_list = list(options)
+        if not isinstance(options_list, list) or len(options_list) != 4:
+            raise ValueError(
+                f"Expected 4 option strings, got {type(options).__name__} "
+                f"len={len(options_list)}: {str(options)[:200]!r}"
+            )
         row = question_repo.create(
             topic_id=topic_id,
             prompt=item["prompt"],
-            options_json=list(item["options"]),
+            options_json=options_list,
             answer=item["answer"],
             explanation=item["explanation"],
         )

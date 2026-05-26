@@ -189,7 +189,7 @@ def test_mistake_repo_filters_to_due_in_order(session):
     q = questions.create(
         topic_id=topic.id,
         prompt="?",
-        options_json=["A", "B"],
+        options_json=["A", "B", "C", "D"],
         answer="A",
         explanation="",
     )

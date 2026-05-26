@@ -6,7 +6,7 @@ import { parseQuizAssistantText } from './quiz.ts'
 test('parses deterministic quiz question into MCQ state', () => {
   const parsed = parseQuizAssistantText(
     [
-      'Quiz on HyDE:',
+      '📝 Quiz on HyDE:',
       '',
       'What does HyDE rewrite?',
       '',

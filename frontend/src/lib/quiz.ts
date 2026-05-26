@@ -15,8 +15,8 @@ export type ParsedQuizAssistantText =
   | { kind: 'none' }
 
 const OPTION_BLOCK_RE =
-  /^\s*A\)\s*([^\n]+)\n\s*B\)\s*([^\n]+)\n\s*C\)\s*([^\n]+)\n\s*D\)\s*([^\n]+)$/m
-const GRADE_START_RE = /^\s*(?:[✓✔]|✗|Correct\b|Incorrect\b|Wrong\b)/i
+  /^\s*A\)\s*(.+)\n\s*B\)\s*(.+)\n\s*C\)\s*(.+)\n\s*D\)\s*(.+)\s*$/m
+const GRADE_START_RE = /^\s*(?:[✓✔📝]|✗|Correct\b|Incorrect\b|Wrong\b)/i
 
 function stripMarkdown(text: string): string {
   return text
@@ -34,6 +34,10 @@ function extractPrompt(prefix: string): string {
 
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (lines[i].includes('?')) return lines[i]
+  }
+  // Fall back to last non-trivial line (skip "Quiz on ...:" header lines)
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!lines[i].endsWith(':')) return lines[i]
   }
   return lines.at(-1) ?? ''
 }
@@ -67,12 +71,10 @@ function parseGrade(text: string): ParsedQuizAssistantText | null {
   const incorrect = /(?:\bincorrect\b|\bwrong\b|✗)/i.test(normalized)
   const correct = !incorrect
 
-  const explanationMatch = /explanation:\s*([\s\S]+)$/i.exec(normalized)
-  let explanation = explanationMatch?.[1]?.trim() ?? normalized
+  // Extract explanation: everything after the verdict prefix
+  let explanation = normalized
   explanation = explanation
-    .replace(/^\s*[✓✔]\s*Correct!?\s*/i, '')
-    .replace(/^\s*✗\s*Incorrect\.?\s*/i, '')
-    .replace(/^\s*Wrong\.?\s*/i, '')
+    .replace(/^.*?(?:[✓✔]\s*Correct!?\s*|✗\s*Incorrect\.?\s*|Wrong\.?\s*)/i, '')
     .replace(/Correct answer:\s*[A-D]\.?\s*/i, '')
     .trim()
 

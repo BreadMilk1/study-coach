@@ -410,11 +410,17 @@ class QuestionRepository:
         answer: str,
         explanation: str,
     ) -> Question:
+        options = list(options_json)
+        if len(options) != 4 or not all(isinstance(o, str) for o in options):
+            raise ValueError(
+                f"options_json must be 4 strings (e.g. 'A) ...'), "
+                f"got len={len(options)}: {str(options)[:120]!r}"
+            )
         question = Question(
             id=_uuid(),
             topic_id=topic_id,
             prompt=prompt,
-            options_json=list(options_json),
+            options_json=options,
             answer=answer,
             explanation=explanation,
         )
@@ -521,6 +527,27 @@ class MistakeRepository:
             .limit(limit)
         )
         return [row for row in self.session.execute(stmt).scalars()]
+
+    def get_by_id(self, mistake_id: str) -> Mistake | None:
+        return self.session.get(Mistake, mistake_id)
+
+    def update_srs(
+        self,
+        mistake_id: str,
+        *,
+        interval_days: int,
+        ease: float,
+        due_at: datetime,
+    ) -> Mistake | None:
+        row = self.session.get(Mistake, mistake_id)
+        if row is None:
+            return None
+        row.srs_interval_days = interval_days
+        row.srs_ease = ease
+        row.srs_due_at = due_at
+        self.session.commit()
+        self.session.refresh(row)
+        return row
 
     def list_due_with_details(
         self,
