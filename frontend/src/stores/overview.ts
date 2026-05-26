@@ -12,7 +12,7 @@ export const useOverview = defineStore('overview', () => {
   const d = useDocuments()
 
   async function fetchAll() {
-    await Promise.all([m.fetch(), x.fetch(), d.fetch(), p.fetch().catch(() => {})])
+    await Promise.all([m.fetch(), x.fetch(true), d.fetch(), p.fetch().catch(() => {})])
   }
 
   const topMastery = computed(() =>

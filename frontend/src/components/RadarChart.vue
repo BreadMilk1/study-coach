@@ -25,10 +25,16 @@ const data = computed(() => {
   const planProgress = !plan.plan || plan.plan.milestones.length === 0
     ? 0
     : plan.plan.milestones.filter(m => m.done).length / plan.plan.milestones.length
-  // Quiz "accuracy" = 1 - normalizedMistakes; cap due count at 20 for normalization.
-  const quizAccuracy = Math.max(0, 1 - Math.min(mistakes.due.length, 20) / 20)
-  // Streak — P4. Placeholder = 0.5 if any activity, else 0.
-  const streak = (mastery.data.scores.length || mistakes.due.length) ? 0.5 : 0
+  // Quiz accuracy: proxy via mastered-mistake ratio.
+  // No quiz activity → 0 (no data). Mistakes with interval >= 7 (well-learned)
+  // count positively; small intervals drag score down. Floor at 5 for stability.
+  const totalTracked = mistakes.items.length
+  const quizAccuracy = totalTracked === 0
+    ? 0
+    : Math.min(1, mistakes.items.filter(m => m.srs_interval_days >= 7).length / Math.max(totalTracked, 5))
+  // Streak — P4. Placeholder = 0.5 if any quiz activity, else 0.
+  const hasActivity = mastery.data.scores.length > 0 || mistakes.items.length > 0
+  const streak = hasActivity ? 0.5 : 0
   // Coverage = doc count / 5 capped at 1.
   const coverage = Math.min(docs.docs.length / 5, 1)
 

@@ -203,3 +203,64 @@ export interface MasteryDto {
 export function getMastery(): Promise<MasteryDto> {
   return getJSON<MasteryDto>('/api/mastery')
 }
+
+export interface ToolCheckDto {
+  tool_capable: boolean
+  model: string
+  note: string
+}
+
+export async function checkToolCapable(s: any): Promise<ToolCheckDto> {
+  const headers: Record<string, string> = {
+    'x-provider': s.provider,
+    'x-model': s.model,
+  }
+  if (s.apiKey) headers['x-api-key'] = s.apiKey
+  if (s.baseUrl) headers['x-base-url'] = s.baseUrl
+  const resp = await fetch('/api/models/tool-check', { headers })
+  if (!resp.ok) throw new Error(`tool-check failed: ${resp.status}`)
+  return resp.json() as Promise<ToolCheckDto>
+}
+
+export interface MistakeReviewOut {
+  correct: boolean
+  correct_answer: string
+  explanation: string
+  new_interval_days: number
+  next_due_at: string
+}
+
+export async function reviewMistake(
+  mistakeId: string,
+  answer: string,
+): Promise<MistakeReviewOut> {
+  const resp = await fetch(`/api/mistakes/${mistakeId}/review`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-fingerprint': getFingerprint(),
+    },
+    body: JSON.stringify({ answer }),
+  })
+  if (!resp.ok) throw new Error(`review failed: ${resp.status}`)
+  return resp.json() as Promise<MistakeReviewOut>
+}
+
+export interface PingDto {
+  ok: boolean
+  model: string
+  latency_ms: number
+  note: string
+}
+
+export async function pingModel(s: any): Promise<PingDto> {
+  const headers: Record<string, string> = {
+    'x-provider': s.provider,
+    'x-model': s.model,
+  }
+  if (s.apiKey) headers['x-api-key'] = s.apiKey
+  if (s.baseUrl) headers['x-base-url'] = s.baseUrl
+  const resp = await fetch('/api/models/ping', { headers })
+  if (!resp.ok) throw new Error(`ping failed: ${resp.status}`)
+  return resp.json() as Promise<PingDto>
+}

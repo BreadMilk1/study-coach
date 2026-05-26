@@ -11,21 +11,40 @@ interface SettingsState {
   judgeModel: string
   defaultPlannerMode: Mode
   defaultQuizMode: Mode
+  toolCapable: boolean | null  // null = untested, true/false = tested result
 }
 
 const STORAGE_KEY = 'study-coach:settings'
+
+const TOOL_CAPABLE_KEY = 'study-coach:tool-capable'
+
+function loadToolCapable(model: string): boolean | null {
+  try {
+    const raw = localStorage.getItem(`${TOOL_CAPABLE_KEY}:${model}`)
+    if (raw === 'true') return true
+    if (raw === 'false') return false
+  } catch { /* empty */ }
+  return null
+}
+
+function persistToolCapable(model: string, capable: boolean) {
+  localStorage.setItem(`${TOOL_CAPABLE_KEY}:${model}`, String(capable))
+}
 
 function loadInitial(): SettingsState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      // back-fill new fields (existing localStorage may not have them)
-      return {
-        defaultPlannerMode: 'agent_loop',
-        defaultQuizMode: 'agent_loop',
+      const base = {
+        defaultPlannerMode: 'agent_loop' as Mode,
+        defaultQuizMode: 'agent_loop' as Mode,
+        toolCapable: null as boolean | null,
         ...parsed,
       }
+      // Restore per-model tool-capable cache (not stored in settings JSON)
+      base.toolCapable = loadToolCapable(base.model)
+      return base
     }
   } catch {
     /* empty */
@@ -36,8 +55,9 @@ function loadInitial(): SettingsState {
     apiKey: '',
     baseUrl: '',
     judgeModel: '',
-    defaultPlannerMode: 'agent_loop',
-    defaultQuizMode: 'agent_loop',
+    defaultPlannerMode: 'agent_loop' as Mode,
+    defaultQuizMode: 'agent_loop' as Mode,
+    toolCapable: null,
   }
 }
 
@@ -46,6 +66,10 @@ export const useSettings = defineStore('settings', {
   actions: {
     persist() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.$state))
+    },
+    setToolCapable(capable: boolean) {
+      this.toolCapable = capable
+      persistToolCapable(this.model, capable)
     },
   },
 })

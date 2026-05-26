@@ -17,11 +17,11 @@ export const useMistakes = defineStore('mistakes', {
     due: (s) => s.items.filter(isDue),
   },
   actions: {
-    async fetch() {
+    async fetch(includeFuture = false) {
       this.loading = true
       this.error = null
       try {
-        this.items = await getMistakesDue(50, true)
+        this.items = await getMistakesDue(50, includeFuture)
       } catch (e: any) {
         this.error = e?.message ?? 'failed'
       } finally {

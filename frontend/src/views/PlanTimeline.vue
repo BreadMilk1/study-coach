@@ -7,16 +7,20 @@ import { streamChat, type MilestoneDto } from '../lib/api'
 import MilestoneList from '../components/MilestoneList.vue'
 import ModeChip from '../components/ModeChip.vue'
 import MindmapPanel from '../components/MindmapPanel.vue'
+import InfoPopover from '../components/InfoPopover.vue'
 
 const planStore = usePlan()
 const settings = useSettings()
 const router = useRouter()
-const mode = ref<Mode>(settings.defaultPlannerMode)
+const mode = ref<Mode>(
+  settings.toolCapable === false ? 'deterministic' : settings.defaultPlannerMode
+)
 const checkInLoading = ref(false)
 
 onMounted(() => planStore.fetch())
 
 function toggleMode() {
+  if (settings.toolCapable === false) return
   mode.value = mode.value === 'agent_loop' ? 'deterministic' : 'agent_loop'
 }
 
@@ -37,8 +41,13 @@ async function checkIn() {
     '进度怎么样了',
     settings.$state,
     {
-      onDone: () => { planStore.fetch(); mode.value = settings.defaultPlannerMode },
-      onError: () => { mode.value = settings.defaultPlannerMode },
+      onDone: () => {
+        planStore.fetch()
+        if (settings.toolCapable !== false) mode.value = settings.defaultPlannerMode
+      },
+      onError: () => {
+        if (settings.toolCapable !== false) mode.value = settings.defaultPlannerMode
+      },
     },
     { plannerMode: nextMode },
   )
@@ -51,7 +60,15 @@ async function checkIn() {
     <div class="max-w-4xl mx-auto">
       <header class="flex items-center justify-between mb-6">
         <div>
-          <h1 class="text-2xl font-semibold">Plan</h1>
+          <div class="flex items-center gap-2">
+            <h1 class="text-2xl font-semibold">Plan</h1>
+            <InfoPopover title="Plan 功能说明">
+              <p>Plan 是你的 AI 学习规划器，根据目标考试生成 milestone 时间线。</p>
+              <p><strong>关联 Quiz：</strong>每个 milestone 可点击 Validate with quiz 跳转到 Quiz 生成对应主题的测试题。Quiz 的 Mastery Score 反馈回 Plan，决定 milestone 是否"验证通过"。</p>
+              <p><strong>Check In：</strong>点击 Check In 让 AI 评估当前进度并调整计划。使用 Agent Loop 模式可获得更智能的进度分析。</p>
+              <p><strong>思维导图：</strong>Agent Loop 模式会自动生成知识导图，可视化知识点关联。</p>
+            </InfoPopover>
+          </div>
           <p v-if="planStore.plan" class="text-sm text-fg-muted mt-1">
             {{ planStore.plan.goal_title }} ·
             <span class="font-mono">{{ planStore.plan.milestones.length }} milestones</span>
