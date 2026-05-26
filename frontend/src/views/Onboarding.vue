@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import StepName from '../components/onboarding/StepName.vue'
 import StepDate from '../components/onboarding/StepDate.vue'
 import StepUpload from '../components/onboarding/StepUpload.vue'
-import { getFingerprint } from '../lib/fingerprint'
+import { authHeaders } from '../stores/settings'
 
 const router = useRouter()
 const step = ref(1)
@@ -18,7 +18,7 @@ async function onUploadDone() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-fingerprint': getFingerprint(),
+      ...authHeaders(),
     },
     body: JSON.stringify({ title: goalTitle.value, exam_date: examDate.value || null }),
   })

@@ -1,5 +1,7 @@
-import { getFingerprint } from './fingerprint'
-import { llmHeaders, type ModeOverrides } from '../stores/settings'
+import { authHeaders, getAccessToken, llmHeaders, type ModeOverrides } from '../stores/settings'
+
+// Auto-provision anonymous token on module load
+getAccessToken()
 import type { Citation } from '../stores/chat'
 
 interface ChatStreamCallbacks {
@@ -21,7 +23,7 @@ export async function streamChat(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-fingerprint': getFingerprint(),
+        ...authHeaders(),
         ...llmHeaders(settings, overrides),
       },
       body: JSON.stringify({ message }),
@@ -63,7 +65,7 @@ export async function uploadDocument(file: File): Promise<{
   form.append('file', file)
   const resp = await fetch('/api/documents', {
     method: 'POST',
-    headers: { 'x-fingerprint': getFingerprint() },
+    headers: { ...authHeaders() },
     body: form,
   })
   if (!resp.ok) throw new Error(`upload failed: ${resp.status}`)
@@ -73,7 +75,7 @@ export async function uploadDocument(file: File): Promise<{
 // P3 — typed GET helper. Backend resolves user via x-fingerprint header.
 export async function getJSON<T>(path: string): Promise<T> {
   const resp = await fetch(path, {
-    headers: { 'x-fingerprint': getFingerprint() },
+    headers: { ...authHeaders() },
   })
   if (resp.status === 404) {
     // Caller decides whether 404 is data-empty or hard error.
@@ -144,7 +146,7 @@ export async function patchMilestoneDone(
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
-      'x-fingerprint': getFingerprint(),
+      ...authHeaders(),
     },
     body: JSON.stringify({ done }),
   })
@@ -240,7 +242,7 @@ export async function reviewMistake(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-fingerprint': getFingerprint(),
+      ...authHeaders(),
     },
     body: JSON.stringify({ answer }),
   })
@@ -294,7 +296,7 @@ export async function reorderMilestones(
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
-      'x-fingerprint': getFingerprint(),
+      ...authHeaders(),
     },
     body: JSON.stringify({ milestone_ids: milestoneIds }),
   })
@@ -308,7 +310,7 @@ export async function markMistakeUnderstood(mistakeId: string): Promise<{
 }> {
   const resp = await fetch(`/api/mistakes/${mistakeId}/mark-understood`, {
     method: 'POST',
-    headers: { 'x-fingerprint': getFingerprint() },
+    headers: { ...authHeaders() },
   })
   if (!resp.ok) throw new Error(`mark-understood failed: ${resp.status}`)
   return resp.json()

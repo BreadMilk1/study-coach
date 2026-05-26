@@ -14,9 +14,79 @@ interface SettingsState {
   toolCapable: boolean | null  // null = untested, true/false = tested result
   debugMode: boolean
   language: 'en' | 'zh-CN'
+  accessToken: string
+  tier: 'guest' | 'member'
 }
 
 const STORAGE_KEY = 'study-coach:settings'
+
+let _tokenPromise: Promise<string> | null = null
+
+export async function getAccessToken(): Promise<string> {
+  const raw = localStorage.getItem(STORAGE_KEY)
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed.accessToken) return parsed.accessToken
+    } catch { /* ignore */ }
+  }
+  // No token yet — provision anonymous
+  if (!_tokenPromise) {
+    _tokenPromise = (async () => {
+      const fp = crypto.randomUUID()
+      const stored = localStorage.getItem('study-coach:fingerprint')
+      const fingerprint = stored || fp
+      if (!stored) localStorage.setItem('study-coach:fingerprint', fingerprint)
+      const resp = await fetch('/api/auth/anonymous', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fingerprint }),
+      })
+      if (!resp.ok) throw new Error('anonymous auth failed')
+      const { access_token, tier } = await resp.json()
+      // Persist token into settings
+      const existingRaw = localStorage.getItem(STORAGE_KEY)
+      const existing = existingRaw ? JSON.parse(existingRaw) : {}
+      existing.accessToken = access_token
+      existing.tier = tier || 'guest'
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(existing))
+      return access_token as string
+    })()
+  }
+  return _tokenPromise
+}
+
+export function authHeaders(): Record<string, string> {
+  // Synchronous fallback: return bearer header if we have it in storage.
+  // For first-ever call, the fetch will still work because backend
+  // falls back to "default-user" when no token is present.
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed.accessToken) {
+        return { Authorization: `Bearer ${parsed.accessToken}` }
+      }
+    }
+  } catch { /* ignore */ }
+  return {}
+}
+
+export async function googleLogin(credential: string): Promise<void> {
+  const resp = await fetch('/api/auth/google', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ credential }),
+  })
+  if (!resp.ok) throw new Error('Google login failed')
+  const { access_token, tier } = await resp.json()
+  const existingRaw = localStorage.getItem(STORAGE_KEY)
+  const existing = existingRaw ? JSON.parse(existingRaw) : {}
+  existing.accessToken = access_token
+  existing.tier = tier || 'member'
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(existing))
+  _tokenPromise = null  // reset cache
+}
 
 const TOOL_CAPABLE_KEY = 'study-coach:tool-capable'
 
@@ -64,6 +134,8 @@ function loadInitial(): SettingsState {
     toolCapable: null,
     debugMode: false,
     language: 'en',
+    accessToken: '',
+    tier: 'guest' as const,
   }
 }
 
