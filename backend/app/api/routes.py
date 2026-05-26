@@ -611,8 +611,9 @@ def mark_mistake_understood(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
+    from datetime import datetime, timedelta
+
     from app.db.repositories import MasteryRepository, MistakeRepository, QuestionRepository
-    from app.srs.sm2 import next_schedule
 
     mistake = MistakeRepository(session).get_by_id(mistake_id)
     if mistake is None or mistake.user_id != user_id:
@@ -622,23 +623,23 @@ def mark_mistake_understood(
     if question is None:
         raise HTTPException(status_code=404, detail="question not found")
 
-    sched = next_schedule(
-        quality=5,
-        previous_interval_days=mistake.srs_interval_days,
-        previous_ease=mistake.srs_ease,
-    )
+    # "Mark understood" means the learner explicitly says "I get this, don't
+    # ask again."  Set a far-future due date (~100 years out) so the mistake
+    # never reappears in the due list, rather than using SM-2 which would
+    # give only a short interval (e.g. 6 days for quality=5, interval=1).
+    far_future = datetime.utcnow() + timedelta(days=36500)
     MistakeRepository(session).update_srs(
         mistake_id=mistake.id,
-        interval_days=sched.interval_days,
-        ease=sched.ease,
-        due_at=sched.due_at,
+        interval_days=36500,
+        ease=2.5,
+        due_at=far_future,
     )
     new_score = MasteryRepository(session).apply_delta(
         user_id=user_id, topic_id=question.topic_id, delta=0.1,
     )
     return MarkUnderstoodOut(
         mastery_score=new_score,
-        next_due_at=sched.due_at.isoformat(),
+        next_due_at=far_future.isoformat(),
     )
 
 

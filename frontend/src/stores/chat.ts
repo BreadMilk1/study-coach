@@ -19,12 +19,14 @@ export interface Message {
 interface ChatState {
   messages: Message[]
   streaming: boolean
+  trace: any[]
 }
 
 export const useChat = defineStore('chat', {
   state: (): ChatState => ({
     messages: [],
     streaming: false,
+    trace: [],
   }),
   actions: {
     pushUser(content: string) {

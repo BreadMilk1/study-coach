@@ -5,6 +5,7 @@ import type { Citation } from '../stores/chat'
 interface ChatStreamCallbacks {
   onCitations?: (cs: Citation[]) => void
   onToken?: (text: string) => void
+  onTrace?: (step: any) => void
   onDone?: () => void
   onError?: (err: unknown) => void
 }
@@ -43,6 +44,7 @@ export async function streamChat(
           const event = JSON.parse(json)
           if (event.type === 'token') cb.onToken?.(event.text)
           else if (event.type === 'citations') cb.onCitations?.(event.citations)
+          else if (event.type === 'trace') cb.onTrace?.(event)
           else if (event.type === 'done') cb.onDone?.()
         } catch { /* ignore malformed */ }
       }

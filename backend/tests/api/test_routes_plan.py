@@ -91,7 +91,7 @@ def test_chat_plan_generate_emits_citations_token_done(client):
     assert response.status_code == 200
     events = _parse_events(response.text)
     types = [e["type"] for e in events]
-    assert types[0] == "citations"
+    first_citations_idx = next(i for i, t in enumerate(types) if t == "citations")
     assert "token" in types
     assert types[-1] == "done"
     token_event = next(e for e in events if e["type"] == "token")

@@ -132,12 +132,12 @@ def test_chat_streams_citations_then_tokens_then_done(client):
                 events.append(json.loads(line[6:]))
 
     types = [e["type"] for e in events]
-    assert types[0] == "citations"
     assert types[-1] == "done"
     token_events = [e for e in events if e["type"] == "token"]
     assert "".join(e["text"] for e in token_events) == "HyDE is a technique."
-    citation_event = events[0]
-    assert citation_event["citations"][0]["chunk_id"] == "a:1:0"
+    citation_events = [e for e in events if e["type"] == "citations"]
+    assert len(citation_events) == 1
+    assert citation_events[0]["citations"][0]["chunk_id"] == "a:1:0"
 
 
 def test_upload_document_calls_processor_and_indexes_chunks(client, stub_retriever, stub_document_processor):

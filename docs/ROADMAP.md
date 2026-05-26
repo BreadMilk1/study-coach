@@ -3,14 +3,15 @@
 > Phase history + priority backlog. Current state: P3 shipped; P4 is the next product / deploy hardening target.
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
-## Current Snapshot (2026-05-25)
+## Current Snapshot (2026-05-26)
 
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
 - **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider.
 - **Agent graph**: memory hydrator → router → Tutor / QuizMaster / Planner → Judge Guard → memory writer.
 - **Frontend**: Vue 3 P3 shell with 7 views: Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings.
 - **Eval evidence**: P2.0 retrieval eval, P2.2 Plan agent-loop ablation, P2.3 Quiz agent-loop ablation.
-- **Verification baseline**: 214 backend tests passing; frontend production build passing.
+- **Verification baseline**: 233 backend tests passing; frontend production build passing.
+- **Recent (2026-05-26)**: Plan milestone progression shipped; quiz option corruption fix; tool-call capability detection + connectivity test; mistake redo with SRS backend integration; info popovers for feature explanations; radar quiz accuracy formula fix; Mistake Bank SRS filtering.
 
 ## P0 — Done
 
@@ -284,6 +285,12 @@ Priority order:
 - Real OAuth (FingerprintJS-anonymous tier becomes guest mode)
 - Real streak + coverage computation (sessions activity log + chunk-coverage metric)
 - [x] Plan milestone progression: stable milestone ids, manual complete/reopen, plan events, and mastery-linked quick quiz prompt. Spec: `docs/superpowers/specs/2026-05-26-plan-milestone-progression-design.md`
+- [x] Quiz option corruption fix: defensive string→list parsing in `generate_quiz()` when local LLMs flatten JSON arrays; `QuestionRepository.create()` validation guard. Caused per-character vertical render of quiz options.
+- [x] Tool-call capability detection: `GET /api/models/tool-check` endpoint probes model with dummy tool; frontend caches per-model result in localStorage; agent_loop locked to deterministic when unsupported. `GET /api/models/ping` for connectivity testing.
+- [x] Mistake redo with SRS backend integration: `POST /api/mistakes/{id}/review` grades answer, updates SM-2 schedule + mastery score. Frontend calls backend instead of local grading; next-question chains through `mistakes.due`.
+- [x] Info popovers (Quiz / Plan / Mistake Bank): reusable `InfoPopover` component explaining feature interconnections + SM-2 logic.
+- [x] RadarChart quiz accuracy: formula changed from `1 - due/20` (was always 1 for new users) to mastered-mistake ratio (`interval >= 7` / total tracked).
+- [x] Mistake Bank SRS filtering: default "Due only" (`include_future=false`); "Show all" toggle for full history.
 - Drag-reorder milestones on `/plan` (milestone completion is interactive; ordering is not yet editable)
 - Mistake batch mode / "mark as understood" without re-quiz
 - Library auto-redirect after upload (the `?return=` query is groundwork)

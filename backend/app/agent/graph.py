@@ -63,6 +63,14 @@ _PLAN_STUB_MESSAGE = (
 _MAX_RETRIES = 2
 
 
+def _safe_writer():
+    """Return stream_writer if in streaming context, else None."""
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return None
+
+
 def _retry_hint(previous_score: float, weak_dims: list[str], reasoning: str) -> str:
     dims_str = ", ".join(weak_dims) if weak_dims else "none"
     return (
@@ -102,19 +110,28 @@ def build_graph(*, retriever, llm, checkpointer=None):
         # State-aware override: if a quiz turn is in flight, route to quiz
         # regardless of message content (the user is answering, not asking).
         if state.get("active_quiz_question_id"):
-            return {"intent": "quiz"}
-        last_user = state["messages"][-1].content
-        base_intent = route_intent(last_user)
-        # P2.1-⑤ — plan stickiness: keep user in plan chain ONLY when the
-        # message doesn't carry an explicit tutor/quiz signal. This lets
-        # users ask questions or take quizzes mid-plan without switching session.
-        if state.get("active_plan_id") and base_intent == "plan":
-            return {"intent": "plan"}
-        if state.get("active_plan_id") and base_intent == "tutor":
-            # Plain tutor question with active plan in flight → respect tutor intent.
-            return {"intent": "tutor"}
-        # quiz override is already handled by active_quiz_question_id above.
-        return {"intent": base_intent}
+            intent = "quiz"
+        else:
+            last_user = state["messages"][-1].content
+            base_intent = route_intent(last_user)
+            # P2.1-⑤ — plan stickiness: keep user in plan chain ONLY when the
+            # message doesn't carry an explicit tutor/quiz signal. This lets
+            # users ask questions or take quizzes mid-plan without switching session.
+            if state.get("active_plan_id") and base_intent == "plan":
+                intent = "plan"
+            elif state.get("active_plan_id") and base_intent == "tutor":
+                # Plain tutor question with active plan in flight → respect tutor intent.
+                intent = "tutor"
+            else:
+                # quiz override is already handled by active_quiz_question_id above.
+                intent = base_intent
+
+        if (sw := _safe_writer()) is not None:
+            sw({"type": "trace", "step": "router", "intent": intent,
+                "active_quiz": state.get("active_quiz_question_id"),
+                "active_plan": state.get("active_plan_id")})
+
+        return {"intent": intent}
 
     async def tutor_node(state: CoachState) -> dict:
         writer = get_stream_writer()
@@ -140,6 +157,9 @@ def build_graph(*, retriever, llm, checkpointer=None):
             if text:
                 writer({"type": "token", "text": text})
                 parts.append(text)
+
+        if (sw := _safe_writer()) is not None:
+            sw({"type": "trace", "step": "tutor", "citations_count": len(citations)})
 
         return {
             "messages": [AIMessage(content="".join(parts))],
@@ -258,6 +278,10 @@ def build_graph(*, retriever, llm, checkpointer=None):
         )
         print(f"[JUDGE/{intent}] score={result['score']:.2f}, verdict={result['verdict']}, "
         f"weak_dims={result['weak_dims']}, retry_count={state.get('retry_count', 0)}", flush=True)
+
+        if (sw := _safe_writer()) is not None:
+            sw({"type": "trace", "step": "judge", "score": result["score"],
+                "weak_dims": result["weak_dims"], "retry": state.get("retry_count")})
 
         retry_count = state.get("retry_count", 0)
 

@@ -158,10 +158,10 @@ def test_chat_via_graph_tutor_path_emits_citations_then_tokens_then_done(
         events = _read_sse_events(resp)
 
     types = [e["type"] for e in events]
-    assert types[0] == "citations", f"first event must be citations, got {types}"
+    first_citations_idx = next(i for i, t in enumerate(types) if t == "citations")
     assert types[-1] == "done", f"last event must be done, got {types}"
 
-    citation_event = events[0]
+    citation_event = events[first_citations_idx]
     assert citation_event["citations"][0]["chunk_id"] == "a:1:0"
     assert citation_event["citations"][0]["source"] == "a.pdf"
 
@@ -186,11 +186,11 @@ def test_chat_via_graph_quiz_path_generates_real_question(
         events = _read_sse_events(resp)
 
     types = [e["type"] for e in events]
-    assert types[0] == "citations"
+    first_citations_idx = next(i for i, t in enumerate(types) if t == "citations")
     assert types[-1] == "done"
 
     # Quiz branch still emits empty citations (uniform frontend contract)
-    assert events[0]["citations"] == []
+    assert events[first_citations_idx]["citations"] == []
 
     # Cut ④h: quiz path now grounds in retrieved chunks (topic name as query).
     assert stub_retriever.last_query == "HyDE"
@@ -227,11 +227,11 @@ def test_chat_via_graph_plan_path_emits_empty_citations_then_stub_tokens(
         events = _read_sse_events(resp)
 
     types = [e["type"] for e in events]
-    assert types[0] == "citations"
+    first_citations_idx = next(i for i, t in enumerate(types) if t == "citations")
     assert types[-1] == "done"
 
     # Plan branch still emits empty citations (uniform frontend contract)
-    assert events[0]["citations"] == []
+    assert events[first_citations_idx]["citations"] == []
 
     # Cut ⑤g: plan path now grounds in retrieved chunks and runs the real planner.
     assert stub_retriever.last_query is not None
@@ -292,7 +292,7 @@ def test_chat_emits_same_model_warning_right_after_citations_on_tutor_path(
         events = _read_sse_events(resp)
 
     types = [e["type"] for e in events]
-    assert types[0] == "citations"
+    first_citations_idx = next(i for i, t in enumerate(types) if t == "citations")
     assert types[-1] == "done"
     token_events = [e for e in events if e["type"] == "token"]
     assert token_events, "expected at least one token event"
