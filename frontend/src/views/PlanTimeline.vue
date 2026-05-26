@@ -5,6 +5,7 @@ import { usePlan } from '../stores/plan'
 import { useSettings, type Mode } from '../stores/settings'
 import { streamChat, type MilestoneDto } from '../lib/api'
 import MilestoneList from '../components/MilestoneList.vue'
+import PlanGantt from '../components/PlanGantt.vue'
 import ModeChip from '../components/ModeChip.vue'
 import MindmapPanel from '../components/MindmapPanel.vue'
 import InfoPopover from '../components/InfoPopover.vue'
@@ -95,6 +96,10 @@ async function checkIn() {
           @toggle="toggleMilestone"
           @validate="validateMilestone"
         />
+        <section class="mt-6">
+          <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider mb-3">Timeline</h2>
+          <PlanGantt :milestones="planStore.plan.milestones" />
+        </section>
         <section v-if="planStore.events.length" class="mt-6 rounded-lg border border-border bg-surface p-4">
           <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider">Recent changes</h2>
           <ul class="mt-3 flex flex-col gap-2 text-xs text-fg-muted">
