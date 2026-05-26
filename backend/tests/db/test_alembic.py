@@ -74,6 +74,45 @@ def test_alembic_upgrade_head_creates_p2_1_3_memory_tables(tmp_path):
     assert not missing, f"missing tables: {missing}"
 
 
+def test_alembic_upgrade_head_creates_plan_milestone_progression_tables(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'p4_plan.db'}"
+    cfg = _alembic_config(db_url)
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(db_url)
+    tables = set(inspect(engine).get_table_names())
+    assert {"plan_milestones", "plan_events"} <= tables
+
+    milestone_cols = {c["name"] for c in inspect(engine).get_columns("plan_milestones")}
+    assert {
+        "id",
+        "plan_id",
+        "topic_id",
+        "topic_name",
+        "title",
+        "due_at",
+        "done",
+        "completed_at",
+        "sort_order",
+        "source",
+        "created_at",
+        "updated_at",
+    } <= milestone_cols
+
+    event_cols = {c["name"] for c in inspect(engine).get_columns("plan_events")}
+    assert {
+        "id",
+        "plan_id",
+        "milestone_id",
+        "actor",
+        "action",
+        "before_json",
+        "after_json",
+        "reason",
+        "created_at",
+    } <= event_cols
+
+
 def test_migrate_to_head_reads_database_url_env(tmp_path, monkeypatch):
     """Follow-up #2: session.migrate_to_head() honors DATABASE_URL env override."""
     db_path = tmp_path / "fresh.db"
