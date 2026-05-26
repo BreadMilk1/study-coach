@@ -2,7 +2,9 @@
 import { ref } from 'vue'
 import { useSettings } from '../stores/settings'
 import { checkToolCapable, pingModel } from '../lib/api'
+import { useI18n } from 'vue-i18n'
 
+const { locale } = useI18n()
 const s = useSettings()
 const toolTesting = ref(false)
 const toolNote = ref('')
@@ -10,6 +12,11 @@ const pingTesting = ref(false)
 const pingResult = ref<{ ok: boolean; note: string; latency_ms: number } | null>(null)
 
 function save() {
+  s.persist()
+}
+
+function onLanguageChange() {
+  locale.value = s.language
   s.persist()
 }
 
@@ -83,6 +90,15 @@ async function runToolCheck() {
                class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40" />
       </label>
 
+      <div class="space-y-1">
+        <label class="text-xs text-fg-muted uppercase tracking-wider">{{ $t('settings.language') }}</label>
+        <select v-model="s.language" @change="onLanguageChange"
+                class="w-full rounded-md bg-surface-2 border border-border px-3 py-2 text-sm text-fg focus:border-primary-ring focus:outline-none">
+          <option value="en">English</option>
+          <option value="zh-CN">中文</option>
+        </select>
+      </div>
+
       <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
         <legend class="text-xs font-mono uppercase tracking-wider text-white/60 px-2">Connection Test</legend>
         <p class="text-xs text-white/50 mb-3">Verify API key, base URL, and model name before using the app.</p>
@@ -143,7 +159,7 @@ async function runToolCheck() {
 
       <button @click="save"
               class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-sm">
-        Save
+        {{ $t('settings.save') }}
       </button>
     </div>
   </div>

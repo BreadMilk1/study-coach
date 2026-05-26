@@ -7,25 +7,25 @@ import {
 
 const navSections = [
   {
-    label: 'Study',
+    label: 'nav.study',
     items: [
-      { to: '/',          icon: LayoutDashboard, text: 'Overview' },
-      { to: '/chat',      icon: MessageSquare,   text: 'Chat' },
-      { to: '/plan',      icon: ListTodo,        text: 'Plan' },
-      { to: '/quiz',      icon: BookOpen,        text: 'Quiz' },
+      { to: '/',          icon: LayoutDashboard, text: 'nav.overview' },
+      { to: '/chat',      icon: MessageSquare,   text: 'nav.chat' },
+      { to: '/plan',      icon: ListTodo,        text: 'nav.plan' },
+      { to: '/quiz',      icon: BookOpen,        text: 'nav.quiz' },
     ],
   },
   {
-    label: 'Review',
+    label: 'nav.review',
     items: [
-      { to: '/mistakes',  icon: AlertTriangle,   text: 'Mistakes' },
+      { to: '/mistakes',  icon: AlertTriangle,   text: 'nav.mistakes' },
     ],
   },
   {
-    label: 'System',
+    label: 'nav.system',
     items: [
-      { to: '/library',   icon: FolderOpen,      text: 'Library' },
-      { to: '/settings',  icon: SettingsIcon,    text: 'Settings' },
+      { to: '/library',   icon: FolderOpen,      text: 'nav.library' },
+      { to: '/settings',  icon: SettingsIcon,    text: 'nav.settings' },
     ],
   },
 ]
@@ -37,7 +37,7 @@ const navSections = [
       <h1 class="text-lg font-semibold mb-4 px-2">Study Coach</h1>
       <template v-for="section in navSections" :key="section.label">
         <div class="px-2 text-[10px] uppercase tracking-wider text-fg-dim mt-3 mb-1">
-          {{ section.label }}
+          {{ $t(section.label) }}
         </div>
         <RouterLink
           v-for="item in section.items"
@@ -47,7 +47,7 @@ const navSections = [
           active-class="!bg-primary-bg !text-fg"
         >
           <component :is="item.icon" class="w-4 h-4" />
-          {{ item.text }}
+          {{ $t(item.text) }}
         </RouterLink>
       </template>
       <div class="mt-auto text-xs text-fg-dim px-2">P3 · productized shell</div>

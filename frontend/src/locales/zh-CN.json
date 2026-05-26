@@ -1,0 +1,64 @@
+{
+  "nav": {
+    "study": "学习",
+    "review": "复习",
+    "system": "系统",
+    "overview": "概览",
+    "chat": "对话",
+    "plan": "计划",
+    "quiz": "测验",
+    "mistakes": "错题",
+    "library": "资料库",
+    "settings": "设置"
+  },
+  "chat": {
+    "placeholder": "输入问题...",
+    "send": "发送",
+    "emptyCorpus": "请先上传 PDF 以开始提问"
+  },
+  "quiz": {
+    "submit": "提交答案",
+    "generate": "生成题目",
+    "difficulty": "难度",
+    "correct": "正确！",
+    "incorrect": "错误",
+    "errorBanner": "出错了，请重试。"
+  },
+  "plan": {
+    "dragHint": "拖动以重新排序"
+  },
+  "onboarding": {
+    "step1Title": "你的考试或学习目标是什么？",
+    "step1Hint": "例如：HKBU CS 期末、学习机器学习",
+    "step1Placeholder": "输入目标...",
+    "step2Title": "考试日期？（可选）",
+    "step3Title": "上传学习资料",
+    "step3Hint": "包含课程内容的 PDF 文件",
+    "skip": "跳过",
+    "skipForNow": "暂时跳过",
+    "next": "下一步",
+    "startLearning": "开始学习",
+    "uploading": "上传中...",
+    "uploaded": "已上传！"
+  },
+  "settings": {
+    "debugMode": "调试模式",
+    "language": "语言",
+    "save": "保存设置"
+  },
+  "mistakes": {
+    "dueOnly": "仅到期",
+    "showAll": "显示全部",
+    "markUnderstood": "标记为已掌握",
+    "allCaughtUp": "全部完成！",
+    "redo": "重新练习"
+  },
+  "overview": {
+    "mastery": "掌握度",
+    "planProgress": "计划进度",
+    "mistakesDue": "待复习错题",
+    "weakTopics": "薄弱主题",
+    "activity": "活跃度",
+    "radar": "学习画像"
+  }
+}

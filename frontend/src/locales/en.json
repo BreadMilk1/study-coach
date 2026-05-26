@@ -1,0 +1,64 @@
+{
+  "nav": {
+    "study": "Study",
+    "review": "Review",
+    "system": "System",
+    "overview": "Overview",
+    "chat": "Chat",
+    "plan": "Plan",
+    "quiz": "Quiz",
+    "mistakes": "Mistakes",
+    "library": "Library",
+    "settings": "Settings"
+  },
+  "chat": {
+    "placeholder": "Ask a question...",
+    "send": "Send",
+    "emptyCorpus": "Upload a PDF to start asking questions"
+  },
+  "quiz": {
+    "submit": "Submit Answer",
+    "generate": "Generate Quiz",
+    "difficulty": "Difficulty",
+    "correct": "Correct!",
+    "incorrect": "Incorrect",
+    "errorBanner": "Something went wrong. Try again."
+  },
+  "plan": {
+    "dragHint": "Drag to reorder milestones"
+  },
+  "onboarding": {
+    "step1Title": "What's your exam or goal?",
+    "step1Hint": "e.g. HKBU CS Final, Learn Machine Learning",
+    "step1Placeholder": "Enter your goal...",
+    "step2Title": "When is your exam? (optional)",
+    "step3Title": "Upload study materials",
+    "step3Hint": "PDF files with your course content",
+    "skip": "Skip",
+    "skipForNow": "Skip for now",
+    "next": "Next",
+    "startLearning": "Start Learning",
+    "uploading": "Uploading...",
+    "uploaded": "Uploaded!"
+  },
+  "settings": {
+    "debugMode": "Debug Mode",
+    "language": "Language",
+    "save": "Save Settings"
+  },
+  "mistakes": {
+    "dueOnly": "Due only",
+    "showAll": "Show all",
+    "markUnderstood": "Mark understood",
+    "allCaughtUp": "All caught up!",
+    "redo": "Redo"
+  },
+  "overview": {
+    "mastery": "Mastery",
+    "planProgress": "Plan Progress",
+    "mistakesDue": "Mistakes Due",
+    "weakTopics": "Weak Topics",
+    "activity": "Activity",
+    "radar": "Learning Profile"
+  }
+}
