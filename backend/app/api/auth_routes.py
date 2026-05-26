@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import (
     ANONYMOUS_TOKEN_TTL_SECONDS,
+    GOOGLE_CLIENT_ID,
     issue_token,
     verify_google_credential,
 )
@@ -67,3 +68,8 @@ def upgrade_guest(body: GuestUpgradeIn, session: Annotated[Session, Depends(get_
     )
     token = issue_token(user.id, "member")
     return AuthOut(access_token=token, user_id=user.id, tier="member")
+
+
+@auth_router.get("/config")
+def auth_config():
+    return {"google_client_id": GOOGLE_CLIENT_ID}
