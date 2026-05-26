@@ -120,6 +120,7 @@ Decision: choose **B. Lightweight Normalization**.
 id              string(36) primary key
 plan_id         string(36) foreign key -> plans.id
 topic_id        string(36) nullable foreign key -> topics.id
+topic_name      string(200) nullable  # preserves Planner output when no Topic row exists
 title           text
 due_at          datetime nullable
 done            bool default false
