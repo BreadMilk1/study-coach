@@ -140,6 +140,16 @@ class MasteryOut(BaseModel):
     overdue_milestones_count: int
 
 
+class GoalCreateIn(BaseModel):
+    title: str
+    exam_date: str | None = None
+
+
+class GoalCreateOut(BaseModel):
+    goal_id: str
+    title: str
+
+
 def _plan_belongs_to_user(session: Session, *, user_id: str, plan_id: str):
     stmt = (
         select(Goal, Plan)
@@ -358,6 +368,18 @@ async def chat(
         yield _sse({"type": "done"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/goals", response_model=GoalCreateOut)
+def create_goal(
+    body: GoalCreateIn,
+    user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    from datetime import datetime
+    exam = datetime.fromisoformat(body.exam_date) if body.exam_date else None
+    goal = GoalRepository(session).create(user_id=user_id, title=body.title, exam_date=exam)
+    return GoalCreateOut(goal_id=goal.id, title=goal.title)
 
 
 @router.get("/plans/current", response_model=PlanCurrentOut)

@@ -17,5 +17,6 @@ export const router = createRouter({
     { path: '/mistakes', name: 'mistakes', component: MistakeBank },
     { path: '/library', name: 'library', component: Library },
     { path: '/settings', name: 'settings', component: Settings },
+    { path: '/onboarding', name: 'onboarding', component: () => import('./views/Onboarding.vue') },
   ],
 })
