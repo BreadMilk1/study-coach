@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { CheckCircle2, AlertCircle, AlertTriangle, Circle } from 'lucide-vue-next'
-import { reorderMilestones, type MilestoneDto } from '../lib/api'
+import type { MilestoneDto } from '../lib/api'
 
 const props = defineProps<{
   milestones: MilestoneDto[]
-  planId: string
+  planId?: string
   updatingMilestoneId?: string | null
 }>()
 
@@ -14,29 +14,6 @@ const emit = defineEmits<{
   validate: [milestone: MilestoneDto]
   refresh: []
 }>()
-
-const dragged = ref<MilestoneDto | null>(null)
-
-function onDragStart(e: DragEvent, m: MilestoneDto) {
-  dragged.value = m
-  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
-}
-function onDragOver(e: DragEvent) { e.preventDefault() }
-async function onDrop(e: DragEvent, target: MilestoneDto) {
-  e.preventDefault()
-  if (!dragged.value || dragged.value.id === target.id) return
-  const ids = props.milestones.map(m => m.id!)
-  const from = ids.indexOf(dragged.value.id!)
-  const to = ids.indexOf(target.id!)
-  if (from < 0 || to < 0) return
-  ids.splice(from, 1)
-  ids.splice(to, 0, dragged.value.id!)
-  try {
-    await reorderMilestones(props.planId, ids)
-    emit('refresh')
-  } catch { /* revert handled by parent re-fetch */ }
-}
-function onDragEnd() { dragged.value = null }
 
 function statusOf(m: MilestoneDto): 'success' | 'warning' | 'danger' | 'neutral' {
   if (m.done) return 'success'
@@ -69,13 +46,8 @@ const colorFor = {
 
 <template>
   <ul class="flex flex-col gap-2">
-    <li v-for="(r, i) in rows" :key="i"
-        draggable="true"
-        class="flex items-start gap-3 rounded-lg border border-border bg-surface p-3"
-        @dragstart="onDragStart($event, r.m)"
-        @dragover="onDragOver"
-        @drop="onDrop($event, r.m)"
-        @dragend="onDragEnd">
+    <li v-for="r in rows" :key="r.m.id ?? r.m.title"
+        class="flex items-start gap-3 rounded-lg border border-border bg-surface p-3">
       <button type="button"
               :disabled="!r.m.id || props.updatingMilestoneId === r.m.id"
               class="mt-0.5 shrink-0 disabled:opacity-40"

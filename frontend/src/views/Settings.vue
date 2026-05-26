@@ -49,7 +49,7 @@ async function runToolCheck() {
 </script>
 
 <template>
-  <div class="p-8 max-w-2xl">
+  <div class="p-8 h-full overflow-y-auto">
     <h2 class="text-xl font-semibold mb-4">Settings</h2>
     <p class="text-white/60 text-sm mb-6">
       Bring-your-own-key. API key is stored in your browser localStorage; the server never sees nor persists it.
@@ -90,15 +90,6 @@ async function runToolCheck() {
                class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40" />
       </label>
 
-      <div class="space-y-1">
-        <label class="text-xs text-fg-muted uppercase tracking-wider">{{ $t('settings.language') }}</label>
-        <select v-model="s.language" @change="onLanguageChange"
-                class="w-full rounded-md bg-surface-2 border border-border px-3 py-2 text-sm text-fg focus:border-primary-ring focus:outline-none">
-          <option value="en">English</option>
-          <option value="zh-CN">中文</option>
-        </select>
-      </div>
-
       <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
         <legend class="text-xs font-mono uppercase tracking-wider text-white/60 px-2">Connection Test</legend>
         <p class="text-xs text-white/50 mb-3">Verify API key, base URL, and model name before using the app.</p>
@@ -131,6 +122,25 @@ async function runToolCheck() {
           <span v-else class="text-xs text-white/40">Untested</span>
         </div>
         <p v-if="toolNote" class="text-xs text-white/50 mt-2">{{ toolNote }}</p>
+      </fieldset>
+
+      <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
+        <legend class="text-xs font-mono uppercase tracking-wider text-white/60 px-2">Preferences</legend>
+
+        <label class="block mt-3">
+          <span class="text-sm text-white/70">{{ $t('settings.language') }}</span>
+          <select v-model="s.language" @change="onLanguageChange"
+                  class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40 font-mono">
+            <option value="en">English</option>
+            <option value="zh-CN">中文</option>
+          </select>
+        </label>
+
+        <label class="flex items-center gap-2 mt-3 cursor-pointer">
+          <input type="checkbox" v-model="s.debugMode" @change="s.persist()"
+                 class="rounded border-white/10 bg-white/5 text-indigo-500 focus:ring-indigo-400/40" />
+          <span class="text-sm text-white/70">{{ $t('settings.debugMode') }}</span>
+        </label>
       </fieldset>
 
       <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
