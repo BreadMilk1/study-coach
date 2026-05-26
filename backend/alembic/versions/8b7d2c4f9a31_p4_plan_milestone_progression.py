@@ -35,6 +35,14 @@ def _parse_due_at(value):
         return None
 
 
+def _parse_done(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "done"}
+    return bool(value)
+
+
 def upgrade() -> None:
     op.create_table(
         "plan_milestones",
@@ -47,7 +55,7 @@ def upgrade() -> None:
         sa.Column("done", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("completed_at", sa.DateTime(), nullable=True),
         sa.Column("sort_order", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("source", sa.String(length=20), nullable=False, server_default="migrated"),
+        sa.Column("source", sa.String(length=20), nullable=False, server_default="ai"),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(["plan_id"], ["plans.id"]),
@@ -95,10 +103,12 @@ def upgrade() -> None:
     now = datetime.utcnow()
     for plan in bind.execute(sa.select(plans.c.id, plans.c.milestones_json, plans.c.updated_at)):
         for idx, raw in enumerate(plan.milestones_json or []):
+            if not isinstance(raw, dict):
+                continue
             title = str(raw.get("title") or "").strip()
             if not title:
                 continue
-            done = bool(raw.get("done", False))
+            done = _parse_done(raw.get("done", False))
             created = plan.updated_at or now
             bind.execute(
                 milestones.insert().values(
