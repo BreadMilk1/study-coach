@@ -283,8 +283,8 @@ Priority order:
 - Mobile UI (currently desktop-only with explicit banner for <768px)
 - Real OAuth (FingerprintJS-anonymous tier becomes guest mode)
 - Real streak + coverage computation (sessions activity log + chunk-coverage metric)
-- Plan milestone progression: stable milestone ids, manual complete/reopen, plan events, and mastery-linked quick quiz prompt. Spec: `docs/superpowers/specs/2026-05-26-plan-milestone-progression-design.md`
-- Drag-reorder milestones on `/plan` (currently read-only list)
+- [x] Plan milestone progression: stable milestone ids, manual complete/reopen, plan events, and mastery-linked quick quiz prompt. Spec: `docs/superpowers/specs/2026-05-26-plan-milestone-progression-design.md`
+- Drag-reorder milestones on `/plan` (milestone completion is interactive; ordering is not yet editable)
 - Mistake batch mode / "mark as understood" without re-quiz
 - Library auto-redirect after upload (the `?return=` query is groundwork)
 - LLM MCQ format hardening (force prescribed structure so parse.ts regex doesn't break)

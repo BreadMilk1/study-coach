@@ -42,7 +42,7 @@ No shadcn-vue migration. 11 new components were enough for P3. Pulling in a UI l
 
 No mobile UI. The spec said desktop-only for P3 with an explicit `<768px` banner. Mobile is a distinct product surface (touch targets, gesture nav, swipe-to-redo on Mistakes) and squeezing it into P3 would have meant cutting one of the four new views or shipping mobile half-broken. Better to ship 7 desktop views clean and earmark mobile as P4.
 
-No drag-reorder on milestones. The Plan view is read-only with a check-in flow. P2.2 measured planner-agent latency at 5-30s; drag-reorder makes sense once you have a planner that can incrementally re-order without re-emitting the whole plan, and that's a P4 feature.
+No drag-reorder on milestones. In P3, the Plan view had a read-only milestone list with a check-in flow and no manual completion action. P2.2 measured planner-agent latency at 5-30s; drag-reorder makes sense once you have a planner that can incrementally re-order without re-emitting the whole plan, and that's a P4 feature.
 
 ## What this proves
 

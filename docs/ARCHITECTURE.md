@@ -126,7 +126,7 @@ SQLAlchemy 2.x style. SQLite dev, Postgres prod (same models, different URL).
 ```python
 # backend/app/db/models.py
 from datetime import datetime
-from sqlalchemy import ForeignKey, JSON, String, Float, Integer, DateTime, Text
+from sqlalchemy import Boolean, ForeignKey, JSON, String, Float, Integer, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase): pass
@@ -149,8 +149,35 @@ class Plan(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     goal_id: Mapped[str] = mapped_column(ForeignKey("goals.id"))
-    milestones_json: Mapped[dict] = mapped_column(JSON)                   # [{title, due_at, done, topic}]
+    milestones_json: Mapped[list] = mapped_column(JSON)                   # compatibility cache
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class PlanMilestone(Base):
+    __tablename__ = "plan_milestones"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("plans.id"))
+    topic_id: Mapped[str | None] = mapped_column(ForeignKey("topics.id"), nullable=True)
+    topic_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    title: Mapped[str] = mapped_column(Text)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    done: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(20), default="ai")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class PlanEvent(Base):
+    __tablename__ = "plan_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("plans.id"))
+    milestone_id: Mapped[str | None] = mapped_column(ForeignKey("plan_milestones.id"), nullable=True)
+    actor: Mapped[str] = mapped_column(String(20))                         # user/ai/system
+    action: Mapped[str] = mapped_column(String(40))                        # created/completed/reopened/...
+    before_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class Topic(Base):
     __tablename__ = "topics"
@@ -220,6 +247,14 @@ class Document(Base):
     chunks_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 ```
+
+Plan milestones are normalized in `plan_milestones` for stable user progression.
+`plans.milestones_json` is retained as a compatibility cache for Planner/eval paths during the P4 transition.
+
+Milestone completion is self-reported plan progress. It never directly mutates `mastery`.
+Mastery remains quiz/mistake evidence, and Plan uses mastery as an input for weak-topic intervention and validation prompts.
+
+Plan events are stored in `plan_events` and power the Recent changes panel on `/plan`.
 
 Chunks themselves live in **Chroma** (not in SQL): collection per user, metadata `{document_id, page, position}`.
 
