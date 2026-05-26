@@ -5,6 +5,7 @@ No LLM, no DB. Inputs are arbitrary objects with a `.milestones_json` attribute
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -33,6 +34,37 @@ def _parse_due(due_at: Any) -> datetime | None:
         return None
 
 
+def _plan_value(plan, key: str):
+    if isinstance(plan, Mapping):
+        if key in plan:
+            return plan.get(key) or []
+        return None
+    if hasattr(plan, key):
+        return getattr(plan, key) or []
+    return None
+
+
+def _milestone_dict(row) -> dict:
+    if isinstance(row, Mapping):
+        return dict(row)
+    return {
+        "id": getattr(row, "id", None),
+        "title": getattr(row, "title", ""),
+        "due_at": getattr(row, "due_at", None),
+        "done": bool(getattr(row, "done", False)),
+        "topic": getattr(row, "topic", None) or getattr(row, "topic_name", None),
+        "topic_id": getattr(row, "topic_id", None),
+    }
+
+
+def _milestone_dicts(plan) -> list[dict]:
+    normalized = _plan_value(plan, "milestones")
+    if normalized is not None:
+        return [_milestone_dict(m) for m in normalized]
+    legacy = _plan_value(plan, "milestones_json") or []
+    return [_milestone_dict(m) for m in legacy]
+
+
 def compute_progress(
     plan,
     mastery_scores: dict[str, float],
@@ -41,7 +73,7 @@ def compute_progress(
     now: datetime | None = None,
 ) -> ProgressSummary:
     now = now or datetime.utcnow()
-    milestones = list(getattr(plan, "milestones_json", []) or [])
+    milestones = _milestone_dicts(plan)
     done = [m for m in milestones if m.get("done")]
     overdue = []
     for m in milestones:

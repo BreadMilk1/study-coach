@@ -14,6 +14,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from app.agent.progress import ProgressSummary, compute_progress
+from app.db.models import PlanMilestone
 
 
 def _plan(milestones):
@@ -51,6 +52,85 @@ def test_overdue_detects_past_due_at_not_done():
     ]
     summary = compute_progress(_plan(milestones), {}, [], now=datetime(2026, 5, 22))
     assert [m["title"] for m in summary.overdue] == ["Past undone"]
+
+
+def test_compute_progress_accepts_normalized_milestones():
+    plan = SimpleNamespace(
+        milestones=[
+            {"title": "Done", "due_at": "2026-05-10", "done": True, "topic": "BM25"},
+            {"title": "Late", "due_at": "2026-05-10", "done": False, "topic": "HyDE"},
+        ],
+        milestones_json=[],
+    )
+    summary = compute_progress(
+        plan,
+        {"HyDE": 0.2, "BM25": 0.7},
+        [],
+        now=datetime(2026, 5, 22),
+    )
+    assert summary.done_count == 1
+    assert summary.total_count == 2
+    assert [m["title"] for m in summary.overdue] == ["Late"]
+    assert summary.weak_topics == ["HyDE"]
+
+
+def test_compute_progress_prefers_empty_normalized_milestones_over_stale_json():
+    plan = SimpleNamespace(
+        milestones=[],
+        milestones_json=[{"title": "Stale", "due_at": "2026-05-10", "done": False}],
+    )
+
+    summary = compute_progress(plan, {}, [], now=datetime(2026, 5, 22))
+
+    assert summary.done_count == 0
+    assert summary.total_count == 0
+    assert summary.overdue == []
+
+
+def test_compute_progress_accepts_normalized_row_objects():
+    plan = SimpleNamespace(
+        milestones=[
+            PlanMilestone(
+                id="m1",
+                plan_id="p1",
+                title="Done row",
+                due_at=datetime(2026, 5, 10),
+                done=True,
+                topic_name="BM25",
+            ),
+            PlanMilestone(
+                id="m2",
+                plan_id="p1",
+                title="Late row",
+                due_at=datetime(2026, 5, 10),
+                done=False,
+                topic_name="HyDE",
+            ),
+        ],
+        milestones_json=[],
+    )
+
+    summary = compute_progress(plan, {}, [], now=datetime(2026, 5, 22))
+
+    assert summary.done_count == 1
+    assert summary.total_count == 2
+    assert [m["title"] for m in summary.overdue] == ["Late row"]
+
+
+def test_compute_progress_accepts_mapping_plan():
+    plan = {
+        "milestones": [
+            {"title": "Late mapping", "due_at": "2026-05-10", "done": False},
+        ],
+        "milestones_json": [
+            {"title": "Stale legacy", "due_at": "2026-05-10", "done": False},
+        ],
+    }
+
+    summary = compute_progress(plan, {}, [], now=datetime(2026, 5, 22))
+
+    assert summary.total_count == 1
+    assert [m["title"] for m in summary.overdue] == ["Late mapping"]
 
 
 def test_weak_topics_lists_mastery_below_threshold():

@@ -11,11 +11,12 @@ Progress summary:
 
 User's check-in message: {user_msg}
 
-Adjust the milestones. You MAY:
-- Mark items done if the user said so.
-- Reorder.
-- Add at most 2 new milestones aimed at weak topics.
-- Postpone overdue items (push due_at later).
-You may NOT delete existing milestones or rewrite titles beyond minor edits.
+Adjust the milestones conservatively. You MAY:
+- Mark an item done only if the user explicitly said that specific item is complete.
+- Reopen an item only if the user explicitly said that specific item is not complete.
+- Postpone overdue unfinished items (push due_at later).
+
+You MUST keep id/topic_id fields unchanged when present.
+You MAY NOT add, delete, reorder, rewrite titles, change mastery, or change quiz state.
 
 Output ONLY the updated JSON array, no prose, no fences. Schema same as input.

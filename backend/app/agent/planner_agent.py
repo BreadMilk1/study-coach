@@ -109,7 +109,9 @@ def _make_planner_tools(
     @tool
     def update_study_plan(milestones: list[dict]) -> str:
         """Persist a list of milestones as the user's study plan (upsert).
-        Each milestone: {title:str, due_at:str|null, done:bool, topic:str|null}.
+        Each milestone: {id?:str, title:str, due_at:str|null, done:bool,
+        topic:str|null, topic_id?:str|null}. On CHECK-IN, preserve id/topic_id
+        from the existing plan when present.
         Call AFTER you've decided on the final milestone list.
         Returns JSON {"plan_id","milestones_count","updated_at"}.
         """
@@ -199,6 +201,8 @@ Your job:
 4. If they want a CHECK-IN (existing plan + 进度 / check-in / 调整 / etc):
    - Call `compute_progress` to see what's done/overdue.
    - Call `update_study_plan` with the adjusted milestone list.
+   - Preserve milestone id/topic_id values from the existing plan.
+   - Do not add, delete, or reorder milestones during check-in.
 5. If they mention mindmap / 脑图 / mind map / 思维导图: call `generate_mindmap`.
 6. When done, write a short markdown summary for the user with the milestones (and mindmap if generated). Do NOT call more tools after the summary.
 

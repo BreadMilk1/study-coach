@@ -4,6 +4,7 @@ Mirrors test_quiz_master.py: factory built with real in-memory SQLite repos,
 LLM stubbed. Exercises both decide() paths + edge cases.
 """
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -21,6 +22,8 @@ from app.db.repositories import (
     UserRepository,
 )
 
+_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "app" / "agent" / "prompts"
+
 
 _GEN_JSON = """[
   {"title": "Read HyDE §1-§3", "due_at": "2026-05-25", "done": false, "topic": "HyDE"},
@@ -30,9 +33,8 @@ _GEN_JSON = """[
 
 _CHECK_IN_JSON = """[
   {"title": "Read HyDE §1-§3", "due_at": "2026-05-25", "done": true, "topic": "HyDE"},
-  {"title": "Implement HyDEGenerator", "due_at": "2026-05-30", "done": false, "topic": "HyDE"},
-  {"title": "Compare HyDE vs BM25", "due_at": "2026-06-03", "done": false, "topic": "HyDE"},
-  {"title": "Review weak BM25 chapter", "due_at": "2026-06-05", "done": false, "topic": "BM25"}
+  {"title": "Implement HyDEGenerator", "due_at": "2026-05-24", "done": false, "topic": "HyDE"},
+  {"title": "Compare HyDE vs BM25", "due_at": "2026-06-01", "done": false, "topic": "HyDE"}
 ]"""
 
 
@@ -79,6 +81,12 @@ def _build_node(session, llm=None, retriever=None):
         retriever=retriever,
         now_fn=lambda: datetime(2026, 5, 22, 12, 0),
     )
+
+
+def test_planner_check_in_prompt_requires_id_and_topic_id_preservation():
+    prompt = (_PROMPTS_DIR / "planner_check_in.txt").read_text(encoding="utf-8")
+
+    assert "id/topic_id" in prompt
 
 
 async def test_planner_generate_creates_plan_and_sets_active_plan_id(session):
@@ -169,7 +177,7 @@ async def test_planner_check_in_adjusts_existing_plan(session):
         goal_id=goal.id,
         milestones_json=[
             {"title": "Read HyDE §1-§3", "due_at": "2026-05-25", "done": False, "topic": "HyDE"},
-            {"title": "Implement HyDEGenerator", "due_at": "2026-05-28", "done": False, "topic": "HyDE"},
+            {"title": "Implement HyDEGenerator", "due_at": "2026-05-20", "done": False, "topic": "HyDE"},
             {"title": "Compare HyDE vs BM25", "due_at": "2026-06-01", "done": False, "topic": "HyDE"},
         ],
     )
@@ -177,7 +185,7 @@ async def test_planner_check_in_adjusts_existing_plan(session):
     node = _build_node(session, llm=llm)
 
     update = await node({
-        "messages": [HumanMessage(content="进度怎么样了")],
+        "messages": [HumanMessage(content="Read HyDE §1-§3 完成了，Implement HyDEGenerator 需要延期")],
         "user_id": user.id,
         "active_plan_id": initial.id,
         "mastery_scores": {"BM25": 0.2, "HyDE": 0.6},
@@ -185,8 +193,14 @@ async def test_planner_check_in_adjusts_existing_plan(session):
 
     assert update["plan_action"] == "check_in"
     refreshed = plan_repo.get_by_goal(goal.id)
-    assert len(refreshed.milestones_json) == 4  # added BM25 review
-    assert any(m["title"].startswith("Review weak BM25") for m in refreshed.milestones_json)
+    assert len(refreshed.milestones_json) == 3
+    assert refreshed.milestones_json[0]["done"] is True
+    assert refreshed.milestones_json[1]["due_at"] == "2026-05-24"
+    assert [m["title"] for m in refreshed.milestones_json] == [
+        "Read HyDE §1-§3",
+        "Implement HyDEGenerator",
+        "Compare HyDE vs BM25",
+    ]
     text = update["messages"][0].content
     assert "Done:" in text or "进度" in text  # progress card surfaced
 
@@ -267,8 +281,11 @@ async def test_planner_check_in_progress_count_matches_final_milestone_count(ses
             {"title": "Old B", "done": False, "topic": "HyDE"},
         ],
     )
-    # CHECK-IN LLM returns 4 new milestones (adds 2)
-    llm = StubPlannerLLM(_CHECK_IN_JSON)  # 4 milestones in _CHECK_IN_JSON
+    check_in_json = """[
+      {"title": "Old A", "done": true, "topic": "HyDE"},
+      {"title": "Old B", "done": false, "topic": "HyDE"}
+    ]"""
+    llm = StubPlannerLLM(check_in_json)
     node = _build_node(session, llm=llm)
 
     update = await node({

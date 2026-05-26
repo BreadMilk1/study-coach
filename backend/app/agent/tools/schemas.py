@@ -72,6 +72,8 @@ class QuizOut(BaseModel):
 # --- update_study_plan -------------------------------------------------------
 
 class Milestone(BaseModel):
+    id: str | None = None
+    topic_id: str | None = None
     title: str
     due_at: str | None = None      # ISO date "YYYY-MM-DD" or None
     done: bool = False

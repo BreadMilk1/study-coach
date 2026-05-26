@@ -133,6 +133,41 @@ async def test_update_study_plan_upserts_via_closure_and_returns_count(session):
     assert len(saved.milestones_json) == 2
 
 
+async def test_update_study_plan_accepts_and_documents_milestone_ids(session):
+    user = UserRepository(session).get_or_create("fp-upd-ids")
+    goal_repo = GoalRepository(session)
+    plan_repo = PlanRepository(session)
+    goal_repo.create(user_id=user.id, title="G")
+
+    tools = _make_planner_tools(
+        user_id=user.id, llm=None, retriever=None,
+        plan_repo=plan_repo, goal_repo=goal_repo,
+        mastery_scores={}, recent_mistakes=[],
+    )
+    tool = next(t for t in tools if t.name == "update_study_plan")
+
+    assert "preserve id/topic_id" in (tool.description or "")
+
+    out = await tool.ainvoke({
+        "milestones": [
+            {
+                "id": "stable-m1",
+                "title": "Read HyDE §1",
+                "due_at": "2026-05-25",
+                "done": False,
+                "topic": "HyDE",
+                "topic_id": None,
+            },
+        ],
+    })
+
+    parsed = json.loads(out)
+    assert parsed["milestones_count"] == 1
+    goal = goal_repo.list_active_for_user(user.id)[0]
+    saved = plan_repo.get_by_goal(goal.id)
+    assert saved.milestones_json[0]["id"] == "stable-m1"
+
+
 async def test_generate_mindmap_delegates_to_closure_llm():
     llm = StubLLM(response_text="```mermaid\nmindmap\n  root((HyDE))\n    Q1\n```\n- HyDE\n  - Q1")
     tools = _make_planner_tools(
