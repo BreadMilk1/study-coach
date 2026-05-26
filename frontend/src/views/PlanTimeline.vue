@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { usePlan } from '../stores/plan'
 import { useSettings, type Mode } from '../stores/settings'
-import { streamChat } from '../lib/api'
+import { streamChat, type MilestoneDto } from '../lib/api'
 import MilestoneList from '../components/MilestoneList.vue'
 import ModeChip from '../components/ModeChip.vue'
 import MindmapPanel from '../components/MindmapPanel.vue'
 
 const planStore = usePlan()
 const settings = useSettings()
+const router = useRouter()
 const mode = ref<Mode>(settings.defaultPlannerMode)
 const checkInLoading = ref(false)
 
@@ -16,6 +18,16 @@ onMounted(() => planStore.fetch())
 
 function toggleMode() {
   mode.value = mode.value === 'agent_loop' ? 'deterministic' : 'agent_loop'
+}
+
+async function toggleMilestone(milestone: MilestoneDto) {
+  if (!milestone.id) return
+  await planStore.toggleMilestone(milestone.id, !milestone.done)
+}
+
+function validateMilestone(milestone: MilestoneDto) {
+  if (!milestone.topic) return
+  router.push({ path: '/quiz', query: { topic: milestone.topic } })
 }
 
 async function checkIn() {
@@ -60,7 +72,21 @@ async function checkIn() {
       </div>
 
       <template v-else-if="planStore.plan">
-        <MilestoneList :milestones="planStore.plan.milestones" />
+        <MilestoneList
+          :milestones="planStore.plan.milestones"
+          :updating-milestone-id="planStore.updatingMilestoneId"
+          @toggle="toggleMilestone"
+          @validate="validateMilestone"
+        />
+        <section v-if="planStore.events.length" class="mt-6 rounded-lg border border-border bg-surface p-4">
+          <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider">Recent changes</h2>
+          <ul class="mt-3 flex flex-col gap-2 text-xs text-fg-muted">
+            <li v-for="event in planStore.events.slice(0, 5)" :key="event.id">
+              <span class="font-mono text-fg">{{ event.action }}</span>
+              <span v-if="event.reason"> — {{ event.reason }}</span>
+            </li>
+          </ul>
+        </section>
         <MindmapPanel v-if="planStore.mindmapMermaid" :mermaid="planStore.mindmapMermaid" />
         <div class="mt-6 flex justify-end">
           <button @click="checkIn" :disabled="checkInLoading"

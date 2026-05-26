@@ -24,15 +24,24 @@ const needsUpload = computed(() => docs.isEmpty || quiz.needsUpload)
 
 onMounted(async () => {
   await Promise.all([mistakes.fetch(), docs.fetch()])
+  if (route.query.topic) {
+    topicHint.value = String(route.query.topic)
+    return
+  }
   if (route.query.mistake_id) {
     const m = mistakes.items.find(d => d.mistake_id === route.query.mistake_id)
     topicHint.value = m?.topic_name ?? ''
   }
 })
 
-watch(() => route.query.mistake_id, (id) => {
-  if (!id) { topicHint.value = ''; quiz.reset(); return }
-  const m = mistakes.items.find(d => d.mistake_id === id)
+watch(() => [route.query.mistake_id, route.query.topic], ([mistakeId, topic]) => {
+  if (topic) {
+    topicHint.value = String(topic)
+    quiz.reset()
+    return
+  }
+  if (!mistakeId) { topicHint.value = ''; quiz.reset(); return }
+  const m = mistakes.items.find(d => d.mistake_id === mistakeId)
   topicHint.value = m?.topic_name ?? ''
   quiz.reset()
 })
@@ -86,10 +95,15 @@ function nextQuestion() {
       <template v-else>
         <div v-if="quiz.streaming" class="text-fg-muted text-sm">Generating…</div>
 
-        <button v-else-if="!quiz.currentMCQ && !quiz.lastGrade" @click="generate"
-                class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-2 transition-colors">
-          Generate a question
-        </button>
+        <div v-else-if="!quiz.currentMCQ && !quiz.lastGrade">
+          <p v-if="topicHint" class="mb-3 text-sm text-fg-muted">
+            Topic: <span class="font-mono text-fg">{{ topicHint }}</span>
+          </p>
+          <button @click="generate"
+                  class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-2 transition-colors">
+            Generate a question
+          </button>
+        </div>
 
         <MCQCard v-else-if="quiz.currentMCQ && !quiz.lastGrade"
                  :prompt="quiz.currentMCQ.prompt"
