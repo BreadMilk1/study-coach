@@ -2,6 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import issue_token
 from app.main import create_app
 
 
@@ -18,7 +19,8 @@ def client(tmp_path, monkeypatch):
 
 
 def test_get_documents_empty(client):
-    resp = client.get("/api/documents", headers={"x-fingerprint": "fp-1"})
+    token = issue_token("default-user", "guest")
+    resp = client.get("/api/documents", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -30,8 +32,10 @@ def test_get_documents_lists_uploaded(client):
         user = UserRepository(s).get_or_create("fp-2")
         DocumentRepository(s).create(user_id=user.id, filename="a.pdf", hash_="h1", chunks_count=10)
         DocumentRepository(s).create(user_id=user.id, filename="b.pdf", hash_="h2", chunks_count=5)
+        user_id = user.id
 
-    resp = client.get("/api/documents", headers={"x-fingerprint": "fp-2"})
+    token = issue_token(user_id, "guest")
+    resp = client.get("/api/documents", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 2

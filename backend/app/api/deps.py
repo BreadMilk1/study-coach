@@ -1,8 +1,9 @@
 from typing import Annotated, Literal
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from app.auth import decode_token
 from app.db.repositories import (
     GoalRepository,
     MasteryRepository,
@@ -13,6 +14,21 @@ from app.db.repositories import (
 )
 from app.db.session import get_session
 from app.llm.provider import LLMConfig, parse_llm_config
+
+
+async def get_current_user(
+    authorization: str | None = Header(None),
+) -> str:
+    if not authorization:
+        return "default-user"
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, detail="invalid authorization header")
+    token = authorization[len("Bearer "):]
+    try:
+        claims = decode_token(token)
+        return claims.user_id
+    except ValueError as e:
+        raise HTTPException(401, detail=str(e))
 
 
 def get_user_id(

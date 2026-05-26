@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import issue_token
 from app.main import create_app
 
 
@@ -20,7 +21,8 @@ def client(tmp_path, monkeypatch):
 
 
 def test_get_mistakes_due_empty(client):
-    resp = client.get("/api/mistakes/due", headers={"x-fingerprint": "fp-1"})
+    token = issue_token("default-user", "guest")
+    resp = client.get("/api/mistakes/due", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -55,7 +57,6 @@ def test_get_mistakes_due_returns_due_only(client):
             srs_interval_days=1,
             srs_ease=2.5,
         )
-        # Future-due — must NOT appear
         MistakeRepository(s).create(
             user_id=user.id,
             question_id=q.id,
@@ -64,8 +65,10 @@ def test_get_mistakes_due_returns_due_only(client):
             srs_interval_days=7,
             srs_ease=2.5,
         )
+        user_id = user.id
 
-    resp = client.get("/api/mistakes/due", headers={"x-fingerprint": "fp-2"})
+    token = issue_token(user_id, "guest")
+    resp = client.get("/api/mistakes/due", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     body = resp.json()
     assert len(body) == 1

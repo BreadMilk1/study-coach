@@ -69,6 +69,8 @@ def create_app() -> FastAPI:
     if os.environ.get("STUDY_COACH_TEST_MODE") != "1":
         app.state.retriever = _build_default_retriever()
     app.include_router(router)
+    from app.api.auth_routes import auth_router
+    app.include_router(auth_router)
     return app
 
 

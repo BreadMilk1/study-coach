@@ -30,7 +30,7 @@ from .deps import (
     get_quiz_master_agent,
     get_quiz_mode,
     get_retriever,
-    get_user_id,
+    get_current_user,
 )
 
 router = APIRouter(prefix="/api")
@@ -266,7 +266,7 @@ async def ping_model(
 @router.post("/documents")
 async def upload_document(
     file: Annotated[UploadFile, File()],
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
     document_processor: Annotated[object, Depends(get_document_processor)],
     retriever: Annotated[object, Depends(get_retriever)],
@@ -302,7 +302,7 @@ def _sse(payload: dict) -> str:
 @router.post("/chat")
 async def chat(
     body: ChatRequest,
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     graph: Annotated[object, Depends(get_graph)],
     judge: Annotated[dict, Depends(get_judge_dependencies)],
     quiz_master: Annotated[object, Depends(get_quiz_master)],
@@ -360,7 +360,7 @@ async def chat(
 
 @router.get("/plans/current", response_model=PlanCurrentOut)
 def get_plans_current(
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goals = GoalRepository(session).list_active_for_user(user_id)
@@ -378,7 +378,7 @@ def patch_plan_milestone(
     plan_id: str,
     milestone_id: str,
     body: MilestonePatchIn,
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
@@ -421,7 +421,7 @@ def patch_plan_milestone(
 @router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
 def get_plan_events(
     plan_id: str,
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
     limit: int = 20,
 ):
@@ -444,7 +444,7 @@ def get_plan_events(
 
 @router.get("/documents", response_model=list[DocumentOut])
 def get_documents(
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     docs = DocumentRepository(session).list_for_user(user_id)
@@ -456,7 +456,7 @@ def get_documents(
 
 @router.get("/mistakes/due", response_model=list[MistakeDueOut])
 def get_mistakes_due(
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
     limit: int = 20,
     include_future: bool = False,
@@ -503,7 +503,7 @@ class MistakeReviewOut(BaseModel):
 def review_mistake(
     mistake_id: str,
     body: MistakeReviewIn,
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from app.db.repositories import MasteryRepository, MistakeRepository, QuestionRepository
@@ -551,7 +551,7 @@ def review_mistake(
 
 @router.get("/mastery", response_model=MasteryOut)
 def get_mastery(
-    user_id: Annotated[str, Depends(get_user_id)],
+    user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime

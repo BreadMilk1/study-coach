@@ -2,6 +2,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import issue_token
 from app.main import create_app
 
 
@@ -18,7 +19,8 @@ def client(tmp_path, monkeypatch):
 
 
 def test_get_plans_current_404_when_no_plan(client):
-    resp = client.get("/api/plans/current", headers={"x-fingerprint": "fp-1"})
+    token = issue_token("default-user", "guest")
+    resp = client.get("/api/plans/current", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
     assert resp.json() == {"detail": "no active plan for user"}
 
@@ -39,8 +41,10 @@ def test_get_plans_current_returns_active_plan(client):
                 {"title": "Quiz on HyDE", "due_at": None, "done": False, "topic": "HyDE"},
             ],
         )
+        user_id = user.id
 
-    resp = client.get("/api/plans/current", headers={"x-fingerprint": "fp-2"})
+    token = issue_token(user_id, "guest")
+    resp = client.get("/api/plans/current", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["goal_title"] == "Master HyDE"
@@ -64,8 +68,10 @@ def test_get_plans_current_returns_milestone_ids_and_mastery_hint(client):
             goal_id=goal.id,
             milestones=[{"title": "Read HyDE", "done": True, "topic": "HyDE", "topic_id": topic.id}],
         )
+        user_id = user.id
 
-    resp = client.get("/api/plans/current", headers={"x-fingerprint": "fp-plan-id"})
+    token = issue_token(user_id, "guest")
+    resp = client.get("/api/plans/current", headers={"Authorization": f"Bearer {token}"})
 
     assert resp.status_code == 200
     milestone = resp.json()["milestones"][0]
@@ -92,10 +98,14 @@ def test_patch_milestone_done_toggles_state_without_changing_mastery(client):
             milestones=[{"title": "Read HyDE", "done": False, "topic": "HyDE", "topic_id": topic.id}],
         )
         milestone_id = PlanRepository(s).list_milestones(plan.id)[0].id
+        user_id = user.id
+
+    token = issue_token(user_id, "guest")
+    auth_headers = {"Authorization": f"Bearer {token}"}
 
     resp = client.patch(
         f"/api/plans/{plan.id}/milestones/{milestone_id}",
-        headers={"x-fingerprint": "fp-toggle"},
+        headers=auth_headers,
         json={"done": True},
     )
 
@@ -108,7 +118,7 @@ def test_patch_milestone_done_toggles_state_without_changing_mastery(client):
 
     reopened = client.patch(
         f"/api/plans/{plan.id}/milestones/{milestone_id}",
-        headers={"x-fingerprint": "fp-toggle"},
+        headers=auth_headers,
         json={"done": False},
     )
 
@@ -119,7 +129,7 @@ def test_patch_milestone_done_toggles_state_without_changing_mastery(client):
     assert reopened_body["event"]["action"] == "reopened"
     assert reopened_body["validation_hint"]["show_quick_quiz"] is False
 
-    mastery = client.get("/api/mastery", headers={"x-fingerprint": "fp-toggle"}).json()
+    mastery = client.get("/api/mastery", headers=auth_headers).json()
     assert mastery["scores"][0]["score"] == 0.25
 
 
@@ -137,15 +147,17 @@ def test_plan_milestone_routes_reject_other_users_plan(client):
             milestones=[{"title": "Read HyDE", "done": False, "topic": "HyDE"}],
         )
         milestone_id = PlanRepository(s).list_milestones(plan.id)[0].id
+        intruder_id = intruder.id
 
+    intruder_token = issue_token(intruder_id, "guest")
     patch_resp = client.patch(
         f"/api/plans/{plan.id}/milestones/{milestone_id}",
-        headers={"x-fingerprint": "fp-intruder"},
+        headers={"Authorization": f"Bearer {intruder_token}"},
         json={"done": True},
     )
     events_resp = client.get(
         f"/api/plans/{plan.id}/events",
-        headers={"x-fingerprint": "fp-intruder"},
+        headers={"Authorization": f"Bearer {intruder_token}"},
     )
 
     assert patch_resp.status_code == 404
@@ -165,15 +177,18 @@ def test_plan_milestone_routes_find_owned_plan_beyond_first_active_goal(client):
             milestones=[{"title": "Read HyDE", "done": False, "topic": "HyDE"}],
         )
         milestone_id = PlanRepository(s).list_milestones(plan.id)[0].id
+        user_id = user.id
 
+    token = issue_token(user_id, "guest")
+    auth_headers = {"Authorization": f"Bearer {token}"}
     patch_resp = client.patch(
         f"/api/plans/{plan.id}/milestones/{milestone_id}",
-        headers={"x-fingerprint": "fp-many-goals"},
+        headers=auth_headers,
         json={"done": True},
     )
     events_resp = client.get(
         f"/api/plans/{plan.id}/events",
-        headers={"x-fingerprint": "fp-many-goals"},
+        headers=auth_headers,
     )
 
     assert patch_resp.status_code == 200
@@ -192,6 +207,7 @@ def test_patch_milestone_done_returns_event_from_current_toggle(client, monkeypa
             milestones=[{"title": "Read HyDE", "done": False, "topic": "HyDE"}],
         )
         milestone_id = PlanRepository(s).list_milestones(plan.id)[0].id
+        user_id = user.id
 
     original_list_events = PlanRepository.list_events
 
@@ -203,9 +219,10 @@ def test_patch_milestone_done_returns_event_from_current_toggle(client, monkeypa
 
     monkeypatch.setattr(PlanRepository, "list_events", _wrong_recent_event)
 
+    token = issue_token(user_id, "guest")
     resp = client.patch(
         f"/api/plans/{plan.id}/milestones/{milestone_id}",
-        headers={"x-fingerprint": "fp-current-event"},
+        headers={"Authorization": f"Bearer {token}"},
         json={"done": True},
     )
 
@@ -239,8 +256,10 @@ def test_get_plan_events_returns_recent_changes(client):
             actor="user",
             reason="User reopened milestone",
         )
+        user_id = user.id
 
-    resp = client.get(f"/api/plans/{plan.id}/events?limit=1", headers={"x-fingerprint": "fp-events"})
+    token = issue_token(user_id, "guest")
+    resp = client.get(f"/api/plans/{plan.id}/events?limit=1", headers={"Authorization": f"Bearer {token}"})
 
     assert resp.status_code == 200
     body = resp.json()
