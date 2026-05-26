@@ -92,9 +92,11 @@ async function checkIn() {
       <template v-else-if="planStore.plan">
         <MilestoneList
           :milestones="planStore.plan.milestones"
+          :plan-id="planStore.plan.plan_id"
           :updating-milestone-id="planStore.updatingMilestoneId"
           @toggle="toggleMilestone"
           @validate="validateMilestone"
+          @refresh="planStore.fetch()"
         />
         <section class="mt-6">
           <h2 class="text-sm font-semibold text-fg-muted uppercase tracking-wider mb-3">Timeline</h2>

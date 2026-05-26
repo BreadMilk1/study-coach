@@ -476,6 +476,23 @@ def get_plan_events(
     ]
 
 
+class ReorderIn(BaseModel):
+    milestone_ids: list[str]
+
+
+@router.patch("/plans/{plan_id}/milestones/reorder", response_model=PlanCurrentOut)
+def reorder_plan_milestones(
+    plan_id: str,
+    body: ReorderIn,
+    user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
+    PlanRepository(session).reorder_milestones(plan.id, body.milestone_ids)
+    refreshed = PlanRepository(session).get_by_goal(goal.id)
+    return _plan_current_out(session, user_id=user_id, goal=goal, plan=refreshed)
+
+
 @router.get("/documents", response_model=list[DocumentOut])
 def get_documents(
     user_id: Annotated[str, Depends(get_current_user)],
@@ -579,6 +596,48 @@ def review_mistake(
         correct_answer=question.answer,
         explanation=question.explanation,
         new_interval_days=sched.interval_days,
+        next_due_at=sched.due_at.isoformat(),
+    )
+
+
+class MarkUnderstoodOut(BaseModel):
+    mastery_score: float
+    next_due_at: str | None
+
+
+@router.post("/mistakes/{mistake_id}/mark-understood", response_model=MarkUnderstoodOut)
+def mark_mistake_understood(
+    mistake_id: str,
+    user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    from app.db.repositories import MasteryRepository, MistakeRepository, QuestionRepository
+    from app.srs.sm2 import next_schedule
+
+    mistake = MistakeRepository(session).get_by_id(mistake_id)
+    if mistake is None or mistake.user_id != user_id:
+        raise HTTPException(status_code=404, detail="mistake not found")
+
+    question = QuestionRepository(session).get_by_id(mistake.question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="question not found")
+
+    sched = next_schedule(
+        quality=5,
+        previous_interval_days=mistake.srs_interval_days,
+        previous_ease=mistake.srs_ease,
+    )
+    MistakeRepository(session).update_srs(
+        mistake_id=mistake.id,
+        interval_days=sched.interval_days,
+        ease=sched.ease,
+        due_at=sched.due_at,
+    )
+    new_score = MasteryRepository(session).apply_delta(
+        user_id=user_id, topic_id=question.topic_id, delta=0.1,
+    )
+    return MarkUnderstoodOut(
+        mastery_score=new_score,
         next_due_at=sched.due_at.isoformat(),
     )
 

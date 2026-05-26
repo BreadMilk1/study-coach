@@ -429,6 +429,17 @@ class PlanRepository:
             out.append(item)
         return out
 
+    def reorder_milestones(self, plan_id: str, milestone_ids: list[str]) -> None:
+        for idx, mid in enumerate(milestone_ids):
+            row = self.get_milestone(plan_id=plan_id, milestone_id=mid)
+            if row is not None:
+                row.sort_order = idx
+                row.updated_at = datetime.utcnow()
+        plan = self.session.get(Plan, plan_id)
+        if plan:
+            self._sync_milestones_json(plan)
+        self.session.commit()
+
 
 class QuestionRepository:
     def __init__(self, session: Session):
