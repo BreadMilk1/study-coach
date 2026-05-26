@@ -39,7 +39,7 @@ def test_alembic_baseline_users_columns_match_orm(tmp_path):
 
     engine = create_engine(db_url)
     cols = {c["name"] for c in inspect(engine).get_columns("users")}
-    assert cols == {"id", "fingerprint", "created_at"}
+    assert cols == {"id", "fingerprint", "google_id", "email", "created_at"}
 
 
 def test_alembic_baseline_documents_columns_match_orm(tmp_path):
