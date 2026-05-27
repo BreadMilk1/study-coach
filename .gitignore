@@ -31,3 +31,14 @@ backend/app/eval/**/output/
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
+
+# IDE state
+.cursor/
+  
+# Internal agent/planning artifacts
+AGENTS.md
+LEARN-CLAUDE-CODE-README-zh.md
+docs/superpowers/
+
+# Intermediate screenshot iterations
+docs/screenshots/p3/

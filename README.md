@@ -14,8 +14,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
 [![Tests](https://img.shields.io/badge/Tests-245%20passed-10b981)]()
-
-[中文文档](./README.zh-CN.md)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
 
@@ -23,9 +22,9 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 
 ## Portfolio Thesis
 
-`../HKBU_StudyCompanion 2/` is a Prompt Engineering course project: local PDF RAG, HyDE, CoT study plan, MCQ quiz, LLM-as-Judge — but architecturally a **chain-of-prompts** with no persistent state, no agent loop, and no empirical evaluation.
+**HKBU_StudyCompanion** is a Prompt Engineering course project (COMP4146/7125, HKBU): local PDF RAG, HyDE, CoT study plan, MCQ quiz, LLM-as-Judge — but architecturally a **chain-of-prompts** with no persistent state, no agent loop, and no empirical evaluation.
 
-`../JadeAI/` is the engineering reference: BYOK headers, repository pattern, DB persistence, tool-calling agent loop, and long-maintenance `ARCHITECTURE.md`.
+[JadeAI](https://github.com/LingyiChen-AI/JadeAI) is the engineering reference: BYOK headers, repository pattern, DB persistence, tool-calling agent loop, and long-maintenance `ARCHITECTURE.md`.
 
 **Study Coach** is the portfolio-grade refactor that bridges both worlds: the course project's four features (HyDE, CoT plan, MCQ, Judge) fully redesigned as a modern **LangGraph agent** with persistent memory, empirical agent-loop ablation, and a production-quality frontend.
 
@@ -46,8 +45,6 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 | Goal Setup Wizard | Mobile View |
 |:---:|:---:|
 | ![Onboarding](docs/screenshots/onboarding.png) | ![Mobile](docs/screenshots/mobile.png) |
-
-> Screenshot placeholders — capture from `http://localhost:5173` and save to `docs/screenshots/`.
 
 ## Features
 
@@ -142,6 +139,16 @@ cd ../frontend
 pnpm build              # typecheck + production build
 ```
 
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `JWT_SECRET` | Yes | — | Secret key for JWT signing. Generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID. Guest mode works without it |
+| `OLLAMA_ENABLED` | No | `true` | Set to `false` to disable local Ollama (cloud BYOK only) |
+
+Cloud BYOK (OpenAI / Anthropic / Gemini) is configured **per-request** via the frontend Settings panel — no server-side API keys needed.
+
 ## Key Empirical Results
 
 | Experiment | Runs | Key Finding |
@@ -159,6 +166,35 @@ See `docs/ARCHITECTURE.md` v2 for:
 - **5 Architecture Decision Records** — LangGraph vs chain-of-prompts, SM-2 vs Leitner, deterministic vs agent loop, SQLite-only, BYOK header pattern
 - **Security model** — JWT auth, API key handling, CORS, XSS prevention
 - **Deployment topology** — Docker Compose (local) + fly.io (cloud fallback)
+
+## API Reference
+
+<details>
+<summary>View all API endpoints</summary>
+
+| Method | Path | Auth | Response |
+|--------|------|------|----------|
+| `GET` | `/api/health` | none | `{status, ollama_enabled}` |
+| `POST` | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
+| `POST` | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
+| `POST` | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
+| `POST` | `/api/chat` | JWT/guest | SSE: `{type:"trace"\|"citations"\|"token"\|"done"}` |
+| `POST` | `/api/documents` | JWT/guest | `{document_id, filename, chunks_count}` |
+| `GET` | `/api/documents` | JWT/guest | `[{id, filename, chunks_count}]` |
+| `POST` | `/api/goals` | JWT/guest | `{goal_id, title}` |
+| `GET` | `/api/plans/current` | JWT/guest | `{plan_id, goal_id, milestones[], updated_at}` |
+| `PATCH` | `/api/plans/{id}/milestones/{mid}` | JWT/guest | `{plan, event, validation_hint}` |
+| `GET` | `/api/mistakes/due` | JWT/guest | `[{mistake_id, question, due_at, srs_*, topic_name}]` |
+| `POST` | `/api/mistakes/{id}/review` | JWT/guest | `{correct, correct_answer, explanation, new_interval_days}` |
+| `POST` | `/api/mistakes/{id}/mark-understood` | JWT/guest | `{mastery_score, next_due_at}` |
+| `GET` | `/api/mastery` | JWT/guest | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
+| `GET` | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, activity_daily[]}` |
+| `GET` | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
+| `GET` | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
+
+All AI-bearing routes read **BYOK headers** per request. Auth is JWT Bearer with guest fallback.
+
+</details>
 
 ## Project Layout
 
@@ -225,6 +261,10 @@ study-coach/
 
 ## Origin
 
-This is a portfolio refactor of the **HKBU_StudyCompanion** class project (COMP4146/7125 Prompt Engineering, HKBU). The original (Gradio + chain-of-prompts) is preserved at `../HKBU_StudyCompanion 2/`.
+This is a portfolio refactor of the **HKBU_StudyCompanion** class project (COMP4146/7125 Prompt Engineering, HKBU).
 
-Engineering patterns drawn from `../JadeAI/`: BYOK header, repository pattern, persistent DB state, tool-calling agent loop, SSE streaming, and long-form architecture documentation.
+Engineering patterns drawn from [JadeAI](https://github.com/LingyiChen-AI/JadeAI): BYOK header, repository pattern, persistent DB state, tool-calling agent loop, SSE streaming, and long-form architecture documentation.
+
+## License
+
+[MIT](LICENSE)
