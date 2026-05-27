@@ -45,3 +45,6 @@ docs/RETRIEVAL_EVAL.md
 
 # Intermediate screenshot iterations
 docs/screenshots/p3/
+
+# Internal dev prompt
+STARTUP_PROMPT.md
