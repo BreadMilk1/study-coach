@@ -100,6 +100,15 @@ def app(tmp_path, stub_retriever, stub_llm, stub_document_processor, monkeypatch
         "llm": StubJudgeLLM(),
         "same_model": False,
     }
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+    with session_scope() as session:
+        DocumentRepository(session).create(
+            user_id="default-user",
+            filename="fixture.pdf",
+            hash_="fixture-hash",
+            chunks_count=1,
+        )
     return app
 
 

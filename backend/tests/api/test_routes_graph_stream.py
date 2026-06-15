@@ -102,7 +102,29 @@ def stub_judge_llm():
     return StubJudgeLLM()
 
 
-def _make_app(tmp_path, monkeypatch, stub_retriever, stub_llm, stub_judge_llm, *, same_model: bool):
+def _seed_default_document() -> None:
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        DocumentRepository(session).create(
+            user_id="default-user",
+            filename="fixture.pdf",
+            hash_="fixture-hash",
+            chunks_count=1,
+        )
+
+
+def _make_app(
+    tmp_path,
+    monkeypatch,
+    stub_retriever,
+    stub_llm,
+    stub_judge_llm,
+    *,
+    same_model: bool,
+    seed_document: bool = True,
+):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/test.db")
     from app.db import session as session_mod
     session_mod._engine = None
@@ -116,6 +138,8 @@ def _make_app(tmp_path, monkeypatch, stub_retriever, stub_llm, stub_judge_llm, *
         "llm": stub_judge_llm,
         "same_model": same_model,
     }
+    if seed_document:
+        _seed_default_document()
     return app
 
 
@@ -171,6 +195,81 @@ def test_chat_via_graph_tutor_path_emits_citations_then_tokens_then_done(
     # Tutor path actually queried the retriever
     assert stub_retriever.last_query == "What is HyDE?"
     assert stub_llm.invoked is True
+
+
+def test_chat_persists_current_session_messages_and_citations(client):
+    with client.stream("POST", "/api/chat",
+                       json={"message": "What is HyDE?"},
+                       headers=_HEADERS) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    session_events = [e for e in events if e["type"] == "session"]
+    assert len(session_events) == 1
+    session_id = session_events[0]["session_id"]
+
+    current_resp = client.get("/api/chat/sessions/current", headers=_HEADERS)
+    assert current_resp.status_code == 200
+    assert current_resp.json()["session_id"] == session_id
+
+    messages_resp = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_HEADERS,
+    )
+    assert messages_resp.status_code == 200
+    body = messages_resp.json()
+    assert body["session_id"] == session_id
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "What is HyDE?"),
+        ("assistant", "HyDE is a technique."),
+    ]
+    assistant = body["messages"][1]
+    assert assistant["citations"][0]["chunk_id"] == "a:1:0"
+    assert assistant["citations"][0]["source"] == "a.pdf"
+    assert assistant["citations"][0]["page"] == 1
+
+
+def test_user_stats_counts_persisted_chat_sessions(client):
+    with client.stream("POST", "/api/chat",
+                       json={"message": "What is HyDE?"},
+                       headers=_HEADERS) as resp:
+        assert resp.status_code == 200
+        _read_sse_events(resp)
+
+    stats = client.get("/api/users/me/stats", headers=_HEADERS)
+
+    assert stats.status_code == 200
+    body = stats.json()
+    assert body["total_sessions"] == 1
+    assert sum(day["count"] for day in body["activity_daily"]) == 1
+    assert body["streak_days"] == 1
+
+
+def test_chat_without_user_documents_refuses_before_retrieval(
+    tmp_path, monkeypatch, stub_retriever, stub_llm, stub_judge_llm
+):
+    app = _make_app(
+        tmp_path,
+        monkeypatch,
+        stub_retriever,
+        stub_llm,
+        stub_judge_llm,
+        same_model=False,
+        seed_document=False,
+    )
+    client = TestClient(app)
+
+    with client.stream("POST", "/api/chat",
+                       json={"message": "What is HyDE?"},
+                       headers=_HEADERS) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    joined = "".join(e["text"] for e in events if e["type"] == "token")
+    assert "upload" in joined.lower()
+    assert [e for e in events if e["type"] == "citations"][0]["citations"] == []
+    assert stub_retriever.last_query is None
+    assert stub_llm.invoked is False
 
 
 def test_chat_via_graph_quiz_path_generates_real_question(

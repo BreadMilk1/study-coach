@@ -13,7 +13,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-245%20passed-10b981)]()
+[![Tests](https://img.shields.io/badge/Tests-248%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -61,6 +61,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 - **Cross-Encoder Reranking** — `jina-reranker-v2-base-multilingual` via FastEmbed
 - **Hit@5: 0.933, MRR: 0.822** on 15-query HKBU eval set (up from 0.733 / 0.633)
 - **Grounded Quiz Generation** — Questions drawn from indexed PDF chunks, not model training distribution
+- **User-corpus guard** — Chat refuses before retrieval when the current user has no uploaded documents, preventing stale Chroma chunks from leaking into answers
 
 ### Adaptive Learning
 
@@ -78,7 +79,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 
 ### Frontend
 
-- **8 views**: Overview (dashboard + radar + heatmap), Chat (SSE streaming + Agent Trace debug panel), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + OAuth + language), Onboarding (3-step goal setup wizard)
+- **8 views**: Overview (dashboard + radar + heatmap), Chat (SSE streaming + current session restore + Agent Trace debug panel), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + OAuth + language), Onboarding (3-step goal setup wizard)
 - **Dark Cinema design system** — Inter / JetBrains Mono / Noto Sans SC, indigo primary
 - **i18n bilingual** — English / 中文 (zh-CN), switchable in Settings
 - **Mobile responsive** — Bottom tab bar for Chat / Quiz / Plan on <768px viewports
@@ -133,7 +134,7 @@ docker compose up
 
 ```bash
 cd backend
-uv run pytest -q        # 245 tests, no live Ollama required
+uv run pytest -q        # 248 tests, no live Ollama required
 
 cd ../frontend
 pnpm build              # typecheck + production build
@@ -178,7 +179,9 @@ See `docs/ARCHITECTURE.md` v2 for:
 | `POST` | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | `POST` | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | `POST` | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
-| `POST` | `/api/chat` | JWT/guest | SSE: `{type:"trace"\|"citations"\|"token"\|"done"}` |
+| `POST` | `/api/chat` | JWT/guest | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"done"}` |
+| `GET` | `/api/chat/sessions/current` | JWT/guest | `{session_id, started_at, summary}` |
+| `GET` | `/api/chat/sessions/{id}/messages` | JWT/guest | `{session_id, messages:[{role, content, citations[]}]}` |
 | `POST` | `/api/documents` | JWT/guest | `{document_id, filename, chunks_count}` |
 | `GET` | `/api/documents` | JWT/guest | `[{id, filename, chunks_count}]` |
 | `POST` | `/api/goals` | JWT/guest | `{goal_id, title}` |
@@ -188,11 +191,11 @@ See `docs/ARCHITECTURE.md` v2 for:
 | `POST` | `/api/mistakes/{id}/review` | JWT/guest | `{correct, correct_answer, explanation, new_interval_days}` |
 | `POST` | `/api/mistakes/{id}/mark-understood` | JWT/guest | `{mastery_score, next_due_at}` |
 | `GET` | `/api/mastery` | JWT/guest | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
-| `GET` | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, activity_daily[]}` |
+| `GET` | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
 | `GET` | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
 | `GET` | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
 
-All AI-bearing routes read **BYOK headers** per request. Auth is JWT Bearer with guest fallback.
+All AI-bearing routes read **BYOK headers** per request. Auth is JWT Bearer with guest fallback. `/api/chat` only enters retrieval when the authenticated user has at least one Library document; otherwise it streams an upload prompt and records the turn in the current session.
 
 </details>
 
@@ -216,7 +219,7 @@ study-coach/
 │   │   ├── db/{models,repositories,session}.py # SQLAlchemy + Alembic
 │   │   ├── eval/                           # P2.2 / P2.3 ablation harnesses
 │   │   └── srs/sm2.py                      # SM-2 spaced repetition scheduler
-│   └── tests/                              # 245 backend tests
+│   └── tests/                              # 248 backend tests
 ├── frontend/
 │   └── src/
 │       ├── views/                          # 8 views: Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding
@@ -255,9 +258,9 @@ study-coach/
 
 - **From prompt pipeline to agent graph**: Fixed chain-of-prompts → LangGraph with typed state, conditional routing, retry loops, and persistent memory
 - **Agent loop treated empirically**: 792 ablation runs comparing deterministic vs agent-loop across local models — not assumed, measured
-- **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, tool-calling agent loop, SSE streaming
+- **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace, and EmptyCorpusBanner
-- **Portfolio-grade engineering**: 245 tests, Alembic migrations, i18n, OAuth, Docker Compose, mobile responsive
+- **Portfolio-grade engineering**: 248 tests, Alembic migrations, i18n, OAuth, Docker Compose, mobile responsive
 
 ## Origin
 

@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM (local Ollama + cloud BYOK). P4 shipped — 245 backend tests, frontend production build.
+> Dual-track LLM (local Ollama + cloud BYOK). P4 shipped — 248 backend tests, frontend production build.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (P4):** 245 backend tests, frontend build passing. Agent loop ablation data: 792 records across P2.2 (Plan) + P2.3 (Quiz).
+**Current baseline (P4):** 248 backend tests, frontend build passing. Agent loop ablation data: 792 records across P2.2 (Plan) + P2.3 (Quiz).
 
 ---
 
@@ -68,7 +68,7 @@ erDiagram
 - **PlanEvent**: audit log of milestone state changes (created/completed/reopened/applied)
 - **Mastery**: composite PK `(user_id, topic_id)`. Score 0..1 updated by quiz grading and mistake redo
 - **Mistake**: SM-2 spaced-repetition schedule (`srs_due_at`, `srs_interval_days`, `srs_ease`)
-- **Session** / **Message** / **Citation**: chat persistence (schema present; write paths partial)
+- **Session** / **Message** / **Citation**: persisted chat history and assistant citations restored after frontend refresh
 
 ---
 
@@ -161,9 +161,11 @@ START → memory_hydrator → router → conditional_edges →
 | `planner_node` | Deterministic state-machine (GENERATE→milestones JSON→persist→?mindmap; CHECK-IN→progress→LLM adjust) + agent_loop variant | `configurable.planner` + `configurable.planner_mode` |
 | `memory_writer` | Drain `pending_mastery_delta` + `pending_mistake` to DB | `configurable.memory_writer` (no-op if absent) |
 
-Streaming: nodes emit SSE events via `get_stream_writer()`: `{type:"trace"} → {type:"citations"} → {type:"token"}+ → {type:"done"}`. Routes read via `graph.astream(stream_mode="custom")`.
+Streaming: `/api/chat` first emits `{type:"session", session_id}` so the client can reuse the persisted chat session. Nodes then emit SSE events via `get_stream_writer()`: `{type:"trace"} → {type:"citations"} → {type:"token"}+ → {type:"done"}`. Routes read via `graph.astream(stream_mode="custom")`.
 
-Checkpointer: `InMemorySaver` (process-lifetime). Upgrade target: `SqliteSaver`.
+Checkpointer: `InMemorySaver` (process-lifetime) keeps active graph state such as in-flight quiz/plan context. SQL `sessions/messages/citations` persist displayable chat history across frontend refresh. Upgrade target for graph state: `SqliteSaver`.
+
+Corpus guard: `/api/chat` checks SQL `documents` for the authenticated user before entering the graph. If the current user has no Library documents, it streams an upload prompt, persists the turn, and skips retrieval/LLM calls so stale global Chroma chunks cannot leak into answers.
 
 ---
 
@@ -200,12 +202,13 @@ Key tables (full definition at `backend/app/db/models.py`):
 | `questions` | `id, topic_id, prompt, options_json, answer, explanation` | 4-option MCQ |
 | `mastery` | `(user_id, topic_id) PK, score, last_reviewed` | 0..1, updated by quiz + mistake redo |
 | `mistakes` | `id, user_id, question_id, srs_due_at, srs_interval_days, srs_ease` | SM-2 schedule |
-| `sessions` | `id, user_id, started_at, summary?` | Chat session (Python class: `ChatSession`) |
-| `messages` | `id, session_id, role, content, tool_calls_json?` | Chat history |
-| `citations` | `id, message_id, chunk_id, page, span_start, span_end` | Source citations |
+| `sessions` | `id, user_id, started_at, summary?` | Persisted chat session (Python class: `ChatSession`) |
+| `messages` | `id, session_id, role, content, tool_calls_json?` | Displayable chat turns restored after frontend refresh |
+| `citations` | `id, message_id, chunk_id, page, span_start, span_end` | Source citations attached to assistant messages |
 | `documents` | `id, user_id, filename, hash, chunks_count` | Uploaded PDFs |
 
 Chunks live in **Chroma** (collection `study_coach_chunks`), not in SQL.
+SQL `documents` is the empty-corpus gate for retrieval: Chroma stores chunks, while the API refuses chat retrieval when the current user has no Library document rows. Full per-document Chroma filtering still requires adding `user_id` / `document_id` metadata to chunks and passing filters through dense, BM25, reranking, and agent-tool retrieval.
 
 Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app()` — idempotent.
 
@@ -219,7 +222,9 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | POST | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | POST | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | POST | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
-| POST | `/api/chat` | JWT/guest | SSE: `{type:"trace"\|"citations"\|"token"\|"done"}` |
+| POST | `/api/chat` | JWT/guest | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"done"}` |
+| GET | `/api/chat/sessions/current` | JWT/guest | `{session_id, started_at, summary}` |
+| GET | `/api/chat/sessions/{id}/messages` | JWT/guest | `{session_id, messages:[{role, content, citations[]}]}` |
 | POST | `/api/documents` | JWT/guest | `{document_id, filename, chunks_count}` |
 | GET | `/api/documents` | JWT/guest | `[{id, filename, chunks_count}]` |
 | POST | `/api/goals` | JWT/guest | `{goal_id, title}` |
@@ -231,7 +236,7 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | POST | `/api/mistakes/{id}/review` | JWT/guest | `{correct, correct_answer, explanation, new_interval_days}` |
 | POST | `/api/mistakes/{id}/mark-understood` | JWT/guest | `{mastery_score, next_due_at}` |
 | GET | `/api/mastery` | JWT/guest | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
-| GET | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, activity_daily[]}` |
+| GET | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
 | GET | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
 | GET | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
 
@@ -260,7 +265,7 @@ Tool-call detection: `GET /api/models/tool-check` probes model with dummy `ping`
 ```
 views/
 ├── Overview.vue       → useOverviewStore (setup-store composing 4 stores)
-├── Chat.vue           → useChatStore (SSE streaming + orderedParts)
+├── Chat.vue           → useChatStore (SSE streaming + current session restore)
 ├── PlanTimeline.vue   → usePlanStore (milestones + MilestoneList + PlanGantt)
 ├── QuizAdaptive.vue   → useQuizStore (adaptive quiz + MCQCard + GradeResult)
 ├── MistakeBank.vue    → useMistakesStore (SM-2 due + redo + mark-understood)

@@ -3,7 +3,7 @@
 > Phase history + priority backlog. Current state: P4 shipped — portfolio demo ready.
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
-## Current Snapshot (2026-05-27)
+## Current Snapshot (2026-06-10)
 
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
 - **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + Google OAuth (JWT).
@@ -12,8 +12,8 @@
 - **Eval evidence**: P2.0 retrieval eval, P2.2 Plan agent-loop ablation (396 runs), P2.3 Quiz agent-loop ablation (792 runs).
 - **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 5 ADRs + deployment topology + security model).
 - **Deploy**: Docker Compose (local Ollama) + fly.io fallback (BYOK cloud-only).
-- **Verification baseline**: 245 backend tests passing; frontend production build passing.
-- **Recent (2026-05-27)**: P4 shipped — Google OAuth + JWT, frontend auth integration (Bearer token on all API calls), real Google One Tap sign-in, Agent visibility Debug Mode, Goal Setup wizard, i18n en/zh-CN, streak/coverage radar, activity heatmap, Gantt timeline, mark-understood, MCQ format hardening, ARCHITECTURE.md v2.
+- **Verification baseline**: 248 backend tests passing; frontend production build passing.
+- **Recent (2026-06-10)**: Chat persistence slice shipped — `/api/chat` now creates/reuses `ChatSession`, persists user/assistant `Message` rows plus assistant `Citation` rows, emits SSE `session` events, restores current Chat session after frontend refresh, refuses retrieval when the current user has no Library documents, and `GET /api/users/me/stats.total_sessions` reflects real session count.
 
 ## P0 — Done
 
@@ -92,7 +92,7 @@ Pre-flight: Phase 1 answers were "missing content actually in the PDFs". Diagnos
 - [x] **Follow-up (2026-05-21)**: dev DB stamped + upgraded to head (`alembic stamp a03f432cd12f && alembic upgrade head`); `session.py` `create_all` retired in favor of `migrate_to_head()` called from `create_app()`; alembic is now single source of truth. 88 tests passing (+2 migrate_to_head unit tests).
 
 **Deferred follow-ups (not in P2.1-③ scope)**:
-- `sessions`/`messages`/`citations` write paths land in P2.1-④/⑤ when real Quiz/Plan nodes produce them
+- ~~`sessions`/`messages`/`citations` write paths land in P2.1-④/⑤ when real Quiz/Plan nodes produce them~~ Closed 2026-06-05 by Chat persistence slice.
 
 #### P2.1-④ Quiz chain (Done, 2026-05-21)
 
@@ -273,7 +273,7 @@ Shipped:
 
 ## P4 — Done (deploy, demo readiness, ARCHITECTURE.md v2)
 
-**Shipped 2026-05-27. 245 backend tests, frontend build passing.**
+**Shipped 2026-05-27. 248 backend tests, frontend build passing.**
 
 ### P4a — Deploy & Auth Hardening
 - [x] Google OAuth + JWT auth (`app/auth.py`, `app/api/auth_routes.py`)
@@ -302,9 +302,17 @@ Shipped:
 - [x] `useMediaQuery` composable
 - [x] ARCHITECTURE.md v2: Mermaid ER diagram, 5 ADRs, deployment topology, security model, A-tier expansion placeholders
 
+### P4d — Chat Persistence & Activity Evidence
+- [x] `/api/chat` creates or reuses a persisted `ChatSession` and emits `{type:"session", session_id}` before graph events
+- [x] User and assistant turns persist to `messages`; assistant citations persist to `citations`
+- [x] `GET /api/chat/sessions/current` and `GET /api/chat/sessions/{id}/messages` restore the current Chat view after frontend refresh
+- [x] `/api/chat` refuses before retrieval when the current user has no uploaded Library documents
+- [x] `GET /api/users/me/stats.total_sessions` now counts real sessions instead of returning `0`
+
 ### Deferred to beyond P4
 - PROMPT_ENGINEERING.md (skipped — content already in ADRs + EVAL.md)
 - Library auto-redirect after upload
+- Full Chroma corpus isolation: add `user_id` / `document_id` metadata to chunks and pass filters through dense, BM25, reranking, deterministic nodes, and agent-tool retrieval. Current P4d guard only refuses retrieval when the current user has no Library document rows.
 - shadcn-vue migration
 
 ## Out of scope (won't do unless asked)

@@ -13,7 +13,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import ChatSession, Goal, Plan, Topic
-from app.db.repositories import DocumentRepository, GoalRepository, PlanRepository
+from app.db.repositories import (
+    ChatSessionRepository,
+    CitationRepository,
+    DocumentRepository,
+    GoalRepository,
+    MessageRepository,
+    PlanRepository,
+)
 from app.db.session import get_session
 from app.llm.provider import LLMConfig
 
@@ -40,6 +47,10 @@ _SAME_MODEL_WARNING = (
     "⚠️ Self-check note: the judge is using the same model as the generator — "
     "self-preference bias possible. Set the x-judge-model header to a different "
     "model to mitigate.\n\n"
+)
+_NO_DOCUMENTS_MESSAGE = (
+    "Upload a PDF in Library before asking study questions. "
+    "Study Coach answers from your uploaded source material."
 )
 
 
@@ -158,6 +169,33 @@ class GoalCreateIn(BaseModel):
 class GoalCreateOut(BaseModel):
     goal_id: str
     title: str
+
+
+class ChatSessionOut(BaseModel):
+    session_id: str
+    started_at: str
+    summary: str | None = None
+
+
+class ChatCitationOut(BaseModel):
+    chunk_id: str
+    page: int
+    span_start: int
+    span_end: int
+    source: str | None = None
+
+
+class ChatMessageOut(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: str
+    citations: list[ChatCitationOut] = []
+
+
+class ChatMessagesOut(BaseModel):
+    session_id: str
+    messages: list[ChatMessageOut]
 
 
 def _plan_belongs_to_user(session: Session, *, user_id: str, plan_id: str):
@@ -321,10 +359,52 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _get_or_create_chat_session(
+    session: Session,
+    *,
+    user_id: str,
+    requested_id: str | None,
+):
+    repo = ChatSessionRepository(session)
+    if requested_id:
+        owned = repo.get_for_user(chat_id=requested_id, user_id=user_id)
+        if owned is not None:
+            return owned
+        if repo.get_by_id(requested_id) is None:
+            return repo.create(user_id=user_id, chat_id=requested_id)
+    return repo.create(user_id=user_id)
+
+
+def _persist_citations(
+    session: Session,
+    *,
+    message_id: str,
+    citations: list[dict],
+) -> None:
+    if not citations:
+        return
+    rows = [
+        {
+            "chunk_id": c["chunk_id"],
+            "page": c["page"],
+            "span_start": c.get("span_start", 0),
+            "span_end": c.get("span_end", 0),
+        }
+        for c in citations
+        if c.get("chunk_id") is not None and c.get("page") is not None
+    ]
+    if rows:
+        CitationRepository(session).bulk_create_for_message(
+            message_id=message_id,
+            citations=rows,
+        )
+
+
 @router.post("/chat")
 async def chat(
     body: ChatRequest,
     user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
     graph: Annotated[object, Depends(get_graph)],
     judge: Annotated[dict, Depends(get_judge_dependencies)],
     quiz_master: Annotated[object, Depends(get_quiz_master)],
@@ -336,11 +416,36 @@ async def chat(
     memory_hydrator: Annotated[object, Depends(get_memory_hydrator)],
     memory_writer: Annotated[object, Depends(get_memory_writer)],
 ):
-    # thread_id keys LangGraph's checkpointer; fall back to user_id when the
-    # client doesn't track a session (single-conversation-per-user UX).
-    thread_id = body.session_id or user_id
+    chat_session = _get_or_create_chat_session(
+        session,
+        user_id=user_id,
+        requested_id=body.session_id,
+    )
+    MessageRepository(session).create(
+        session_id=chat_session.id,
+        role="user",
+        content=body.message,
+    )
+    has_documents = bool(DocumentRepository(session).list_for_user(user_id))
+    # thread_id keys LangGraph's checkpointer; use the persisted chat session so
+    # the client can refresh, keep the id, and continue the same graph thread.
+    thread_id = chat_session.id
 
     async def event_stream():
+        yield _sse({"type": "session", "session_id": chat_session.id})
+        if not has_documents:
+            yield _sse({"type": "citations", "citations": []})
+            yield _sse({"type": "token", "text": _NO_DOCUMENTS_MESSAGE})
+            MessageRepository(session).create(
+                session_id=chat_session.id,
+                role="assistant",
+                content=_NO_DOCUMENTS_MESSAGE,
+                tool_calls_json=[],
+            )
+            yield _sse({"type": "done"})
+            return
+        assistant_parts: list[str] = []
+        assistant_citations: list[dict] = []
         input_state = {
             "messages": [HumanMessage(content=body.message)],
             "user_id": user_id,
@@ -362,6 +467,10 @@ async def chat(
         warning_yielded = False
         async for chunk in graph.astream(input_state, stream_mode="custom", config=config):
             yield _sse(chunk)
+            if chunk.get("type") == "token":
+                assistant_parts.append(chunk.get("text", ""))
+            elif chunk.get("type") == "citations":
+                assistant_citations = chunk.get("citations") or []
             # After the first non-empty citations event (Tutor path only),
             # surface the same-model bias warning once before tokens start.
             if (
@@ -373,11 +482,90 @@ async def chat(
                 # Inline-emit the bias warning as a token so the frontend
                 # (which renders all `token` events) surfaces it without
                 # needing a new event-type case.
+                assistant_parts.append(_SAME_MODEL_WARNING)
                 yield _sse({"type": "token", "text": _SAME_MODEL_WARNING})
                 warning_yielded = True
+        assistant = MessageRepository(session).create(
+            session_id=chat_session.id,
+            role="assistant",
+            content="".join(assistant_parts),
+            tool_calls_json=assistant_citations,
+        )
+        _persist_citations(
+            session,
+            message_id=assistant.id,
+            citations=assistant_citations,
+        )
         yield _sse({"type": "done"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/chat/sessions/current", response_model=ChatSessionOut)
+def get_current_chat_session(
+    user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    chat_session = ChatSessionRepository(session).latest_for_user(user_id)
+    if chat_session is None:
+        raise HTTPException(status_code=404, detail="no chat session for user")
+    return ChatSessionOut(
+        session_id=chat_session.id,
+        started_at=chat_session.started_at.isoformat(),
+        summary=chat_session.summary,
+    )
+
+
+@router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessagesOut)
+def get_chat_session_messages(
+    session_id: str,
+    user_id: Annotated[str, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    chat_session = ChatSessionRepository(session).get_for_user(
+        chat_id=session_id,
+        user_id=user_id,
+    )
+    if chat_session is None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    messages = MessageRepository(session).list_by_session(chat_session.id)
+    citations = CitationRepository(session).list_by_message_ids([m.id for m in messages])
+    by_message: dict[str, list] = {}
+    for citation in citations:
+        by_message.setdefault(citation.message_id, []).append(citation)
+    source_by_message_chunk: dict[tuple[str, str], str] = {}
+    for m in messages:
+        if not isinstance(m.tool_calls_json, list):
+            continue
+        for raw in m.tool_calls_json:
+            if not isinstance(raw, dict):
+                continue
+            chunk_id = raw.get("chunk_id")
+            source = raw.get("source")
+            if chunk_id and source:
+                source_by_message_chunk[(m.id, chunk_id)] = source
+    return ChatMessagesOut(
+        session_id=chat_session.id,
+        messages=[
+            ChatMessageOut(
+                id=m.id,
+                role=m.role,
+                content=m.content,
+                created_at=m.created_at.isoformat(),
+                citations=[
+                    ChatCitationOut(
+                        chunk_id=c.chunk_id,
+                        page=c.page,
+                        span_start=c.span_start,
+                        span_end=c.span_end,
+                        source=source_by_message_chunk.get((m.id, c.chunk_id)),
+                    )
+                    for c in by_message.get(m.id, [])
+                ],
+            )
+            for m in messages
+        ],
+    )
 
 
 @router.post("/goals", response_model=GoalCreateOut)
@@ -723,7 +911,7 @@ def get_user_stats(
     return UserStatsOut(
         streak_days=streak,
         coverage=round(coverage, 3),
-        total_sessions=0,
+        total_sessions=sessions_repo.count_for_user(user_id),
         last_active_date=last_row.isoformat() if last_row else None,
         activity_daily=activity,
     )

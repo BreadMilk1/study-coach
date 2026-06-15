@@ -70,6 +70,15 @@ def client(monkeypatch, tmp_path):
     stub = StubLLM([_GEN_JSON, _CHECK_IN_JSON])
     app.dependency_overrides[deps.get_llm] = lambda: stub
     app.dependency_overrides[deps.get_judge_dependencies] = lambda: {"llm": None, "same_model": False}
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+    with session_scope() as session:
+        DocumentRepository(session).create(
+            user_id="default-user",
+            filename="fixture.pdf",
+            hash_="fixture-hash",
+            chunks_count=1,
+        )
     with TestClient(app) as c:
         yield c
 

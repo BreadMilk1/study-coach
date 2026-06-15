@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -625,9 +625,15 @@ class ChatSessionRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def create(self, *, user_id: str, summary: str | None = None) -> ChatSession:
+    def create(
+        self,
+        *,
+        user_id: str,
+        summary: str | None = None,
+        chat_id: str | None = None,
+    ) -> ChatSession:
         chat = ChatSession(
-            id=_uuid(),
+            id=chat_id or _uuid(),
             user_id=user_id,
             started_at=datetime.utcnow(),
             summary=summary,
@@ -639,6 +645,28 @@ class ChatSessionRepository:
 
     def get_by_id(self, chat_id: str) -> ChatSession | None:
         return self.session.get(ChatSession, chat_id)
+
+    def get_for_user(self, *, chat_id: str, user_id: str) -> ChatSession | None:
+        stmt = select(ChatSession).where(
+            ChatSession.id == chat_id,
+            ChatSession.user_id == user_id,
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def latest_for_user(self, user_id: str) -> ChatSession | None:
+        stmt = (
+            select(ChatSession)
+            .where(ChatSession.user_id == user_id)
+            .order_by(ChatSession.started_at.desc())
+            .limit(1)
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def count_for_user(self, user_id: str) -> int:
+        stmt = select(func.count()).select_from(ChatSession).where(
+            ChatSession.user_id == user_id,
+        )
+        return int(self.session.execute(stmt).scalar_one())
 
     def count_active_days(self, user_id: str, *, since_days: int = 30) -> int:
         from datetime import timedelta
@@ -743,3 +771,9 @@ class CitationRepository:
         for r in rows:
             self.session.refresh(r)
         return rows
+
+    def list_by_message_ids(self, message_ids: list[str]) -> list[Citation]:
+        if not message_ids:
+            return []
+        stmt = select(Citation).where(Citation.message_id.in_(message_ids))
+        return list(self.session.execute(stmt).scalars())

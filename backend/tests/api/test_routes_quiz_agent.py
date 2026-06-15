@@ -81,6 +81,16 @@ def client_with_stubs(tmp_path, monkeypatch):
     app.dependency_overrides[get_quiz_master] = lambda: quiz_master_stub
     app.dependency_overrides[get_quiz_master_agent] = lambda: agent_stub
 
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+    with session_scope() as session:
+        DocumentRepository(session).create(
+            user_id="default-user",
+            filename="fixture.pdf",
+            hash_="fixture-hash",
+            chunks_count=1,
+        )
+
     with TestClient(app) as c:
         yield c
 

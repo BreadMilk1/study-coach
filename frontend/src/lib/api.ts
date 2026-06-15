@@ -5,11 +5,24 @@ getAccessToken()
 import type { Citation } from '../stores/chat'
 
 interface ChatStreamCallbacks {
+  onSession?: (sessionId: string) => void
   onCitations?: (cs: Citation[]) => void
   onToken?: (text: string) => void
   onTrace?: (step: any) => void
   onDone?: () => void
   onError?: (err: unknown) => void
+}
+
+const CHAT_SESSION_KEY = 'study-coach:current-chat-session-id'
+
+export function getStoredChatSessionId(): string {
+  try { return localStorage.getItem(CHAT_SESSION_KEY) || '' }
+  catch { return '' }
+}
+
+export function setStoredChatSessionId(sessionId: string): void {
+  try { localStorage.setItem(CHAT_SESSION_KEY, sessionId) }
+  catch { /* ignore */ }
 }
 
 export async function streamChat(
@@ -26,7 +39,10 @@ export async function streamChat(
         ...authHeaders(),
         ...llmHeaders(settings, overrides),
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        session_id: getStoredChatSessionId() || undefined,
+      }),
     })
     if (!resp.ok || !resp.body) throw new Error(`chat failed: ${resp.status}`)
     const reader = resp.body.getReader()
@@ -44,7 +60,10 @@ export async function streamChat(
         const json = trimmed.slice(6)
         try {
           const event = JSON.parse(json)
-          if (event.type === 'token') cb.onToken?.(event.text)
+          if (event.type === 'session') {
+            setStoredChatSessionId(event.session_id)
+            cb.onSession?.(event.session_id)
+          } else if (event.type === 'token') cb.onToken?.(event.text)
           else if (event.type === 'citations') cb.onCitations?.(event.citations)
           else if (event.type === 'trace') cb.onTrace?.(event)
           else if (event.type === 'done') cb.onDone?.()
@@ -286,6 +305,41 @@ export interface UserStatsDto {
 
 export function getUserStats(): Promise<UserStatsDto> {
   return getJSON<UserStatsDto>('/api/users/me/stats')
+}
+
+export interface ChatSessionDto {
+  session_id: string
+  started_at: string
+  summary: string | null
+}
+
+export interface ChatMessageCitationDto {
+  chunk_id: string
+  page: number
+  span_start: number
+  span_end: number
+  source: string | null
+}
+
+export interface ChatMessageDto {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+  citations: ChatMessageCitationDto[]
+}
+
+export interface ChatMessagesDto {
+  session_id: string
+  messages: ChatMessageDto[]
+}
+
+export function getCurrentChatSession(): Promise<ChatSessionDto> {
+  return getJSON<ChatSessionDto>('/api/chat/sessions/current')
+}
+
+export function getChatSessionMessages(sessionId: string): Promise<ChatMessagesDto> {
+  return getJSON<ChatMessagesDto>(`/api/chat/sessions/${sessionId}/messages`)
 }
 
 export async function reorderMilestones(

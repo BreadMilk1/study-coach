@@ -13,7 +13,8 @@ const router = useRouter()
 const input = ref('')
 const scrollEl = useTemplateRef<HTMLDivElement>('scrollEl')
 
-onMounted(() => {
+onMounted(async () => {
+  await chat.restoreCurrentSession()
   const autoText = route.query.auto as string | undefined
   if (autoText) {
     input.value = autoText
@@ -31,6 +32,7 @@ async function send() {
   await nextTick()
   scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight })
   await streamChat(text, settings.$state, {
+    onSession: (sessionId) => chat.setSessionId(sessionId),
     onCitations: (cs) => chat.setCitations(assistant, cs),
     onToken: (t) => {
       chat.appendToken(assistant, t)
