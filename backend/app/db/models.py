@@ -128,7 +128,7 @@ class Message(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id"))
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
-    tool_calls_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tool_calls_json: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

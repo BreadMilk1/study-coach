@@ -2,11 +2,12 @@ import { authHeaders, getAccessToken, llmHeaders, type ModeOverrides } from '../
 
 // Auto-provision anonymous token on module load
 getAccessToken()
-import type { Citation } from '../stores/chat'
+import type { AgentRun, Citation } from '../stores/chat'
 
 interface ChatStreamCallbacks {
   onSession?: (sessionId: string) => void
   onCitations?: (cs: Citation[]) => void
+  onAgentRun?: (run: AgentRun) => void
   onToken?: (text: string) => void
   onTrace?: (step: any) => void
   onDone?: () => void
@@ -65,6 +66,7 @@ export async function streamChat(
             cb.onSession?.(event.session_id)
           } else if (event.type === 'token') cb.onToken?.(event.text)
           else if (event.type === 'citations') cb.onCitations?.(event.citations)
+          else if (event.type === 'agent_run') cb.onAgentRun?.(event.run)
           else if (event.type === 'trace') cb.onTrace?.(event)
           else if (event.type === 'done') cb.onDone?.()
         } catch { /* ignore malformed */ }
@@ -327,6 +329,7 @@ export interface ChatMessageDto {
   content: string
   created_at: string
   citations: ChatMessageCitationDto[]
+  agent_run: AgentRun | null
 }
 
 export interface ChatMessagesDto {

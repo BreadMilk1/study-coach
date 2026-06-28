@@ -6,6 +6,8 @@ Three assertions:
   3. Multi-turn: turn 1 = GENERATE in agent_loop mode (agent path), turn 2 = "A"
      (active_quiz_question_id set by turn 1) → state-aware override → deterministic GRADE
 """
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
@@ -43,6 +45,23 @@ def client_with_stubs(tmp_path, monkeypatch):
         writer = get_stream_writer()
         writer({"type": "citations", "citations": []})
         writer({"type": "token", "text": "AGENT-QUIZ-PATH"})
+        writer({
+            "type": "agent_run",
+            "run": {
+                "node": "quiz",
+                "mode": "agent_loop",
+                "exit_reason": "natural_stop",
+                "total_iterations": 2,
+                "total_tool_calls": 2,
+                "tool_call_breakdown": {},
+                "tool_errors": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "wall_time_s": 0.1,
+                "llm_error": None,
+                "tool_calls": [],
+            },
+        })
         return {
             "messages": [AIMessage(content="AGENT-QUIZ-PATH")],
             "citations": [],
@@ -95,6 +114,14 @@ def client_with_stubs(tmp_path, monkeypatch):
         yield c
 
 
+def _parse_events(text: str) -> list[dict]:
+    events = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            events.append(json.loads(line[len("data: "):]))
+    return events
+
+
 def test_quiz_mode_header_agent_loop_routes_to_agent_path(client_with_stubs):
     response = client_with_stubs.post(
         "/api/chat",
@@ -107,6 +134,11 @@ def test_quiz_mode_header_agent_loop_routes_to_agent_path(client_with_stubs):
     assert "citations" in body
     assert "token" in body
     assert "done" in body
+    events = _parse_events(response.text)
+    agent_run = next(e for e in events if e["type"] == "agent_run")
+    assert agent_run["run"]["node"] == "quiz"
+    assert agent_run["run"]["mode"] == "agent_loop"
+    assert agent_run["run"]["exit_reason"] == "natural_stop"
 
 
 def test_quiz_mode_header_absent_defaults_to_deterministic(client_with_stubs):

@@ -113,3 +113,68 @@ def test_last_persisted_question_id_returns_none_when_no_successful_persist():
     # Only errored persists + a retriever_search → returns None
     trace.record_tool_call("retriever_search", {"query": "x"}, "[]", error=False)
     assert trace.last_persisted_question_id() is None
+
+
+def test_serialize_public_includes_ui_summary_and_tool_details():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.record_iteration(
+        _ai(tool_calls=[{
+            "name": "retriever_search",
+            "args": {"query": "HyDE", "top_k": 3},
+            "id": "c1",
+        }], input_tokens=100, output_tokens=20),
+        iteration=0,
+    )
+    trace.record_tool_call(
+        "retriever_search",
+        {"query": "HyDE", "top_k": 3},
+        '[{"chunk_id":"c1","content":"long source text","page":1}]',
+        error=False,
+    )
+    trace.exit_reason = "natural_stop"
+
+    out = trace.serialize_public(node="planner")
+
+    assert out["node"] == "planner"
+    assert out["mode"] == "agent_loop"
+    assert out["exit_reason"] == "natural_stop"
+    assert out["total_iterations"] == 1
+    assert out["total_tool_calls"] == 1
+    assert out["input_tokens"] == 100
+    assert out["output_tokens"] == 20
+    assert out["tool_calls"] == [{
+        "name": "retriever_search",
+        "error": False,
+        "args_preview": '{"query":"HyDE","top_k":3}',
+        "output_preview": "1 chunks",
+    }]
+
+
+def test_serialize_public_truncates_error_output():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.record_tool_call(
+        "update_study_plan",
+        {"milestones": "bad"},
+        "Error calling update_study_plan: " + ("x" * 500),
+        error=True,
+    )
+    out = trace.serialize_public(node="planner")
+
+    assert out["tool_calls"][0]["error"] is True
+    assert out["tool_calls"][0]["output_preview"].startswith("Error calling update_study_plan")
+    assert len(out["tool_calls"][0]["output_preview"]) <= 220
+
+
+def test_serialize_public_does_not_leak_truncated_retriever_text():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.record_tool_call(
+        "retriever_search",
+        {"query": "Prompt Engineering"},
+        '[{"chunk_id":"c1","content":"' + ("source text " * 80),
+        error=False,
+    )
+
+    out = trace.serialize_public(node="quiz")
+
+    assert out["tool_calls"][0]["output_preview"] == "retriever chunks"
+    assert "source text" not in out["tool_calls"][0]["output_preview"]

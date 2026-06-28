@@ -169,6 +169,12 @@ def _safe_writer():
         return lambda _payload: None
 
 
+def _emit_agent_run(writer, trace: AgentTrace) -> dict:
+    run = trace.serialize_public(node="quiz")
+    writer({"type": "agent_run", "run": run})
+    return run
+
+
 def _last_human_msg(state: CoachState) -> str:
     user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
     return user_msgs[-1].content if user_msgs else ""
@@ -225,6 +231,7 @@ def _format_final_output(writer, trace: AgentTrace, last_response) -> dict:
 
     writer({"type": "citations", "citations": []})
     writer({"type": "token", "text": final_text})
+    _emit_agent_run(writer, trace)
 
     return {
         "messages": [AIMessage(content=final_text)],
@@ -246,6 +253,7 @@ def _format_degrade_output(writer, trace: AgentTrace, reason: str) -> dict:
 
     writer({"type": "citations", "citations": []})
     writer({"type": "token", "text": text})
+    _emit_agent_run(writer, trace)
 
     return {
         "messages": [AIMessage(content=text)],

@@ -34,6 +34,7 @@ async function send() {
   await streamChat(text, settings.$state, {
     onSession: (sessionId) => chat.setSessionId(sessionId),
     onCitations: (cs) => chat.setCitations(assistant, cs),
+    onAgentRun: (run) => chat.setAgentRun(assistant, run),
     onToken: (t) => {
       chat.appendToken(assistant, t)
       scrollEl.value?.scrollTo({ top: scrollEl.value.scrollHeight })

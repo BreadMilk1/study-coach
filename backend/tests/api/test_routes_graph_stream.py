@@ -228,6 +228,80 @@ def test_chat_persists_current_session_messages_and_citations(client):
     assert assistant["citations"][0]["source"] == "a.pdf"
     assert assistant["citations"][0]["page"] == 1
 
+    from app.db.models import Message
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        msg = session.get(Message, assistant["id"])
+        msg.tool_calls_json = [{"chunk_id": "a:1:0", "source": "legacy.pdf"}]
+        session.commit()
+
+    legacy_resp = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_HEADERS,
+    )
+    assert legacy_resp.status_code == 200
+    legacy_assistant = legacy_resp.json()["messages"][1]
+    assert legacy_assistant["citations"][0]["source"] == "legacy.pdf"
+
+
+def test_chat_persists_and_restores_agent_run_from_stream(client, app):
+    from app.api.deps import get_llm
+
+    class ScriptedAgentLLM:
+        def __init__(self):
+            self.responses = [
+                AIMessage(content="", tool_calls=[{
+                    "name": "update_study_plan",
+                    "args": {"milestones": [
+                        {
+                            "title": "Read HyDE notes",
+                            "due_at": "2026-05-30",
+                            "done": False,
+                            "topic": "HyDE",
+                        },
+                    ]},
+                    "id": "c1",
+                }]),
+                AIMessage(content="Plan created."),
+            ]
+
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages, **_kwargs):
+            if not self.responses:
+                raise AssertionError("ScriptedAgentLLM exhausted")
+            return self.responses.pop(0)
+
+        async def astream(self, _messages, **_kwargs):
+            if False:
+                yield None
+
+    app.dependency_overrides[get_llm] = lambda: ScriptedAgentLLM()
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "make a plan on HyDE", "session_id": "agent-run-restore"},
+        headers={**_HEADERS, "x-planner-mode": "agent_loop"},
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    session_id = next(e["session_id"] for e in events if e["type"] == "session")
+    agent_run_event = next(e for e in events if e["type"] == "agent_run")
+    assert agent_run_event["run"]["node"] == "planner"
+
+    messages_resp = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_HEADERS,
+    )
+    assert messages_resp.status_code == 200
+    assistant = messages_resp.json()["messages"][1]
+    assert assistant["agent_run"]["node"] == "planner"
+    assert assistant["agent_run"]["exit_reason"] == "natural_stop"
+
 
 def test_user_stats_counts_persisted_chat_sessions(client):
     with client.stream("POST", "/api/chat",

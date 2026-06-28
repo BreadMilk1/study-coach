@@ -156,6 +156,12 @@ def test_chat_agent_loop_mode_emits_citations_token_done(client):
     # Agent-mode final summary contains a unique string the deterministic
     # path never produces (deterministic emits "DET-M1" instead).
     assert "📋 Plan: M1 by 2026-05-30." in token_event["text"]
+    agent_run = next(e for e in events if e["type"] == "agent_run")
+    assert agent_run["run"]["node"] == "planner"
+    assert agent_run["run"]["mode"] == "agent_loop"
+    assert agent_run["run"]["exit_reason"] == "natural_stop"
+    assert agent_run["run"]["total_tool_calls"] == 1
+    assert agent_run["run"]["tool_call_breakdown"] == {"update_study_plan": 1}
 
 
 def test_chat_unknown_planner_mode_falls_back_to_deterministic(client):

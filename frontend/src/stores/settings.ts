@@ -165,7 +165,11 @@ export function llmHeaders(s: SettingsState, overrides: ModeOverrides = {}): Rec
   if (s.apiKey) h['x-api-key'] = s.apiKey
   if (s.baseUrl) h['x-base-url'] = s.baseUrl
   if (s.judgeModel) h['x-judge-model'] = s.judgeModel
-  if (overrides.plannerMode) h['x-planner-mode'] = overrides.plannerMode
-  if (overrides.quizMode) h['x-quiz-mode'] = overrides.quizMode
+  h['x-planner-mode'] = overrides.plannerMode ?? (
+    s.toolCapable === false ? 'deterministic' : s.defaultPlannerMode
+  )
+  h['x-quiz-mode'] = overrides.quizMode ?? (
+    s.toolCapable === false ? 'deterministic' : s.defaultQuizMode
+  )
   return h
 }

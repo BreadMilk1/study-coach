@@ -18,6 +18,37 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 
+def _compact_json(value: dict, *, limit: int = 200) -> str:
+    raw = json.dumps(value or {}, ensure_ascii=False, separators=(",", ":"), default=str)
+    if len(raw) <= limit:
+        return raw
+    return raw[: max(0, limit - 3)] + "..."
+
+
+def _preview_output(tool_name: str, output: str, *, error: bool, limit: int = 220) -> str:
+    text = str(output or "")
+    if not error:
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if tool_name == "retriever_search" and isinstance(parsed, list):
+            return f"{len(parsed)} chunks"
+        if tool_name == "retriever_search" and text.lstrip().startswith("["):
+            return "retriever chunks"
+        if isinstance(parsed, dict):
+            safe = {
+                k: parsed.get(k)
+                for k in ("plan_id", "question_id", "topic_id", "persisted")
+                if k in parsed
+            }
+            if safe:
+                return _compact_json(safe, limit=limit)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
 @dataclass
 class IterationRecord:
     iteration: int
@@ -130,4 +161,28 @@ class AgentTrace:
             "wall_time_s": time.monotonic() - self.t_start,
             "exit_reason": self.exit_reason,
             "llm_error": self.llm_error,
+        }
+
+    def serialize_public(self, *, node: str, mode: str = "agent_loop") -> dict:
+        return {
+            "node": node,
+            "mode": mode,
+            "total_iterations": len(self.iterations),
+            "total_tool_calls": len(self.tool_calls),
+            "tool_call_breakdown": dict(Counter(tc.name for tc in self.tool_calls)),
+            "tool_errors": sum(1 for tc in self.tool_calls if tc.error),
+            "input_tokens": sum(it.input_tokens for it in self.iterations),
+            "output_tokens": sum(it.output_tokens for it in self.iterations),
+            "wall_time_s": time.monotonic() - self.t_start,
+            "exit_reason": self.exit_reason,
+            "llm_error": self.llm_error,
+            "tool_calls": [
+                {
+                    "name": tc.name,
+                    "error": tc.error,
+                    "args_preview": _compact_json(tc.args),
+                    "output_preview": _preview_output(tc.name, tc.output, error=tc.error),
+                }
+                for tc in self.tool_calls
+            ],
         }

@@ -721,7 +721,7 @@ class MessageRepository:
         session_id: str,
         role: str,
         content: str,
-        tool_calls_json: list | None = None,
+        tool_calls_json: dict | list | None = None,
     ) -> Message:
         msg = Message(
             id=_uuid(),

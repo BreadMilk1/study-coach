@@ -3,7 +3,7 @@
 > Phase history + priority backlog. Current state: P4 shipped — portfolio demo ready.
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
-## Current Snapshot (2026-06-10)
+## Current Snapshot (2026-06-15)
 
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
 - **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + Google OAuth (JWT).
@@ -12,7 +12,8 @@
 - **Eval evidence**: P2.0 retrieval eval, P2.2 Plan agent-loop ablation (396 runs), P2.3 Quiz agent-loop ablation (792 runs).
 - **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 5 ADRs + deployment topology + security model).
 - **Deploy**: Docker Compose (local Ollama) + fly.io fallback (BYOK cloud-only).
-- **Verification baseline**: 248 backend tests passing; frontend production build passing.
+- **Verification baseline**: 252 backend tests passing; frontend production build passing.
+- **Recent (2026-06-15)**: Recoverable Agent Run Trace shipped — Planner / QuizMaster `agent_loop` nodes emit SSE `agent_run` events, `/api/chat` persists them in `messages.tool_calls_json` assistant artifact envelopes, `GET /api/chat/sessions/{id}/messages` restores them after refresh, and Debug Mode TracePanel displays node/mode/exit reason, tool counts, token counts, latency, and redacted tool-call previews.
 - **Recent (2026-06-10)**: Chat persistence slice shipped — `/api/chat` now creates/reuses `ChatSession`, persists user/assistant `Message` rows plus assistant `Citation` rows, emits SSE `session` events, restores current Chat session after frontend refresh, refuses retrieval when the current user has no Library documents, and `GET /api/users/me/stats.total_sessions` reflects real session count.
 
 ## P0 — Done
@@ -273,7 +274,7 @@ Shipped:
 
 ## P4 — Done (deploy, demo readiness, ARCHITECTURE.md v2)
 
-**Shipped 2026-05-27. 248 backend tests, frontend build passing.**
+**Shipped 2026-05-27. Current baseline: 252 backend tests, frontend build passing.**
 
 ### P4a — Deploy & Auth Hardening
 - [x] Google OAuth + JWT auth (`app/auth.py`, `app/api/auth_routes.py`)
@@ -287,7 +288,7 @@ Shipped:
 - [x] `GET /api/health` returns `ollama_enabled` flag
 
 ### P4b — Product Polish
-- [x] Agent visibility Debug Mode (SSE `trace` events + TracePanel)
+- [x] Agent visibility Debug Mode (SSE `trace` / `agent_run` events + TracePanel)
 - [x] Goal Setup 3-step wizard (Onboarding view + `POST /api/goals`)
 - [x] i18n with `vue-i18n` (en/zh-CN), language switcher, full view extraction
 - [x] Streak + coverage computation (`GET /api/users/me/stats`, radar integration)
@@ -308,6 +309,13 @@ Shipped:
 - [x] `GET /api/chat/sessions/current` and `GET /api/chat/sessions/{id}/messages` restore the current Chat view after frontend refresh
 - [x] `/api/chat` refuses before retrieval when the current user has no uploaded Library documents
 - [x] `GET /api/users/me/stats.total_sessions` now counts real sessions instead of returning `0`
+
+### P4e — Recoverable Agent Run Trace
+- [x] `AgentTrace.serialize_public()` exposes UI-safe agent-loop summaries without changing eval-facing `serialize()`
+- [x] Planner / QuizMaster `agent_loop` paths stream `{type:"agent_run", run}` after the assistant token output
+- [x] Assistant messages persist `citations` and `agent_run` in `messages.tool_calls_json` schema `assistant_artifacts.v1`; legacy plain citation lists still restore source names
+- [x] Chat restore maps `agent_run` back to frontend `Message.agentRun`
+- [x] Debug Mode TracePanel renders latest Agent Run summary and redacted tool-call previews
 
 ### Deferred to beyond P4
 - PROMPT_ENGINEERING.md (skipped — content already in ADRs + EVAL.md)

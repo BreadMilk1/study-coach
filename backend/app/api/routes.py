@@ -185,12 +185,35 @@ class ChatCitationOut(BaseModel):
     source: str | None = None
 
 
+class AgentRunToolCallOut(BaseModel):
+    name: str
+    error: bool
+    args_preview: str
+    output_preview: str
+
+
+class AgentRunOut(BaseModel):
+    node: str
+    mode: str
+    total_iterations: int
+    total_tool_calls: int
+    tool_call_breakdown: dict[str, int]
+    tool_errors: int
+    input_tokens: int
+    output_tokens: int
+    wall_time_s: float
+    exit_reason: str
+    llm_error: str | None = None
+    tool_calls: list[AgentRunToolCallOut] = []
+
+
 class ChatMessageOut(BaseModel):
     id: str
     role: str
     content: str
     created_at: str
     citations: list[ChatCitationOut] = []
+    agent_run: AgentRunOut | None = None
 
 
 class ChatMessagesOut(BaseModel):
@@ -375,6 +398,33 @@ def _get_or_create_chat_session(
     return repo.create(user_id=user_id)
 
 
+_ASSISTANT_ARTIFACTS_SCHEMA = "assistant_artifacts.v1"
+
+
+def _assistant_artifacts(*, citations: list[dict], agent_run: dict | None) -> dict:
+    return {
+        "schema": _ASSISTANT_ARTIFACTS_SCHEMA,
+        "citations": list(citations or []),
+        "agent_run": agent_run,
+    }
+
+
+def _extract_artifact_citations(raw) -> list[dict]:
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+    if isinstance(raw, dict) and raw.get("schema") == _ASSISTANT_ARTIFACTS_SCHEMA:
+        citations = raw.get("citations") or []
+        return [c for c in citations if isinstance(c, dict)]
+    return []
+
+
+def _extract_artifact_agent_run(raw) -> dict | None:
+    if isinstance(raw, dict) and raw.get("schema") == _ASSISTANT_ARTIFACTS_SCHEMA:
+        run = raw.get("agent_run")
+        return run if isinstance(run, dict) else None
+    return None
+
+
 def _persist_citations(
     session: Session,
     *,
@@ -440,12 +490,13 @@ async def chat(
                 session_id=chat_session.id,
                 role="assistant",
                 content=_NO_DOCUMENTS_MESSAGE,
-                tool_calls_json=[],
+                tool_calls_json=_assistant_artifacts(citations=[], agent_run=None),
             )
             yield _sse({"type": "done"})
             return
         assistant_parts: list[str] = []
         assistant_citations: list[dict] = []
+        assistant_agent_run: dict | None = None
         input_state = {
             "messages": [HumanMessage(content=body.message)],
             "user_id": user_id,
@@ -471,6 +522,9 @@ async def chat(
                 assistant_parts.append(chunk.get("text", ""))
             elif chunk.get("type") == "citations":
                 assistant_citations = chunk.get("citations") or []
+            elif chunk.get("type") == "agent_run":
+                run = chunk.get("run")
+                assistant_agent_run = run if isinstance(run, dict) else None
             # After the first non-empty citations event (Tutor path only),
             # surface the same-model bias warning once before tokens start.
             if (
@@ -489,7 +543,10 @@ async def chat(
             session_id=chat_session.id,
             role="assistant",
             content="".join(assistant_parts),
-            tool_calls_json=assistant_citations,
+            tool_calls_json=_assistant_artifacts(
+                citations=assistant_citations,
+                agent_run=assistant_agent_run,
+            ),
         )
         _persist_citations(
             session,
@@ -534,16 +591,16 @@ def get_chat_session_messages(
     for citation in citations:
         by_message.setdefault(citation.message_id, []).append(citation)
     source_by_message_chunk: dict[tuple[str, str], str] = {}
+    agent_run_by_message: dict[str, dict] = {}
     for m in messages:
-        if not isinstance(m.tool_calls_json, list):
-            continue
-        for raw in m.tool_calls_json:
-            if not isinstance(raw, dict):
-                continue
+        for raw in _extract_artifact_citations(m.tool_calls_json):
             chunk_id = raw.get("chunk_id")
             source = raw.get("source")
             if chunk_id and source:
                 source_by_message_chunk[(m.id, chunk_id)] = source
+        run = _extract_artifact_agent_run(m.tool_calls_json)
+        if run:
+            agent_run_by_message[m.id] = run
     return ChatMessagesOut(
         session_id=chat_session.id,
         messages=[
@@ -562,6 +619,7 @@ def get_chat_session_messages(
                     )
                     for c in by_message.get(m.id, [])
                 ],
+                agent_run=agent_run_by_message.get(m.id),
             )
             for m in messages
         ],

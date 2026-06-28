@@ -15,11 +15,34 @@ export interface Citation {
   page: number
 }
 
+export interface AgentRunToolCall {
+  name: string
+  error: boolean
+  args_preview: string
+  output_preview: string
+}
+
+export interface AgentRun {
+  node: string
+  mode: string
+  total_iterations: number
+  total_tool_calls: number
+  tool_call_breakdown: Record<string, number>
+  tool_errors: number
+  input_tokens: number
+  output_tokens: number
+  wall_time_s: number
+  exit_reason: string
+  llm_error: string | null
+  tool_calls: AgentRunToolCall[]
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
   citations?: Citation[]
+  agentRun?: AgentRun | null
 }
 
 interface ChatState {
@@ -63,6 +86,9 @@ export const useChat = defineStore('chat', {
     setCitations(m: Message, cs: Citation[]) {
       m.citations = cs
     },
+    setAgentRun(m: Message, run: AgentRun) {
+      m.agentRun = run
+    },
     finish() {
       this.streaming = false
       const last = this.messages[this.messages.length - 1]
@@ -93,6 +119,7 @@ export const useChat = defineStore('chat', {
             source: c.source || c.chunk_id,
             page: c.page,
           })),
+          agentRun: m.agent_run,
         }))
       } catch {
         // No prior session yet, or it belongs to a different user/token.
