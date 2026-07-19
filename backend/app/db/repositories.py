@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -42,6 +42,55 @@ def _due_to_json(value):
     if isinstance(value, datetime) and value.time() == datetime.min.time():
         return value.date().isoformat()
     return value.isoformat()
+
+
+class DataLifecycleRepository:
+    def __init__(self, session: Session):
+        self.session = session
+
+    def count_all(self) -> dict[str, int]:
+        def count(model) -> int:
+            stmt = select(func.count()).select_from(model)
+            return int(self.session.execute(stmt).scalar_one())
+
+        source_chunks = self.session.execute(
+            select(func.coalesce(func.sum(Document.chunks_count), 0))
+        ).scalar_one()
+        return {
+            "users": count(User),
+            "documents": count(Document),
+            "chat_sessions": count(ChatSession),
+            "messages": count(Message),
+            "citations": count(Citation),
+            "goals": count(Goal),
+            "topics": count(Topic),
+            "plans": count(Plan),
+            "plan_milestones": count(PlanMilestone),
+            "plan_events": count(PlanEvent),
+            "questions": count(Question),
+            "mastery": count(Mastery),
+            "mistakes": count(Mistake),
+            "source_chunks": int(source_chunks),
+        }
+
+    def delete_learning_data(self, *, include_users: bool) -> None:
+        for model in (
+            Citation,
+            Message,
+            ChatSession,
+            PlanEvent,
+            PlanMilestone,
+            Plan,
+            Mistake,
+            Mastery,
+            Question,
+            Topic,
+            Goal,
+            Document,
+        ):
+            self.session.execute(delete(model))
+        if include_users:
+            self.session.execute(delete(User))
 
 
 class UserRepository:
