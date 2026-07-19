@@ -1,6 +1,6 @@
 # Study Coach — ROADMAP
 
-> Phase history + priority backlog. Current state: P4.5 product closure verified; next-stage data lifecycle design pending.
+> Phase history + priority backlog. Current state: P4.5 product closure verified; P5 local-first data lifecycle design approved.
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
 ## Current Snapshot (2026-07-20)
@@ -14,7 +14,8 @@
 - **Deploy**: Docker Compose (local Ollama) + fly.io fallback (BYOK cloud-only).
 - **Verification baseline**: 256 backend tests passing; frontend production build passing.
 - **Recent (2026-07-20)**: P4.5 manual browser demo passed with user-owned PDFs — grounded Chat answer, agent-loop Quiz generation, deterministic grading, and refresh restore all verified. Follow-up hardening prevents answer/explanation disclosure during GENERATE and strips trailing retrieval metadata before explanation persistence.
-- **Recent (2026-07-02)**: P4.5 automated Product Closure implemented — Chat quiz MCQs are persisted before display, failed quiz persistence degrades safely, `persist_quiz_question` tolerates narrow local-model formatting near-misses, route tests no longer depend on live Ollama, and `docs/DEMO.md` documents the reviewer path. Manual browser demo with a user-owned PDF remains the final public-review gate.
+- **Next (2026-07-20)**: P5 Local-first Data Lifecycle design approved — hide incomplete Google OAuth UI, add instance-level data summary and recoverable two-scope reset, require a per-tab startup choice when learning data exists, and add Danger Zone plus notification feedback. Design: `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md`.
+- **Recent (2026-07-02)**: P4.5 automated Product Closure implemented — Chat quiz MCQs are persisted before display, failed quiz persistence degrades safely, `persist_quiz_question` tolerates narrow local-model formatting near-misses, route tests no longer depend on live Ollama, and `docs/DEMO.md` documents the reviewer path. The final manual public-review gate was completed on 2026-07-20.
 - **Recent (2026-06-15)**: Recoverable Agent Run Trace shipped — Planner / QuizMaster `agent_loop` nodes emit SSE `agent_run` events, `/api/chat` persists them in `messages.tool_calls_json` assistant artifact envelopes, `GET /api/chat/sessions/{id}/messages` restores them after refresh, and Debug Mode TracePanel displays node/mode/exit reason, tool counts, token counts, latency, and redacted tool-call previews.
 - **Recent (2026-06-10)**: Chat persistence slice shipped — `/api/chat` now creates/reuses `ChatSession`, persists user/assistant `Message` rows plus assistant `Citation` rows, emits SSE `session` events, restores current Chat session after frontend refresh, refuses retrieval when the current user has no Library documents, and `GET /api/users/me/stats.total_sessions` reflects real session count.
 
@@ -335,8 +336,21 @@ Shipped:
 - PROMPT_ENGINEERING.md (skipped — content already in ADRs + EVAL.md)
 - Library auto-redirect after upload
 - Full Chroma corpus isolation: add `user_id` / `document_id` metadata to chunks and pass filters through dense, BM25, reranking, deterministic nodes, and agent-tool retrieval. Current P4d guard only refuses retrieval when the current user has no Library document rows.
-- User-controlled reset: after corpus isolation, add an authenticated current-user data reset API plus a Settings Danger Zone / optional startup `Continue existing data` vs `Start fresh` choice. A local-only global factory reset is the simpler alternative if multi-user support is explicitly dropped.
 - shadcn-vue migration
+
+## P5 — Planned (Local-first Data Lifecycle)
+
+Design approved 2026-07-20. P5 deliberately treats Study Coach as a local-first, single-user portfolio product; multi-user auth and Chroma ownership move to a later isolated worktree.
+
+- [x] Product direction, data scopes, failure semantics, startup gate, Danger Zone, and notification design approved.
+- [x] Design spec: `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md`.
+- [ ] P5.0: remove incomplete Google OAuth UI/GIS runtime and align local-first README/product copy.
+- [ ] P5.1: backend summary and idempotent two-scope reset across Chroma, graph state, retriever caches, SQLite, local-mode/loopback deployment guard, Docker Chroma path fix, and unique temporary-upload cleanup.
+- [ ] P5.2: Vitest foundation and capability-aware, required once-per-tab startup gate (Continue plus Start fresh when local reset is enabled).
+- [ ] P5.3: Settings Danger Zone, confirmation flows, global notifications, and accessibility.
+- [ ] P5.4: full automated verification, manual demo, and final architecture/product docs sync.
+
+**Deferred after P5:** a separate `feature/multi-user-auth` worktree for guest upgrade, Google OAuth, SQL/Chroma ownership, legacy migration, and data-continuity tests.
 
 ## Out of scope (won't do unless asked)
 

@@ -45,6 +45,7 @@ docs/superpowers/plans/*
 !docs/superpowers/specs/
 docs/superpowers/specs/*
 !docs/superpowers/specs/2026-07-01-p4-5-product-closure-design.md
+!docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md
 docs/P2.1.5-PROMPT.md
 docs/PHASE_2.0_REPORT.md
 docs/RETRIEVAL_EVAL.md
