@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM (local Ollama + cloud BYOK). P4 shipped — 252 backend tests, frontend production build.
+> Dual-track LLM (local Ollama + cloud BYOK). P4.5 automated closure — 256 backend tests, frontend production build.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (P4):** 252 backend tests, frontend build passing. Agent loop ablation data: 792 records across P2.2 (Plan) + P2.3 (Quiz).
+**Current baseline (P4.5 automated):** 256 backend tests, frontend build passing. Agent loop ablation data: 792 records across P2.2 (Plan) + P2.3 (Quiz).
 
 ---
 
@@ -166,6 +166,8 @@ Streaming: `/api/chat` first emits `{type:"session", session_id}` so the client 
 Checkpointer: `InMemorySaver` (process-lifetime) keeps active graph state such as in-flight quiz/plan context. SQL `sessions/messages/citations` persist displayable chat history across frontend refresh; `messages.tool_calls_json` stores a backwards-compatible assistant artifact envelope with citation source metadata and optional `agent_run`. Upgrade target for graph state: `SqliteSaver`.
 
 Corpus guard: `/api/chat` checks SQL `documents` for the authenticated user before entering the graph. If the current user has no Library documents, it streams an upload prompt, persists the turn, and skips retrieval/LLM calls so stale global Chroma chunks cannot leak into answers.
+
+Quiz strong consistency: Chat displays an answerable MCQ only after the backend has persisted the question and set `active_quiz_question_id`. The visible GENERATE reply is formatted from that persisted `Question` row rather than the model's final prose, so answer/explanation stay private until the deterministic GRADE turn. The Quiz persistence schema also removes a narrowly recognized trailing retrieval-metadata object (`source` / `page` / `score`) from explanations. Failed agent-loop persistence degrades to a non-answerable message while preserving redacted Agent Run evidence.
 
 ---
 

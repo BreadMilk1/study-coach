@@ -82,7 +82,7 @@ def _ai(content="", tool_calls=None, input_tokens=10, output_tokens=5):
     return msg
 
 
-async def test_natural_stop_returns_final_summary(session):
+async def test_natural_stop_renders_persisted_question(session):
     user = UserRepository(session).get_or_create("fp-loop-1")
     goal_repo = GoalRepository(session)
     topic_repo = TopicRepository(session)
@@ -103,7 +103,7 @@ async def test_natural_stop_returns_final_summary(session):
                          "args": {"query": "HyDE"}, "id": "tc-1"}]),
         _ai(tool_calls=[{"name": "persist_quiz_question",
                          "args": valid_persist_args, "id": "tc-2"}]),
-        _ai(content="Quiz on HyDE:\n\nWhat does HyDE stand for?\nA) ...\nB) ...\nReply with A-D."),
+        _ai(content="UNTRUSTED MODEL FINAL TEXT"),
     ])
 
     agent = build_quiz_master_agent(
@@ -123,7 +123,11 @@ async def test_natural_stop_returns_final_summary(session):
     assert result["agent_trace"]["exit_reason"] == "natural_stop"
     assert result["agent_trace"]["total_iterations"] == 3
     assert result["agent_trace"]["total_tool_calls"] == 2
-    assert "Quiz on HyDE" in result["messages"][0].content
+    content = result["messages"][0].content
+    assert "What does HyDE stand for?" in content
+    assert "B) Hypothetical Document Embedding" in content
+    assert "Reply with A, B, C, or D." in content
+    assert "UNTRUSTED MODEL FINAL TEXT" not in content
     assert isinstance(result["messages"][0], AIMessage)
 
 
@@ -259,6 +263,51 @@ async def test_valid_persist_round_trip_writes_active_quiz_question_id(session):
     fetched = question_repo.get_by_id(persisted_id)
     assert fetched is not None
     assert fetched.answer == "A"
+
+
+async def test_final_quiz_text_without_successful_persist_degrades_instead(session):
+    user = UserRepository(session).get_or_create("fp-loop-no-persist")
+    goal_repo = GoalRepository(session)
+    topic_repo = TopicRepository(session)
+    question_repo = QuestionRepository(session)
+
+    invalid_persist_args = {
+        "topic": "RRF",
+        "prompt": "What is RRF?",
+        "options": ["A) Only one option"],
+        "answer": "A",
+        "explanation": "RRF combines rankings.",
+    }
+    llm = ScriptedLLM([
+        _ai(tool_calls=[{"name": "persist_quiz_question",
+                         "args": invalid_persist_args, "id": "tc-bad"}]),
+        _ai(content=(
+            "Here is your quiz question:\n\n"
+            "What is RRF?\n\n"
+            "A) Reciprocal Rank Fusion\n"
+            "B) Random Ranking Filter\n"
+            "C) Recursive Retrieval Format\n"
+            "D) Ranked Result File\n\n"
+            "Answer: A"
+        )),
+    ])
+
+    agent = build_quiz_master_agent(
+        llm=llm,
+        topic_repo=topic_repo, question_repo=question_repo, goal_repo=goal_repo,
+    )
+    result = await agent({
+        "messages": [HumanMessage(content="quiz me on RRF")],
+        "user_id": user.id,
+    })
+
+    content = result["messages"][0].content
+    assert result["degraded"] is True
+    assert result.get("active_quiz_question_id") is None
+    assert result["agent_trace"]["tool_errors"] == 1
+    assert result["agent_trace"]["exit_reason"] == "quiz_persist_failed"
+    assert "couldn't save a gradeable quiz question" in content.lower()
+    assert "A) Reciprocal Rank Fusion" not in content
 
 
 def test_infer_quiz_action_always_returns_generate():

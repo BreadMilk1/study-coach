@@ -13,7 +13,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-252%20passed-10b981)]()
+[![Tests](https://img.shields.io/badge/Tests-256%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -54,6 +54,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 - **Keyword-based Router** — Classifies user intent (quiz > plan > tutor) with state-aware overrides for multi-turn flows
 - **Judge Guard with PDCA** — 6-dimension tutor rubric, 5-dimension quiz/plan rubrics. Up to 2 retries with weak-dimension hints, degrade with disclaimer on exhaustion
 - **Dual-mode dispatch** — Deterministic state-machine (predictable, fast) and agent-loop (LLM tool-calling) for both Planner and QuizMaster, switchable via HTTP headers
+- **Chat quiz consistency** — Chat displays an answerable MCQ only after the backend has persisted the question and can grade the next `A/B/C/D` reply
 
 ### Retrieval-Augmented Generation
 
@@ -123,6 +124,8 @@ pnpm dev
 
 Visit <http://localhost:5173>. Library → upload a PDF → Chat / Plan / Quiz.
 
+For a stable reviewer walkthrough, follow `docs/DEMO.md`.
+
 ### Docker
 
 ```bash
@@ -134,7 +137,7 @@ docker compose up
 
 ```bash
 cd backend
-uv run pytest -q        # 252 tests, no live Ollama required
+uv run pytest -q        # 256 tests, no live Ollama required
 
 cd ../frontend
 pnpm build              # typecheck + production build

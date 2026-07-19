@@ -159,6 +159,10 @@ _LLM_FAILED_MSG = "⚠️ Could not reach the quiz model. Please try again."
 _BUDGET_EXHAUSTED_MSG = (
     "⚠️ Quiz agent exceeded reasoning budget (6 turns). Try a different topic."
 )
+_QUIZ_PERSIST_FAILED_MSG = (
+    "⚠️ I couldn't save a gradeable quiz question. Please try again, "
+    "or switch Quiz mode to deterministic for a faster fallback."
+)
 
 
 def _safe_writer():
@@ -173,6 +177,23 @@ def _emit_agent_run(writer, trace: AgentTrace) -> dict:
     run = trace.serialize_public(node="quiz")
     writer({"type": "agent_run", "run": run})
     return run
+
+
+def _format_unpersisted_quiz_output(writer, trace: AgentTrace) -> dict:
+    trace.exit_reason = "quiz_persist_failed"
+    text = _QUIZ_PERSIST_FAILED_MSG
+    writer({"type": "citations", "citations": []})
+    writer({"type": "token", "text": text})
+    _emit_agent_run(writer, trace)
+    return {
+        "messages": [AIMessage(content=text)],
+        "citations": [],
+        "active_quiz_question_id": None,
+        "quiz_action": _infer_quiz_action(trace),
+        "last_context": trace.aggregated_retriever_context(),
+        "agent_trace": trace.serialize(),
+        "degraded": True,
+    }
 
 
 def _last_human_msg(state: CoachState) -> str:
@@ -221,13 +242,25 @@ async def _safe_invoke_tool(tool_map, tc, trace: AgentTrace) -> str:
     return output_str
 
 
-def _format_final_output(writer, trace: AgentTrace, last_response) -> dict:
-    final_text = getattr(last_response, "content", "") or ""
-    if not isinstance(final_text, str):
-        final_text = "".join(
-            (b.get("text", "") if isinstance(b, dict) else str(b))
-            for b in final_text
-        )
+def _format_final_output(
+    writer,
+    trace: AgentTrace,
+    question_repo: QuestionRepository,
+) -> dict:
+    persisted_question_id = trace.last_persisted_question_id()
+    if persisted_question_id is None:
+        return _format_unpersisted_quiz_output(writer, trace)
+
+    question = question_repo.get_by_id(persisted_question_id)
+    if question is None:
+        return _format_unpersisted_quiz_output(writer, trace)
+
+    final_text = (
+        "📝 Quiz:\n\n"
+        f"{question.prompt}\n\n"
+        + "\n".join(question.options_json)
+        + "\n\nReply with A, B, C, or D."
+    )
 
     writer({"type": "citations", "citations": []})
     writer({"type": "token", "text": final_text})
@@ -236,7 +269,7 @@ def _format_final_output(writer, trace: AgentTrace, last_response) -> dict:
     return {
         "messages": [AIMessage(content=final_text)],
         "citations": [],
-        "active_quiz_question_id": trace.last_persisted_question_id(),
+        "active_quiz_question_id": persisted_question_id,
         "quiz_action": _infer_quiz_action(trace),
         "last_context": trace.aggregated_retriever_context(),
         "agent_trace": trace.serialize(),
@@ -327,7 +360,7 @@ def build_quiz_master_agent(
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
                 trace.exit_reason = "natural_stop"
-                return _format_final_output(writer, trace, response)
+                return _format_final_output(writer, trace, question_repo)
 
             for tc in tool_calls:
                 output = await _safe_invoke_tool(tool_map, tc, trace)

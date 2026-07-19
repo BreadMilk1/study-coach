@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from app.api.deps import (
+    get_judge_dependencies,
     get_quiz_master,
     get_quiz_master_agent,
 )
@@ -99,6 +100,10 @@ def client_with_stubs(tmp_path, monkeypatch):
 
     app.dependency_overrides[get_quiz_master] = lambda: quiz_master_stub
     app.dependency_overrides[get_quiz_master_agent] = lambda: agent_stub
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": None,
+        "same_model": False,
+    }
 
     from app.db.repositories import DocumentRepository
     from app.db.session import session_scope

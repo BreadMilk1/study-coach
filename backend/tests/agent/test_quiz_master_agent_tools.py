@@ -156,10 +156,73 @@ def test_persist_quiz_question_returns_error_json_on_invalid_option_prefix(sessi
     out = tool.invoke({
         "topic": "reranking",
         "prompt": "What is a reranker?",
-        "options": ["a) bad prefix", "B) ok", "C) ok", "D) ok"],
+        "options": ["B) wrong explicit label", "B) ok", "C) ok", "D) ok"],
         "answer": "B",
         "explanation": "A reranker reorders search results by relevance.",
     })
     parsed = json.loads(out)
     assert "error" in parsed
     assert "option[0]" in parsed["error"] or "must start with" in parsed["error"]
+
+
+def test_persist_quiz_question_normalizes_answer_suffix_and_missing_option_prefixes(session):
+    user = UserRepository(session).get_or_create("fp-quiz-normalize-1")
+    goal_repo = GoalRepository(session)
+    topic_repo = TopicRepository(session)
+    question_repo = QuestionRepository(session)
+
+    tools = _make_quiz_tools(
+        user_id=user.id, retriever=None,
+        topic_repo=topic_repo, question_repo=question_repo, goal_repo=goal_repo,
+    )
+    tool = next(t for t in tools if t.name == "persist_quiz_question")
+
+    out = tool.invoke({
+        "topic": "Prompt Engineering",
+        "prompt": "What is prompt engineering in its simplest form?",
+        "options": [
+            "Crafting prompts to guide an LLM's output toward a specific outcome.",
+            "Training large language models on massive datasets.",
+            "Designing new transformer architectures.",
+            "Selecting GPU hardware for AI computations.",
+        ],
+        "answer": "A)",
+        "explanation": "Prompt engineering is the practice of crafting prompts to guide model output.",
+    })
+
+    parsed = json.loads(out)
+    assert parsed["persisted"] is True
+    q = question_repo.get_by_id(parsed["question_id"])
+    assert q is not None
+    assert q.answer == "A"
+    assert q.options_json == [
+        "A) Crafting prompts to guide an LLM's output toward a specific outcome.",
+        "B) Training large language models on massive datasets.",
+        "C) Designing new transformer architectures.",
+        "D) Selecting GPU hardware for AI computations.",
+    ]
+
+
+def test_persist_quiz_question_rejects_wrong_explicit_option_label(session):
+    user = UserRepository(session).get_or_create("fp-quiz-normalize-2")
+    goal_repo = GoalRepository(session)
+    topic_repo = TopicRepository(session)
+    question_repo = QuestionRepository(session)
+
+    tools = _make_quiz_tools(
+        user_id=user.id, retriever=None,
+        topic_repo=topic_repo, question_repo=question_repo, goal_repo=goal_repo,
+    )
+    tool = next(t for t in tools if t.name == "persist_quiz_question")
+
+    out = tool.invoke({
+        "topic": "RRF",
+        "prompt": "Which option describes RRF?",
+        "options": ["B) Wrong explicit label", "B) ok", "C) ok", "D) ok"],
+        "answer": "A)",
+        "explanation": "RRF combines ranked lists with reciprocal rank scores.",
+    })
+
+    parsed = json.loads(out)
+    assert "error" in parsed
+    assert "option[0]" in parsed["error"] or "A) " in parsed["error"]

@@ -303,6 +303,114 @@ def test_chat_persists_and_restores_agent_run_from_stream(client, app):
     assert assistant["agent_run"]["exit_reason"] == "natural_stop"
 
 
+def test_chat_quiz_agent_loop_generates_persisted_question_then_grades(client, app):
+    from app.api.deps import get_llm
+
+    class ScriptedQuizAgentLLM:
+        def __init__(self):
+            self.responses = [
+                AIMessage(content="", tool_calls=[{
+                    "name": "retriever_search",
+                    "args": {"query": "Prompt Engineering"},
+                    "id": "q1",
+                }]),
+                AIMessage(content="", tool_calls=[{
+                    "name": "persist_quiz_question",
+                    "args": {
+                        "topic": "Prompt Engineering",
+                        "prompt": "What is prompt engineering in its simplest form?",
+                        "options": [
+                            "Crafting prompts to guide an LLM's output toward a specific outcome.",
+                            "Training large language models on massive datasets.",
+                            "Designing new transformer architectures.",
+                            "Selecting GPU hardware for AI computations.",
+                        ],
+                        "answer": "A)",
+                        "explanation": (
+                            "Prompt engineering is the practice of crafting prompts to guide model output., "
+                            '"source": "Topic 1.pdf", "page": 33, "score": 0.744}'
+                        ),
+                    },
+                    "id": "q2",
+                }]),
+                AIMessage(content=(
+                    "Here is your quiz question on Prompt Engineering.\n\n"
+                    "What is prompt engineering in its simplest form?\n\n"
+                    "A) Crafting prompts to guide an LLM's output toward a specific outcome.\n"
+                    "B) Training large language models on massive datasets.\n"
+                    "C) Designing new transformer architectures.\n"
+                    "D) Selecting GPU hardware for AI computations.\n\n"
+                    "Correct Answer: A\n"
+                    "Explanation: SECRET_GENERATION_LEAK"
+                )),
+            ]
+
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages, **_kwargs):
+            if not self.responses:
+                raise AssertionError("ScriptedQuizAgentLLM exhausted")
+            return self.responses.pop(0)
+
+        async def astream(self, _messages, **_kwargs):
+            if False:
+                yield None
+
+    app.dependency_overrides[get_llm] = lambda: ScriptedQuizAgentLLM()
+    session_id = "p4-5-chat-quiz-grade"
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "quiz me on Prompt Engineering", "session_id": session_id},
+        headers={**_HEADERS, "x-quiz-mode": "agent_loop"},
+    ) as resp:
+        assert resp.status_code == 200
+        turn1 = _read_sse_events(resp)
+
+    joined1 = "".join(e["text"] for e in turn1 if e["type"] == "token")
+    assert "What is prompt engineering" in joined1
+    assert "Reply with A, B, C, or D." in joined1
+    assert "Correct Answer" not in joined1
+    assert "SECRET_GENERATION_LEAK" not in joined1
+    agent_run = next(e for e in turn1 if e["type"] == "agent_run")
+    assert agent_run["run"]["node"] == "quiz"
+    assert agent_run["run"]["exit_reason"] == "natural_stop"
+    assert agent_run["run"]["tool_errors"] == 0
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "A", "session_id": session_id},
+        headers={**_HEADERS, "x-quiz-mode": "agent_loop"},
+    ) as resp:
+        assert resp.status_code == 200
+        turn2 = _read_sse_events(resp)
+
+    joined2 = "".join(e["text"] for e in turn2 if e["type"] == "token")
+    assert "Correct" in joined2
+    assert "Prompt engineering is the practice of crafting prompts to guide model output." in joined2
+    assert '"source"' not in joined2
+    assert '"page"' not in joined2
+    assert '"score"' not in joined2
+
+    messages_resp = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_HEADERS,
+    )
+    assert messages_resp.status_code == 200
+    messages = messages_resp.json()["messages"]
+    quiz_assistant = next(
+        m for m in messages
+        if m["role"] == "assistant" and "What is prompt engineering" in m["content"]
+    )
+    assert "Correct Answer" not in quiz_assistant["content"]
+    assert "SECRET_GENERATION_LEAK" not in quiz_assistant["content"]
+    assert quiz_assistant["agent_run"]["node"] == "quiz"
+    assert quiz_assistant["agent_run"]["tool_call_breakdown"]["persist_quiz_question"] == 1
+
+
 def test_user_stats_counts_persisted_chat_sessions(client):
     with client.stream("POST", "/api/chat",
                        json={"message": "What is HyDE?"},

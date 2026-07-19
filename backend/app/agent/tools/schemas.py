@@ -4,6 +4,7 @@ Tool functions in `app/agent/tools/quiz.py` take/return these models so the
 QuizMaster node (and any future LLM tool-calling agent) sees a stable
 contract independent of repository internals.
 """
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -104,6 +105,50 @@ class MindmapOut(BaseModel):
 
 # --- persist_quiz_question (LLM tool-calling agent, P2.3) --------------------
 
+_OPTION_PREFIXES = ["A) ", "B) ", "C) ", "D) "]
+_ANSWER_LETTERS = {"A", "B", "C", "D"}
+_RETRIEVAL_METADATA_SUFFIX = re.compile(
+    r'\s*,\s*\{?\s*"source"\s*:\s*"[^"]*"\s*,'
+    r'\s*"page"\s*:\s*\d+\s*,'
+    r'\s*"score"\s*:\s*-?\d+(?:\.\d+)?\s*\}\s*$',
+    re.DOTALL,
+)
+
+
+def _normalize_answer_value(value) -> str:
+    text = str(value or "").strip().upper()
+    if text in _ANSWER_LETTERS:
+        return text
+    if len(text) >= 2 and text[0] in _ANSWER_LETTERS and text[1] in {")", ".", ":", " "}:
+        return text[0]
+    return text
+
+
+def _normalize_option_value(value, *, index: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+
+    expected = _OPTION_PREFIXES[index]
+    expected_letter = expected[0]
+
+    if text.startswith(expected):
+        return text
+
+    if len(text) >= 2 and text[0].upper() in _ANSWER_LETTERS and text[1] in {")", ".", ":"}:
+        actual_letter = text[0].upper()
+        body = text[2:].strip()
+        if actual_letter != expected_letter:
+            raise ValueError(
+                f"option[{index}] must start with {expected!r}, got explicit {actual_letter})"
+            )
+        if not body:
+            raise ValueError(f"option[{index}] must include text after {expected!r}")
+        return f"{expected}{body}"
+
+    return f"{expected}{text}"
+
+
 class QuizQuestionPersist(BaseModel):
     """Schema for the persist_quiz_question agent tool.
 
@@ -119,11 +164,32 @@ class QuizQuestionPersist(BaseModel):
     answer: Literal["A", "B", "C", "D"]
     explanation: str = Field(min_length=1)
 
+    @field_validator("answer", mode="before")
+    @classmethod
+    def _normalize_answer(cls, v):
+        return _normalize_answer_value(v)
+
+    @field_validator("explanation", mode="before")
+    @classmethod
+    def _remove_retrieval_metadata_suffix(cls, v):
+        if not isinstance(v, str):
+            return v
+        text = v.strip()
+        return _RETRIEVAL_METADATA_SUFFIX.sub("", text).strip()
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _normalize_options(cls, v):
+        if not isinstance(v, list) or len(v) != len(_OPTION_PREFIXES):
+            return v
+        return [_normalize_option_value(opt, index=i) for i, opt in enumerate(v)]
+
     @field_validator("options")
     @classmethod
     def _check_option_prefixes(cls, v: list[str]) -> list[str]:
-        expected_prefixes = ["A) ", "B) ", "C) ", "D) "]
-        for i, (opt, prefix) in enumerate(zip(v, expected_prefixes)):
+        for i, (opt, prefix) in enumerate(zip(v, _OPTION_PREFIXES)):
             if not opt.startswith(prefix):
                 raise ValueError(f"option[{i}] must start with {prefix!r}, got: {opt!r}")
+            if not opt[len(prefix):].strip():
+                raise ValueError(f"option[{i}] must include text after {prefix!r}")
         return v
