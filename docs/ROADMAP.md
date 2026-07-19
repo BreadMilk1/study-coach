@@ -1,9 +1,9 @@
 # Study Coach — ROADMAP
 
-> Phase history + priority backlog. Current state: P4.5 automated closure implemented; manual browser demo pending before public review.
+> Phase history + priority backlog. Current state: P4.5 product closure verified; next-stage data lifecycle design pending.
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
-## Current Snapshot (2026-07-02)
+## Current Snapshot (2026-07-20)
 
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
 - **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + Google OAuth (JWT).
@@ -13,6 +13,7 @@
 - **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 5 ADRs + deployment topology + security model).
 - **Deploy**: Docker Compose (local Ollama) + fly.io fallback (BYOK cloud-only).
 - **Verification baseline**: 256 backend tests passing; frontend production build passing.
+- **Recent (2026-07-20)**: P4.5 manual browser demo passed with user-owned PDFs — grounded Chat answer, agent-loop Quiz generation, deterministic grading, and refresh restore all verified. Follow-up hardening prevents answer/explanation disclosure during GENERATE and strips trailing retrieval metadata before explanation persistence.
 - **Recent (2026-07-02)**: P4.5 automated Product Closure implemented — Chat quiz MCQs are persisted before display, failed quiz persistence degrades safely, `persist_quiz_question` tolerates narrow local-model formatting near-misses, route tests no longer depend on live Ollama, and `docs/DEMO.md` documents the reviewer path. Manual browser demo with a user-owned PDF remains the final public-review gate.
 - **Recent (2026-06-15)**: Recoverable Agent Run Trace shipped — Planner / QuizMaster `agent_loop` nodes emit SSE `agent_run` events, `/api/chat` persists them in `messages.tool_calls_json` assistant artifact envelopes, `GET /api/chat/sessions/{id}/messages` restores them after refresh, and Debug Mode TracePanel displays node/mode/exit reason, tool counts, token counts, latency, and redacted tool-call previews.
 - **Recent (2026-06-10)**: Chat persistence slice shipped — `/api/chat` now creates/reuses `ChatSession`, persists user/assistant `Message` rows plus assistant `Citation` rows, emits SSE `session` events, restores current Chat session after frontend refresh, refuses retrieval when the current user has no Library documents, and `GET /api/users/me/stats.total_sessions` reflects real session count.
@@ -318,7 +319,7 @@ Shipped:
 - [x] Chat restore maps `agent_run` back to frontend `Message.agentRun`
 - [x] Debug Mode TracePanel renders latest Agent Run summary and redacted tool-call previews
 
-### P4.5 — Product Closure for Portfolio Demo (Automated Verified)
+### P4.5 — Product Closure for Portfolio Demo (Verified)
 - [x] Scope locked in `docs/superpowers/specs/2026-07-01-p4-5-product-closure-design.md`
 - [x] Reviewer demo guide drafted in `docs/DEMO.md`
 - [x] Quiz route test isolation: backend suite should not require live Ollama
@@ -328,7 +329,7 @@ Shipped:
 - [x] Debug Mode shows recoverable, redacted evidence of persist success/failure after refresh
 - [x] Manual-demo follow-up (2026-07-20): agent-loop Quiz GENERATE renders only the persisted question/options, never model-authored answer/explanation; trailing retrieval metadata is removed before explanation persistence
 - [x] Automated verification: backend tests and frontend build
-- [ ] Manual browser demo: upload user-owned PDF → grounded Chat answer → Chat quiz → grade → refresh restore
+- [x] Manual browser demo: upload user-owned PDF → grounded Chat answer → Chat quiz → grade → refresh restore
 
 ### Deferred to beyond P4
 - PROMPT_ENGINEERING.md (skipped — content already in ADRs + EVAL.md)

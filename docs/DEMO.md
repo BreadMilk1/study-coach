@@ -234,7 +234,7 @@ Before treating this as the public reviewer demo path, verify:
 - [x] Quiz GENERATE shows only the persisted prompt/options; answer and clean explanation appear only after the user replies.
 - [x] Failed `persist_quiz_question` does not leave a user-answerable MCQ in Chat.
 - [x] Debug Mode uses redacted Agent Run previews and restores persisted evidence after refresh.
-- [ ] Manual browser demo with a user-owned PDF.
+- [x] Manual browser demo with user-owned PDFs (2026-07-20): grounded Chat answer → agent-loop Quiz → deterministic grade → refresh restore.
 
 ---
 
