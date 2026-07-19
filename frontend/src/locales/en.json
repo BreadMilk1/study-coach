@@ -44,6 +44,7 @@
     "uploaded": "Uploaded!"
   },
   "settings": {
+    "localFirst": "Local-first workspace. No registration required.",
     "debugMode": "Debug Mode",
     "language": "Language",
     "save": "Save Settings"

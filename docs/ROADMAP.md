@@ -344,7 +344,7 @@ Design approved 2026-07-20. P5 deliberately treats Study Coach as a local-first,
 
 - [x] Product direction, data scopes, failure semantics, startup gate, Danger Zone, and notification design approved.
 - [x] Design spec: `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md`.
-- [ ] P5.0: remove incomplete Google OAuth UI/GIS runtime and align local-first README/product copy.
+- [x] P5.0: remove incomplete Google OAuth UI/GIS runtime and align local-first README/product copy.
 - [ ] P5.1: backend summary and idempotent two-scope reset across Chroma, graph state, retriever caches, SQLite, local-mode/loopback deployment guard, Docker Chroma path fix, and unique temporary-upload cleanup.
 - [ ] P5.2: Vitest foundation and capability-aware, required once-per-tab startup gate (Continue plus Start fresh when local reset is enabled).
 - [ ] P5.3: Settings Danger Zone, confirmation flows, global notifications, and accessibility.

@@ -54,7 +54,7 @@ const navSections = [
           {{ $t(item.text) }}
         </RouterLink>
       </template>
-      <div class="mt-auto text-xs text-fg-dim px-2">P4 · portfolio demo</div>
+      <div class="mt-auto text-xs text-fg-dim px-2">P5 · local-first</div>
     </nav>
     <main class="flex-1 overflow-hidden" :class="{ 'pb-14': isMobile }">
       <RouterView />

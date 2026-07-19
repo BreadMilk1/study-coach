@@ -44,6 +44,7 @@
     "uploaded": "已上传！"
   },
   "settings": {
+    "localFirst": "本地优先学习空间，无需注册。",
     "debugMode": "调试模式",
     "language": "语言",
     "save": "保存设置"

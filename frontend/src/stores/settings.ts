@@ -72,22 +72,6 @@ export function authHeaders(): Record<string, string> {
   return {}
 }
 
-export async function googleLogin(credential: string): Promise<void> {
-  const resp = await fetch('/api/auth/google', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ credential }),
-  })
-  if (!resp.ok) throw new Error('Google login failed')
-  const { access_token, tier } = await resp.json()
-  const existingRaw = localStorage.getItem(STORAGE_KEY)
-  const existing = existingRaw ? JSON.parse(existingRaw) : {}
-  existing.accessToken = access_token
-  existing.tier = tier || 'member'
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(existing))
-  _tokenPromise = null  // reset cache
-}
-
 const TOOL_CAPABLE_KEY = 'study-coach:tool-capable'
 
 function loadToolCapable(model: string): boolean | null {

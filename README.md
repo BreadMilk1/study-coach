@@ -28,6 +28,8 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 
 **Study Coach** is the portfolio-grade refactor that bridges both worlds: the course project's four features (HyDE, CoT plan, MCQ, Judge) fully redesigned as a modern **LangGraph agent** with persistent memory, empirical agent-loop ablation, and a production-quality frontend.
 
+**Study Coach is a local-first AI learning workspace. No registration is required.**
+
 ## Screenshots
 
 | Overview Dashboard | Chat with Agent Trace |
@@ -38,9 +40,9 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 |:---:|:---:|
 | ![Plan](docs/screenshots/plan.png) | ![Quiz](docs/screenshots/quiz.png) |
 
-| Mistake Bank (SM-2 SRS) | Settings + Google Sign-In |
-|:---:|:---:|
-| ![Mistakes](docs/screenshots/mistakes.png) | ![Settings](docs/screenshots/settings.png) |
+| Mistake Bank (SM-2 SRS) |
+|:---:|
+| ![Mistakes](docs/screenshots/mistakes.png) |
 
 | Goal Setup Wizard | Mobile View |
 |:---:|:---:|
@@ -80,11 +82,10 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 
 ### Frontend
 
-- **8 views**: Overview (dashboard + radar + heatmap), Chat (SSE streaming + current session restore + recoverable Agent Trace / Agent Run debug panel), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + OAuth + language), Onboarding (3-step goal setup wizard)
+- **8 views**: Overview (dashboard + radar + heatmap), Chat (SSE streaming + current session restore + recoverable Agent Trace / Agent Run debug panel), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + local preferences + language), Onboarding (3-step goal setup wizard)
 - **Dark Cinema design system** — Inter / JetBrains Mono / Noto Sans SC, indigo primary
 - **i18n bilingual** — English / 中文 (zh-CN), switchable in Settings
 - **Mobile responsive** — Bottom tab bar for Chat / Quiz / Plan on <768px viewports
-- **Google One Tap Sign-In** — Real GIS integration with JWT Bearer token on all API calls
 
 ### Deployment
 
@@ -148,10 +149,17 @@ pnpm build              # typecheck + production build
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `JWT_SECRET` | Yes | — | Secret key for JWT signing. Generate with `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `GOOGLE_CLIENT_ID` | No | — | Google OAuth client ID. Guest mode works without it |
 | `OLLAMA_ENABLED` | No | `true` | Set to `false` to disable local Ollama (cloud BYOK only) |
 
 Cloud BYOK (OpenAI / Anthropic / Gemini) is configured **per-request** via the frontend Settings panel — no server-side API keys needed.
+
+### Local-first product boundary
+
+Study Coach is local-first and requires no registration. Its learning data belongs to the current Study Coach instance. P5 will add startup-gate and Settings controls to clear that local data when reset is enabled; those controls are not available yet.
+
+### Deferred authentication work
+
+The backend Google OAuth API remains experimental and deferred. It has no frontend login surface and does not provide delivered cloud continuity.
 
 ## Key Empirical Results
 
@@ -263,7 +271,7 @@ study-coach/
 - **Agent loop treated empirically**: 792 ablation runs comparing deterministic vs agent-loop across local models — not assumed, measured
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace / Agent Run, and EmptyCorpusBanner
-- **Portfolio-grade engineering**: 252 tests, Alembic migrations, i18n, OAuth, Docker Compose, mobile responsive
+- **Portfolio-grade engineering**: 252 tests, Alembic migrations, i18n, local-first product boundary, Docker Compose, mobile responsive
 
 ## Origin
 
