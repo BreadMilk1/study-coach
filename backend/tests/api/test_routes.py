@@ -1,10 +1,14 @@
+import asyncio
 import json
+import threading
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk
 
-from app.api.deps import get_session
+from app.api.deps import get_graph, get_session
+from app.auth import issue_token
 from app.main import create_app
 
 
@@ -35,9 +39,11 @@ class StubLLM:
 class StubDocumentProcessor:
     def __init__(self):
         self.calls = 0
+        self.paths: list[Path] = []
 
     def process_pdf(self, path):
         self.calls += 1
+        self.paths.append(Path(path))
         return [
             {"chunk_id": "stub:1:0", "content": "Stub chunk one content.",
              "source": "stub.pdf", "page": 1},
@@ -57,6 +63,37 @@ class StubJudgeLLM:
 
     async def ainvoke(self, messages, **_kwargs):
         return AIMessage(content=self._PASS)
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.retriever = object()
+
+    def vector_count(self) -> int:
+        return 0
+
+    def reset_empty(self) -> None:
+        self.retriever = object()
+
+
+class BlockingGraph:
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        self.started = started
+        self.release = release
+
+    async def astream(self, _input_state, **_kwargs):
+        self.started.set()
+        await asyncio.to_thread(self.release.wait)
+        yield {"type": "citations", "citations": []}
+        yield {"type": "token", "text": "done"}
+
+
+class PublicModelStub:
+    def bind_tools(self, _tools):
+        return self
+
+    async def ainvoke(self, _messages):
+        return AIMessage(content="pong")
 
 
 @pytest.fixture
@@ -90,6 +127,7 @@ def app(tmp_path, stub_retriever, stub_llm, stub_document_processor, monkeypatch
 
     app = create_app()
     app.state.retriever = stub_retriever
+    app.state.retriever_runtime = FakeRuntime()
     app.state.document_processor = stub_document_processor
 
     from app.api.deps import get_judge_dependencies, get_llm
@@ -163,3 +201,180 @@ def test_upload_document_calls_processor_and_indexes_chunks(client, stub_retriev
     assert len(stub_retriever.added) == 2
     # filename propagated as source
     assert all(c["source"] == "lec.pdf" for c in stub_retriever.added)
+    assert not stub_document_processor.paths[0].exists()
+
+
+def test_same_pdf_uploads_use_distinct_temporary_paths(
+    client,
+    stub_document_processor,
+):
+    files = {"file": ("same.pdf", b"%PDF-1.4 same bytes", "application/pdf")}
+
+    first = client.post("/api/documents", files=files)
+    second = client.post("/api/documents", files=files)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_path, second_path = stub_document_processor.paths
+    assert first_path != second_path
+    assert first_path.name.startswith("sc_")
+    assert second_path.name.startswith("sc_")
+    assert first_path.suffix == ".pdf"
+    assert second_path.suffix == ".pdf"
+    assert not first_path.exists()
+    assert not second_path.exists()
+
+
+def test_upload_removes_exact_temporary_path_when_processing_fails(
+    client,
+    stub_document_processor,
+    monkeypatch,
+):
+    captured: list[Path] = []
+
+    def fail(path):
+        captured.append(Path(path))
+        raise RuntimeError("parse failed")
+
+    monkeypatch.setattr(stub_document_processor, "process_pdf", fail)
+
+    with pytest.raises(RuntimeError, match="parse failed"):
+        client.post(
+            "/api/documents",
+            files={"file": ("broken.pdf", b"not a PDF", "application/pdf")},
+        )
+
+    assert len(captured) == 1
+    assert not captured[0].exists()
+
+
+def test_reset_is_rejected_until_streaming_chat_response_finishes(
+    app,
+    client,
+    monkeypatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+    app.dependency_overrides[get_graph] = lambda: BlockingGraph(started, release)
+    monkeypatch.setenv("STUDY_COACH_LOCAL_MODE", "1")
+    chat_result: dict[str, object] = {}
+
+    def consume_chat() -> None:
+        try:
+            with TestClient(app) as stream_client:
+                chat_result["response"] = stream_client.post(
+                    "/api/chat",
+                    json={"message": "hold this stream open"},
+                )
+        except BaseException as exc:  # pragma: no cover - reported by main thread
+            chat_result["error"] = exc
+
+    thread = threading.Thread(target=consume_chat)
+    thread.start()
+    try:
+        assert started.wait(timeout=5), "chat stream did not start"
+        reset = client.post(
+            "/api/data/reset",
+            headers={
+                "Authorization": f"Bearer {issue_token('reset-user', 'member')}"
+            },
+            json={
+                "scope": "learning",
+                "confirmation": "CLEAR_LEARNING_DATA",
+            },
+        )
+    finally:
+        release.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert "error" not in chat_result
+    assert reset.status_code == 409
+    assert reset.json()["detail"]["code"] == "data_operation_in_progress"
+    assert chat_result["response"].status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs"),
+    [
+        (
+            "post",
+            "/api/documents",
+            {"files": {"file": ("owned.pdf", b"pdf", "application/pdf")}},
+        ),
+        ("post", "/api/chat", {"json": {"message": "hello"}}),
+        ("get", "/api/chat/sessions/current", {}),
+        ("get", "/api/chat/sessions/missing/messages", {}),
+        ("post", "/api/goals", {"json": {"title": "Exam"}}),
+        ("get", "/api/plans/current", {}),
+        (
+            "patch",
+            "/api/plans/plan/milestones/milestone",
+            {"json": {"done": True}},
+        ),
+        ("get", "/api/plans/plan/events", {}),
+        (
+            "patch",
+            "/api/plans/plan/milestones/reorder",
+            {"json": {"milestone_ids": []}},
+        ),
+        ("get", "/api/documents", {}),
+        ("get", "/api/mistakes/due", {}),
+        (
+            "post",
+            "/api/mistakes/mistake/review",
+            {"json": {"answer": "A"}},
+        ),
+        ("post", "/api/mistakes/mistake/mark-understood", {}),
+        ("get", "/api/mastery", {}),
+        ("get", "/api/users/me/stats", {}),
+    ],
+    ids=[
+        "upload",
+        "chat",
+        "current-chat",
+        "chat-messages",
+        "goals",
+        "plans",
+        "milestone",
+        "plan-events",
+        "plan-reorder",
+        "documents",
+        "mistakes",
+        "mistake-review",
+        "mark-understood",
+        "mastery",
+        "stats",
+    ],
+)
+def test_learning_route_family_is_rejected_during_reset(
+    app,
+    client,
+    method,
+    path,
+    request_kwargs,
+):
+    with app.state.data_lifecycle_gate.exclusive_reset():
+        response = client.request(method, path, **request_kwargs)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "reset_in_progress",
+        "message": "Data reset is in progress.",
+    }
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/health", "/api/models/ping", "/api/models/tool-check"],
+)
+def test_public_route_is_available_during_reset(app, client, monkeypatch, path):
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: PublicModelStub())
+
+    with app.state.data_lifecycle_gate.exclusive_reset():
+        response = client.get(
+            path,
+            headers={"x-provider": "ollama", "x-model": "stub-model"},
+        )
+
+    assert response.status_code == 200

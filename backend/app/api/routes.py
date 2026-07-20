@@ -25,6 +25,7 @@ from app.db.session import get_session
 from app.llm.provider import LLMConfig
 
 from .deps import (
+    data_operation_lease,
     get_document_processor,
     get_graph,
     get_judge_dependencies,
@@ -42,6 +43,9 @@ from .deps import (
 )
 
 router = APIRouter(prefix="/api")
+learning_router = APIRouter(
+    dependencies=[Depends(data_operation_lease, scope="request")],
+)
 
 _SAME_MODEL_WARNING = (
     "⚠️ Self-check note: the judge is using the same model as the generator — "
@@ -346,7 +350,7 @@ async def ping_model(
         )
 
 
-@router.post("/documents")
+@learning_router.post("/documents")
 async def upload_document(
     file: Annotated[UploadFile, File()],
     user_id: Annotated[str, Depends(get_current_user)],
@@ -356,26 +360,35 @@ async def upload_document(
 ):
     content = await file.read()
     file_hash = hashlib.sha256(content).hexdigest()
-    tmp_path = Path(tempfile.gettempdir()) / f"sc_{file_hash}.pdf"
-    tmp_path.write_bytes(content)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="sc_",
+            suffix=".pdf",
+            delete=False,
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        chunks = document_processor.process_pdf(tmp_path)
+        for chunk in chunks:
+            chunk["source"] = file.filename or chunk.get("source", "uploaded.pdf")
+        if chunks:
+            retriever.add_chunks(chunks)
 
-    chunks = document_processor.process_pdf(tmp_path)
-    for c in chunks:
-        c["source"] = file.filename or c.get("source", "uploaded.pdf")
-    if chunks:
-        retriever.add_chunks(chunks)
-
-    doc = DocumentRepository(session).create(
-        user_id=user_id,
-        filename=file.filename or "uploaded.pdf",
-        hash_=file_hash,
-        chunks_count=len(chunks),
-    )
-    return {
-        "document_id": doc.id,
-        "filename": doc.filename,
-        "chunks_count": doc.chunks_count,
-    }
+        doc = DocumentRepository(session).create(
+            user_id=user_id,
+            filename=file.filename or "uploaded.pdf",
+            hash_=file_hash,
+            chunks_count=len(chunks),
+        )
+        return {
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "chunks_count": doc.chunks_count,
+        }
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _sse(payload: dict) -> str:
@@ -450,7 +463,7 @@ def _persist_citations(
         )
 
 
-@router.post("/chat")
+@learning_router.post("/chat")
 async def chat(
     body: ChatRequest,
     user_id: Annotated[str, Depends(get_current_user)],
@@ -558,7 +571,7 @@ async def chat(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@router.get("/chat/sessions/current", response_model=ChatSessionOut)
+@learning_router.get("/chat/sessions/current", response_model=ChatSessionOut)
 def get_current_chat_session(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
@@ -573,7 +586,7 @@ def get_current_chat_session(
     )
 
 
-@router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessagesOut)
+@learning_router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessagesOut)
 def get_chat_session_messages(
     session_id: str,
     user_id: Annotated[str, Depends(get_current_user)],
@@ -626,7 +639,7 @@ def get_chat_session_messages(
     )
 
 
-@router.post("/goals", response_model=GoalCreateOut)
+@learning_router.post("/goals", response_model=GoalCreateOut)
 def create_goal(
     body: GoalCreateIn,
     user_id: Annotated[str, Depends(get_current_user)],
@@ -638,7 +651,7 @@ def create_goal(
     return GoalCreateOut(goal_id=goal.id, title=goal.title)
 
 
-@router.get("/plans/current", response_model=PlanCurrentOut)
+@learning_router.get("/plans/current", response_model=PlanCurrentOut)
 def get_plans_current(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
@@ -653,7 +666,7 @@ def get_plans_current(
     return _plan_current_out(session, user_id=user_id, goal=goal, plan=plan)
 
 
-@router.patch("/plans/{plan_id}/milestones/{milestone_id}", response_model=MilestonePatchOut)
+@learning_router.patch("/plans/{plan_id}/milestones/{milestone_id}", response_model=MilestonePatchOut)
 def patch_plan_milestone(
     plan_id: str,
     milestone_id: str,
@@ -698,7 +711,7 @@ def patch_plan_milestone(
     )
 
 
-@router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
+@learning_router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
 def get_plan_events(
     plan_id: str,
     user_id: Annotated[str, Depends(get_current_user)],
@@ -726,7 +739,7 @@ class ReorderIn(BaseModel):
     milestone_ids: list[str]
 
 
-@router.patch("/plans/{plan_id}/milestones/reorder", response_model=PlanCurrentOut)
+@learning_router.patch("/plans/{plan_id}/milestones/reorder", response_model=PlanCurrentOut)
 def reorder_plan_milestones(
     plan_id: str,
     body: ReorderIn,
@@ -739,7 +752,7 @@ def reorder_plan_milestones(
     return _plan_current_out(session, user_id=user_id, goal=goal, plan=refreshed)
 
 
-@router.get("/documents", response_model=list[DocumentOut])
+@learning_router.get("/documents", response_model=list[DocumentOut])
 def get_documents(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
@@ -751,7 +764,7 @@ def get_documents(
     ]
 
 
-@router.get("/mistakes/due", response_model=list[MistakeDueOut])
+@learning_router.get("/mistakes/due", response_model=list[MistakeDueOut])
 def get_mistakes_due(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
@@ -796,7 +809,7 @@ class MistakeReviewOut(BaseModel):
     next_due_at: str
 
 
-@router.post("/mistakes/{mistake_id}/review", response_model=MistakeReviewOut)
+@learning_router.post("/mistakes/{mistake_id}/review", response_model=MistakeReviewOut)
 def review_mistake(
     mistake_id: str,
     body: MistakeReviewIn,
@@ -851,7 +864,7 @@ class MarkUnderstoodOut(BaseModel):
     next_due_at: str | None
 
 
-@router.post("/mistakes/{mistake_id}/mark-understood", response_model=MarkUnderstoodOut)
+@learning_router.post("/mistakes/{mistake_id}/mark-understood", response_model=MarkUnderstoodOut)
 def mark_mistake_understood(
     mistake_id: str,
     user_id: Annotated[str, Depends(get_current_user)],
@@ -889,7 +902,7 @@ def mark_mistake_understood(
     )
 
 
-@router.get("/mastery", response_model=MasteryOut)
+@learning_router.get("/mastery", response_model=MasteryOut)
 def get_mastery(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
@@ -943,7 +956,7 @@ def get_mastery(
     )
 
 
-@router.get("/users/me/stats", response_model=UserStatsOut)
+@learning_router.get("/users/me/stats", response_model=UserStatsOut)
 def get_user_stats(
     user_id: Annotated[str, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)],
@@ -973,3 +986,6 @@ def get_user_stats(
         last_active_date=last_row.isoformat() if last_row else None,
         activity_daily=activity,
     )
+
+
+router.include_router(learning_router)
