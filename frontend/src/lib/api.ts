@@ -372,3 +372,111 @@ export async function markMistakeUnderstood(mistakeId: string): Promise<{
   if (!resp.ok) throw new Error(`mark-understood failed: ${resp.status}`)
   return resp.json()
 }
+
+export type ResetScope = 'learning' | 'factory'
+
+export interface DataCounts {
+  users: number
+  documents: number
+  source_chunks: number
+  vectors: number
+  chat_sessions: number
+  messages: number
+  citations: number
+  goals: number
+  topics: number
+  plans: number
+  plan_milestones: number
+  plan_events: number
+  questions: number
+  mastery: number
+  mistakes: number
+}
+
+export interface DataSummaryDto extends DataCounts {
+  reset_enabled: boolean
+  has_learning_data: boolean
+}
+
+export interface ResetResultDto {
+  scope: ResetScope
+  status: 'completed'
+  deleted: DataCounts
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+export class DataLifecycleApiError extends Error {
+  public readonly status: number
+  public readonly code: string
+  public readonly failedStage: string | null
+  public readonly retryable: boolean
+
+  constructor(
+    status: number,
+    code: string,
+    failedStage: string | null,
+    retryable: boolean,
+    detail: string,
+  ) {
+    super(detail)
+    this.name = 'DataLifecycleApiError'
+    this.status = status
+    this.code = code
+    this.failedStage = failedStage
+    this.retryable = retryable
+  }
+
+  static async fromResponse(response: Response): Promise<DataLifecycleApiError> {
+    const body = await response.json().catch(() => null) as unknown
+    const bodyRecord = recordValue(body)
+    const nestedDetail = bodyRecord ? recordValue(bodyRecord.detail) : null
+    const raw = nestedDetail ?? (bodyRecord && !('detail' in bodyRecord) ? bodyRecord : null)
+    const message = typeof raw?.message === 'string'
+      ? raw.message
+      : typeof raw?.detail === 'string'
+        ? raw.detail
+        : 'Data lifecycle request failed.'
+
+    return new DataLifecycleApiError(
+      response.status,
+      typeof raw?.code === 'string' ? raw.code : 'data_lifecycle_failed',
+      typeof raw?.failed_stage === 'string' ? raw.failed_stage : null,
+      raw?.retryable === true,
+      message,
+    )
+  }
+}
+
+async function strictAuthHeaders(): Promise<Record<string, string>> {
+  const token = await getAccessToken()
+  return { Authorization: `Bearer ${token}` }
+}
+
+export async function getDataSummary(): Promise<DataSummaryDto> {
+  const resp = await fetch('/api/data/summary', { headers: await strictAuthHeaders() })
+  if (!resp.ok) throw await DataLifecycleApiError.fromResponse(resp)
+  return resp.json() as Promise<DataSummaryDto>
+}
+
+const RESET_CONFIRMATION: Record<ResetScope, string> = {
+  learning: 'CLEAR_LEARNING_DATA',
+  factory: 'FACTORY_RESET',
+}
+
+export async function resetData(scope: ResetScope): Promise<ResetResultDto> {
+  const resp = await fetch('/api/data/reset', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(await strictAuthHeaders()),
+    },
+    body: JSON.stringify({ scope, confirmation: RESET_CONFIRMATION[scope] }),
+  })
+  if (!resp.ok) throw await DataLifecycleApiError.fromResponse(resp)
+  return resp.json() as Promise<ResetResultDto>
+}
