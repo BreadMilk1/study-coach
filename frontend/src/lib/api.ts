@@ -1,4 +1,9 @@
 import { authHeaders, getAccessToken, llmHeaders, type ModeOverrides } from '../stores/settings'
+import {
+  CHAT_SESSION_KEY,
+  captureLearningStateEpoch,
+  isLearningStateEpochCurrent,
+} from './dataLifecycle'
 
 // Auto-provision anonymous token on module load
 getAccessToken()
@@ -13,8 +18,6 @@ interface ChatStreamCallbacks {
   onDone?: () => void
   onError?: (err: unknown) => void
 }
-
-const CHAT_SESSION_KEY = 'study-coach:current-chat-session-id'
 
 export function getStoredChatSessionId(): string {
   try { return localStorage.getItem(CHAT_SESSION_KEY) || '' }
@@ -32,7 +35,14 @@ export async function streamChat(
   cb: ChatStreamCallbacks,
   overrides: ModeOverrides = {},
 ): Promise<void> {
+  const epoch = captureLearningStateEpoch()
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  const cancelReader = async () => {
+    try { await reader?.cancel() }
+    catch { /* reader already closed */ }
+  }
   try {
+    if (!isLearningStateEpochCurrent(epoch)) return
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: {
@@ -45,17 +55,34 @@ export async function streamChat(
         session_id: getStoredChatSessionId() || undefined,
       }),
     })
+    if (!isLearningStateEpochCurrent(epoch)) {
+      if (resp.body) reader = resp.body.getReader()
+      await cancelReader()
+      return
+    }
     if (!resp.ok || !resp.body) throw new Error(`chat failed: ${resp.status}`)
-    const reader = resp.body.getReader()
+    reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     while (true) {
+      if (!isLearningStateEpochCurrent(epoch)) {
+        await cancelReader()
+        return
+      }
       const { value, done } = await reader.read()
+      if (!isLearningStateEpochCurrent(epoch)) {
+        await cancelReader()
+        return
+      }
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
+        if (!isLearningStateEpochCurrent(epoch)) {
+          await cancelReader()
+          return
+        }
         const trimmed = line.trim()
         if (!trimmed.startsWith('data: ')) continue
         const json = trimmed.slice(6)
@@ -73,6 +100,10 @@ export async function streamChat(
       }
     }
   } catch (e) {
+    if (!isLearningStateEpochCurrent(epoch)) {
+      await cancelReader()
+      return
+    }
     cb.onError?.(e)
   }
 }

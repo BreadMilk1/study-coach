@@ -2,8 +2,21 @@ export const STARTUP_CHOICE_KEY = 'study-coach:startup-choice-made'
 export const CHAT_SESSION_KEY = 'study-coach:current-chat-session-id'
 
 const APP_PREFIX = 'study-coach:'
+let learningStateEpoch = 0
 
 export type StartupDecision = 'ready' | 'choice_required'
+
+export function captureLearningStateEpoch(): number {
+  return learningStateEpoch
+}
+
+export function isLearningStateEpochCurrent(epoch: number): boolean {
+  return epoch === learningStateEpoch
+}
+
+export function invalidateLearningState(): void {
+  learningStateEpoch += 1
+}
 
 export function resolveStartupDecision(
   summary: { resetEnabled: boolean; hasLearningData: boolean },
@@ -15,6 +28,11 @@ export function resolveStartupDecision(
 
 export function clearLearningBrowserState(local: Storage): void {
   local.removeItem(CHAT_SESSION_KEY)
+}
+
+export function clearStoredChatSessionId(): void {
+  try { localStorage.removeItem(CHAT_SESSION_KEY) }
+  catch { /* storage unavailable */ }
 }
 
 export function markStartupChoice(session: Storage): void {

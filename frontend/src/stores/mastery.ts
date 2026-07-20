@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { getMastery, type MasteryDto } from '../lib/api'
+import { captureLearningStateEpoch, isLearningStateEpochCurrent } from '../lib/dataLifecycle'
 
 interface MasteryState {
   data: MasteryDto
@@ -14,12 +15,25 @@ export const useMastery = defineStore('mastery', {
     error: null,
   }),
   actions: {
+    resetAfterDataClear() {
+      this.data = { scores: [], weak_topics: [], overdue_milestones_count: 0 }
+      this.loading = false
+      this.error = null
+    },
     async fetch() {
+      const epoch = captureLearningStateEpoch()
       this.loading = true
       this.error = null
-      try { this.data = await getMastery() }
-      catch (e: any) { this.error = e?.message ?? 'failed' }
-      finally { this.loading = false }
+      try {
+        const data = await getMastery()
+        if (isLearningStateEpochCurrent(epoch)) this.data = data
+        return true
+      } catch (e: any) {
+        if (isLearningStateEpochCurrent(epoch)) this.error = e?.message ?? 'failed'
+        return false
+      } finally {
+        if (isLearningStateEpochCurrent(epoch)) this.loading = false
+      }
     },
   },
 })

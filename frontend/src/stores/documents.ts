@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { getDocuments, type DocumentDto } from '../lib/api'
+import { captureLearningStateEpoch, isLearningStateEpochCurrent } from '../lib/dataLifecycle'
 
 interface DocsState {
   docs: DocumentDto[]
@@ -14,15 +15,24 @@ export const useDocuments = defineStore('documents', {
     isEmpty: (s) => s.docs.length === 0 || s.docs.every(d => d.chunks_count === 0),
   },
   actions: {
+    resetAfterDataClear() {
+      this.docs = []
+      this.loading = false
+      this.error = null
+    },
     async fetch() {
+      const epoch = captureLearningStateEpoch()
       this.loading = true
       this.error = null
       try {
-        this.docs = await getDocuments()
+        const docs = await getDocuments()
+        if (isLearningStateEpochCurrent(epoch)) this.docs = docs
+        return true
       } catch (e: any) {
-        this.error = e?.message ?? 'failed'
+        if (isLearningStateEpochCurrent(epoch)) this.error = e?.message ?? 'failed'
+        return false
       } finally {
-        this.loading = false
+        if (isLearningStateEpochCurrent(epoch)) this.loading = false
       }
     },
   },
