@@ -3,15 +3,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    ports: ["8000:8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
     environment:
-      - DATABASE_URL=sqlite:///data/study_coach.db
-      - CHROMA_PERSIST_DIR=/app/data/chroma
-      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-me}
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
-      - CORS_ORIGINS=http://localhost:5173
+      DATABASE_URL: sqlite:///data/study_coach.db
+      CHROMA_PATH: /app/data/chroma
+      STUDY_COACH_LOCAL_MODE: "1"
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      CORS_ORIGINS: http://localhost:5173
 
   frontend:
     build:
