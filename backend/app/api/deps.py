@@ -31,6 +31,20 @@ async def get_current_user(
         raise HTTPException(401, detail=str(e))
 
 
+async def require_signed_user(
+    authorization: str | None = Header(None),
+) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, detail="signed bearer token required") from None
+    try:
+        user_id = decode_token(authorization[len("Bearer "):]).user_id
+    except (KeyError, ValueError):
+        raise HTTPException(401, detail="signed bearer token required") from None
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise HTTPException(401, detail="signed bearer token required") from None
+    return user_id
+
+
 def get_user_id(
     x_fingerprint: Annotated[str, Header()],
     session: Annotated[Session, Depends(get_session)],
@@ -64,6 +78,14 @@ def get_document_processor(request: Request):
 
 def get_checkpointer(request: Request):
     return request.app.state.checkpointer
+
+
+def get_lifecycle_gate(request: Request):
+    return request.app.state.data_lifecycle_gate
+
+
+def get_retriever_runtime(request: Request):
+    return request.app.state.retriever_runtime
 
 
 def get_llm(llm_config: Annotated[LLMConfig, Depends(get_llm_config)]):
