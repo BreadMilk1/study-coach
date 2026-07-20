@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.routes import router
+from app.data_lifecycle import DataLifecycleGate
 from app.rag.document_processor import DocumentProcessor
 from app.rag.reranking_retriever import RerankingRetriever
 from app.rag.runtime import build_default_runtime
@@ -16,6 +17,7 @@ def _build_default_retriever() -> RerankingRetriever:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Study Coach", version="0.0.1")
+    app.state.data_lifecycle_gate = DataLifecycleGate()
 
     app.add_middleware(
         CORSMiddleware,

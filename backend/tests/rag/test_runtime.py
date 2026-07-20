@@ -1,5 +1,6 @@
-from chromadb.errors import NotFoundError
+import chromadb
 import pytest
+from chromadb.errors import NotFoundError
 
 from app.rag import runtime as runtime_module
 from app.rag.runtime import RetrieverRuntime
@@ -17,8 +18,11 @@ class FakeCollection:
         self._count = count
         self._documents = documents or []
         self._metadatas = metadatas or []
+        self._deleted = False
 
     def count(self) -> int:
+        if self._deleted:
+            raise NotFoundError(f"Collection {self.name} does not exist")
         return self._count
 
     def get(self, *, include):
@@ -48,7 +52,8 @@ class FakeClient:
         self.deleted_names.append(name)
         if name not in self.collections:
             raise NotFoundError(f"Collection {name} does not exist")
-        del self.collections[name]
+        collection = self.collections.pop(name)
+        collection._deleted = True
 
 
 def test_runtime_builds_retriever_and_reports_vector_count():
@@ -68,6 +73,25 @@ def test_runtime_builds_retriever_and_reports_vector_count():
     assert runtime.vector_count() == 3
     assert runtime.retriever is not None
     assert built_for == [runtime.collection]
+
+
+def test_vector_count_propagates_non_not_found_errors():
+    class FailingCountCollection(FakeCollection):
+        def count(self) -> int:
+            raise RuntimeError("storage unavailable")
+
+    class FailingCountClient(FakeClient):
+        def get_or_create_collection(self, name: str) -> FakeCollection:
+            return FailingCountCollection(name)
+
+    runtime = RetrieverRuntime(
+        client=FailingCountClient(),
+        collection_name="study_coach_chunks",
+        builder=lambda collection: object(),
+    )
+
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        runtime.vector_count()
 
 
 def test_reset_empty_rebuilds_empty_collection_and_replaces_retriever_each_time():
@@ -136,14 +160,16 @@ def test_reset_empty_propagates_non_not_found_delete_errors():
         runtime.reset_empty()
 
 
-def test_reset_empty_keeps_public_handles_when_builder_fails():
+def test_reset_empty_keeps_retry_reachable_when_builder_fails():
     client = FakeClient()
-    initial_retriever = object()
+    build_count = 0
 
     def builder(collection):
-        if collection.count() == 0:
+        nonlocal build_count
+        build_count += 1
+        if build_count == 2:
             raise RuntimeError("reranker unavailable")
-        return initial_retriever
+        return object()
 
     runtime = RetrieverRuntime(
         client=client,
@@ -151,12 +177,92 @@ def test_reset_empty_keeps_public_handles_when_builder_fails():
         builder=builder,
     )
     previous_collection = runtime.collection
+    initial_retriever = runtime.retriever
 
     with pytest.raises(RuntimeError, match="reranker unavailable"):
         runtime.reset_empty()
 
-    assert runtime.collection is previous_collection
+    with pytest.raises(NotFoundError):
+        previous_collection.count()
+    assert runtime.collection is not previous_collection
+    assert runtime.vector_count() == 0
     assert runtime.retriever is initial_retriever
+
+    rebuilt_retriever = runtime.reset_empty()
+
+    assert runtime.vector_count() == 0
+    assert runtime.retriever is rebuilt_retriever
+    assert rebuilt_retriever is not initial_retriever
+
+
+def test_reset_empty_retries_after_recreate_temporarily_fails():
+    class RecreateFailsOnceClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._remaining_recreate_failures = 1
+
+        def get_or_create_collection(self, name: str) -> FakeCollection:
+            if self._created_once and self._remaining_recreate_failures:
+                self._remaining_recreate_failures -= 1
+                raise RuntimeError("storage temporarily unavailable")
+            return super().get_or_create_collection(name)
+
+    client = RecreateFailsOnceClient()
+    runtime = RetrieverRuntime(
+        client=client,
+        collection_name="study_coach_chunks",
+        builder=lambda collection: object(),
+    )
+    previous_collection = runtime.collection
+    initial_retriever = runtime.retriever
+
+    with pytest.raises(RuntimeError, match="storage temporarily unavailable"):
+        runtime.reset_empty()
+
+    with pytest.raises(NotFoundError):
+        previous_collection.count()
+    assert runtime.vector_count() == 0
+    assert runtime.retriever is initial_retriever
+
+    rebuilt_retriever = runtime.reset_empty()
+
+    assert runtime.vector_count() == 0
+    assert runtime.retriever is rebuilt_retriever
+    assert rebuilt_retriever is not initial_retriever
+
+
+def test_reset_empty_retries_after_real_chroma_builder_failure():
+    client = chromadb.EphemeralClient()
+    build_count = 0
+
+    def builder(collection):
+        nonlocal build_count
+        build_count += 1
+        if build_count == 2:
+            raise RuntimeError("reranker unavailable")
+        return object()
+
+    runtime = RetrieverRuntime(
+        client=client,
+        collection_name="runtime_retry_recovery",
+        builder=builder,
+    )
+    previous_collection = runtime.collection
+    initial_retriever = runtime.retriever
+
+    with pytest.raises(RuntimeError, match="reranker unavailable"):
+        runtime.reset_empty()
+
+    with pytest.raises(NotFoundError):
+        previous_collection.count()
+    assert runtime.vector_count() == 0
+    assert runtime.retriever is initial_retriever
+
+    rebuilt_retriever = runtime.reset_empty()
+
+    assert runtime.vector_count() == 0
+    assert runtime.retriever is rebuilt_retriever
+    assert rebuilt_retriever is not initial_retriever
 
 
 def test_default_retriever_builder_hydrates_bm25_from_existing_collection(

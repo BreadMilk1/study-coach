@@ -26,7 +26,10 @@ class RetrieverRuntime:
         self.retriever = builder(self.collection)
 
     def vector_count(self) -> int:
-        return self.collection.count()
+        try:
+            return self.collection.count()
+        except NotFoundError:
+            return 0
 
     def reset_empty(self) -> RerankingRetriever:
         try:
@@ -34,8 +37,8 @@ class RetrieverRuntime:
         except NotFoundError:
             pass
         collection = self.client.get_or_create_collection(self.collection_name)
-        retriever = self.builder(collection)
         self.collection = collection
+        retriever = self.builder(collection)
         self.retriever = retriever
         return retriever
 
