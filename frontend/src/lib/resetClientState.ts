@@ -6,6 +6,7 @@ export interface ClientLearningStores {
   plan: { resetAfterDataClear: () => void; fetch: () => Promise<boolean> }
   mistakes: { resetAfterDataClear: () => void; fetch: () => Promise<boolean> }
   mastery: { resetAfterDataClear: () => void; fetch: () => Promise<boolean> }
+  activity: { resetAfterDataClear: () => void; fetch: () => Promise<boolean> }
 }
 
 export async function resetClientLearningState(stores: ClientLearningStores): Promise<void> {
@@ -16,11 +17,13 @@ export async function resetClientLearningState(stores: ClientLearningStores): Pr
   stores.plan.resetAfterDataClear()
   stores.mistakes.resetAfterDataClear()
   stores.mastery.resetAfterDataClear()
+  stores.activity.resetAfterDataClear()
   const refreshed = await Promise.all([
     stores.documents.fetch(),
     stores.plan.fetch(),
     stores.mistakes.fetch(),
     stores.mastery.fetch(),
+    stores.activity.fetch(),
   ])
   if (refreshed.some(result => result === false)) {
     throw new Error('Client learning data refresh failed.')

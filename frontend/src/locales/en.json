@@ -11,6 +11,47 @@
     "library": "Library",
     "settings": "Settings"
   },
+  "dataLifecycle": {
+    "startup": {
+      "checkingTitle": "Checking local data",
+      "checkingBody": "Inspecting local data…",
+      "choiceTitle": "Existing learning data found",
+      "choiceBody": "Choose whether to continue with this Study Coach instance or clear its learning data and start fresh.",
+      "counts": "{documents} documents · {chunks} source chunks · {sessions} Chat sessions",
+      "continue": "Continue",
+      "startFresh": "Start fresh",
+      "inspectionErrorTitle": "Local data could not be inspected",
+      "inspectionErrorBody": "Retry the inspection, or continue without clearing if you understand that existing data may remain.",
+      "continueWithoutClearing": "Continue without clearing",
+      "externalTitle": "Learning data changed in another tab",
+      "externalBody": "Another tab cleared this instance's learning data. Refresh local state before continuing.",
+      "refreshing": "Refreshing local state…"
+    },
+    "reset": {
+      "learningTitle": "Clear learning data?",
+      "learningBody": "Clear learning data deletes imported document records and embeddings, Chat history, Quiz and review data, goals, plans, milestones, mistakes, mastery, and current in-memory learning state. Model, provider, API, language, and interface settings remain.",
+      "factoryTitle": "Factory reset this Study Coach instance?",
+      "factoryBody": "Factory reset deletes all learning data, local model and interface settings, cached model capability, local identity, and backend local user rows. This cannot be undone.",
+      "counts": "Currently stored: {documents} documents, {chunks} source chunks, and {vectors} embeddings.",
+      "factoryLabel": "Type RESET to confirm",
+      "factoryHint": "The confirmation is case-sensitive.",
+      "resettingTitle": "Reset in progress",
+      "resettingBody": "Keep Study Coach open while local data is being cleared.",
+      "resettingAction": "Resetting…",
+      "errorTitle": "Reset did not complete",
+      "failedStage": "Failed stage: {stage}",
+      "restarting": "Reset complete, restarting…"
+    },
+    "actions": {
+      "cancel": "Cancel",
+      "retry": "Retry",
+      "clearLearning": "Clear learning data",
+      "factoryReset": "Factory reset"
+    },
+    "toast": {
+      "learningCleared": "Learning data cleared. {count} stored records and vectors deleted."
+    }
+  },
   "chat": {
     "placeholder": "Ask a question...",
     "send": "Send",

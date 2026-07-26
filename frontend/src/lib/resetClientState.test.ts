@@ -7,6 +7,7 @@ vi.mock('../stores/settings', () => ({
   llmHeaders: vi.fn(() => ({})),
 }))
 
+import { useActivity } from '../stores/activity'
 import { useChat } from '../stores/chat'
 import { useDocuments } from '../stores/documents'
 import { useMastery } from '../stores/mastery'
@@ -575,15 +576,24 @@ describe('server-backed store data reset', () => {
       usePlan().fetch(),
       useMistakes().fetch(),
       useMastery().fetch(),
-    ])).resolves.toEqual([false, false, false, false])
+      useActivity().fetch(),
+    ])).resolves.toEqual([false, false, false, false, false])
   })
 
   it('reports successful refreshes from every server-backed store', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
       const path = String(input)
-      const body = path === '/api/documents' || path.includes('/events') || path.includes('/mistakes/')
-        ? []
-        : path === '/api/mastery'
+      const body = path === '/api/users/me/stats'
+        ? {
+            streak_days: 0,
+            coverage: 0,
+            total_sessions: 0,
+            last_active_date: null,
+            activity_daily: [],
+          }
+        : path === '/api/documents' || path.includes('/events') || path.includes('/mistakes/')
+          ? []
+          : path === '/api/mastery'
           ? { scores: [], weak_topics: [], overdue_milestones_count: 0 }
           : {
               plan_id: 'plan-1',
@@ -604,7 +614,8 @@ describe('server-backed store data reset', () => {
       usePlan().fetch(),
       useMistakes().fetch(),
       useMastery().fetch(),
-    ])).resolves.toEqual([true, true, true, true])
+      useActivity().fetch(),
+    ])).resolves.toEqual([true, true, true, true, true])
   })
 
   it('rejects safely without retaining stale data when real-store refreshes fail', async () => {
@@ -616,6 +627,7 @@ describe('server-backed store data reset', () => {
     const plan = usePlan()
     const mistakes = useMistakes()
     const mastery = useMastery()
+    const activity = useActivity()
     chat.messages = [{ id: 'message-1', role: 'user', content: 'stale chat' }]
     quiz.raw = 'stale quiz'
     documents.docs = [{ id: 'doc-1', filename: 'stale.pdf', chunks_count: 3 }]
@@ -635,6 +647,7 @@ describe('server-backed store data reset', () => {
       topic_name: 'stale topic',
     }]
     mastery.data.weak_topics = ['stale topic']
+    activity.days = [{ date: '2026-07-27', count: 4 }]
 
     await expect(resetClientLearningState({
       clearChatSession: clearStoredChatSessionId,
@@ -644,15 +657,17 @@ describe('server-backed store data reset', () => {
       plan,
       mistakes,
       mastery,
+      activity,
     })).rejects.toThrow('Client learning data refresh failed.')
 
-    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(fetchMock).toHaveBeenCalledTimes(5)
     expect(chat.messages).toEqual([])
     expect(quiz.raw).toBe('')
     expect(documents.docs).toEqual([])
     expect(plan.mindmapMermaid).toBeNull()
     expect(mistakes.items).toEqual([])
     expect(mastery.data.weak_topics).toEqual([])
+    expect(activity.days).toEqual([])
   })
 })
 
@@ -679,6 +694,10 @@ describe('resetClientLearningState', () => {
         resetAfterDataClear: () => calls.push('mastery-reset'),
         fetch: async () => { calls.push('mastery'); return true },
       },
+      activity: {
+        resetAfterDataClear: () => calls.push('activity-reset'),
+        fetch: async () => { calls.push('activity'); return true },
+      },
     }
 
     await resetClientLearningState(dependencies)
@@ -691,10 +710,12 @@ describe('resetClientLearningState', () => {
       'plan-reset',
       'mistakes-reset',
       'mastery-reset',
+      'activity-reset',
       'documents',
       'plan',
       'mistakes',
       'mastery',
+      'activity',
     ])
   })
 
@@ -704,6 +725,7 @@ describe('resetClientLearningState', () => {
     let resolvePlan!: (result: boolean) => void
     let resolveMistakes!: (result: boolean) => void
     let resolveMastery!: (result: boolean) => void
+    let resolveActivity!: (result: boolean) => void
     const pending = (
       name: string,
       capture: (resolve: (result: boolean) => void) => void,
@@ -731,6 +753,10 @@ describe('resetClientLearningState', () => {
         resetAfterDataClear: () => calls.push('mastery-reset'),
         fetch: () => pending('mastery', resolve => { resolveMastery = resolve }),
       },
+      activity: {
+        resetAfterDataClear: () => calls.push('activity-reset'),
+        fetch: () => pending('activity', resolve => { resolveActivity = resolve }),
+      },
     }
 
     let settled = false
@@ -744,18 +770,21 @@ describe('resetClientLearningState', () => {
       'plan-reset',
       'mistakes-reset',
       'mastery-reset',
+      'activity-reset',
       'documents',
       'plan',
       'mistakes',
       'mastery',
+      'activity',
     ])
     resolveDocuments(true)
     resolvePlan(true)
     resolveMistakes(true)
+    resolveMastery(true)
     await Promise.resolve()
     expect(settled).toBe(false)
 
-    resolveMastery(true)
+    resolveActivity(true)
     await reset
     expect(settled).toBe(true)
   })
@@ -783,6 +812,10 @@ describe('resetClientLearningState', () => {
         resetAfterDataClear: () => calls.push('mastery-reset'),
         fetch: async () => { calls.push('mastery'); return true },
       },
+      activity: {
+        resetAfterDataClear: () => calls.push('activity-reset'),
+        fetch: async () => { calls.push('activity'); return true },
+      },
     }
 
     await expect(resetClientLearningState(dependencies)).rejects.toBe(failure)
@@ -794,10 +827,12 @@ describe('resetClientLearningState', () => {
       'plan-reset',
       'mistakes-reset',
       'mastery-reset',
+      'activity-reset',
       'documents',
       'plan',
       'mistakes',
       'mastery',
+      'activity',
     ])
   })
 })
