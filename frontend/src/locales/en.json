@@ -88,7 +88,37 @@
     "localFirst": "Local-first workspace. No registration required.",
     "debugMode": "Debug Mode",
     "language": "Language",
-    "save": "Save Settings"
+    "save": "Save Settings",
+    "dangerZone": {
+      "eyebrow": "Local instance controls",
+      "title": "Danger Zone",
+      "description": "These controls delete data from this local Study Coach instance. Review the exact stored counts before continuing.",
+      "countsTitle": "Stored data in this instance",
+      "refreshingCounts": "Refreshing stored counts…",
+      "refreshError": "Stored counts could not be refreshed: {message}",
+      "retryCounts": "Retry counts",
+      "counts": {
+        "documents": "Documents",
+        "source_chunks": "Source chunks (SQL)",
+        "vectors": "Vectors (actual embeddings)",
+        "chat_sessions": "Chat sessions",
+        "messages": "Messages",
+        "citations": "Citations",
+        "goals": "Goals",
+        "topics": "Topics",
+        "questions": "Questions",
+        "mistakes": "Mistakes",
+        "mastery": "Mastery records",
+        "plans": "Plans",
+        "plan_milestones": "Plan milestones",
+        "plan_events": "Plan events",
+        "users": "Users"
+      },
+      "learningTitle": "Clear learning data",
+      "learningBody": "Deletes imported documents and actual vectors, Chat and Quiz history, review progress, goals, plans, mistakes, and mastery. Model, provider, API, language, and interface settings remain.",
+      "factoryTitle": "Factory reset",
+      "factoryBody": "Deletes all learning data, local model and interface settings, cached model capability, local identity, and backend local user rows. This cannot be undone."
+    }
   },
   "mistakes": {
     "dueOnly": "Due only",

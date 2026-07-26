@@ -1,15 +1,41 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { AlertTriangle } from 'lucide-vue-next'
+
 import { useSettings } from '../stores/settings'
-import { checkToolCapable, pingModel } from '../lib/api'
+import { useDataLifecycle } from '../stores/dataLifecycle'
+import { checkToolCapable, pingModel, type DataCounts } from '../lib/api'
 import { useI18n } from 'vue-i18n'
 
 const { locale } = useI18n()
+const lifecycle = useDataLifecycle()
 const s = useSettings()
 const toolTesting = ref(false)
 const toolNote = ref('')
 const pingTesting = ref(false)
 const pingResult = ref<{ ok: boolean; note: string; latency_ms: number } | null>(null)
+
+const countKeys: (keyof DataCounts)[] = [
+  'documents',
+  'source_chunks',
+  'vectors',
+  'chat_sessions',
+  'messages',
+  'citations',
+  'goals',
+  'topics',
+  'questions',
+  'mistakes',
+  'mastery',
+  'plans',
+  'plan_milestones',
+  'plan_events',
+  'users',
+]
+
+watch(() => lifecycle.phase, (phase) => {
+  if (phase === 'ready') void lifecycle.refreshSummary()
+}, { immediate: true, flush: 'post' })
 
 function save() {
   s.persist()
@@ -173,6 +199,109 @@ async function runToolCheck() {
               class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-sm">
         {{ $t('settings.save') }}
       </button>
+
+      <section
+        v-if="lifecycle.summary?.reset_enabled"
+        class="mt-10 border-t border-danger/30 pt-8"
+        aria-labelledby="danger-zone-title"
+      >
+        <p class="font-mono text-xs uppercase tracking-[0.16em] text-danger">
+          {{ $t('settings.dangerZone.eyebrow') }}
+        </p>
+        <div class="mt-2 flex items-start gap-3">
+          <AlertTriangle class="mt-0.5 h-5 w-5 shrink-0 text-danger" aria-hidden="true" />
+          <div>
+            <h3 id="danger-zone-title" class="text-lg font-semibold text-fg">
+              {{ $t('settings.dangerZone.title') }}
+            </h3>
+            <p class="mt-1 max-w-3xl text-sm leading-6 text-fg-muted">
+              {{ $t('settings.dangerZone.description') }}
+            </p>
+          </div>
+        </div>
+
+        <p class="mt-6 text-sm font-medium text-fg">
+          {{ $t('settings.dangerZone.countsTitle') }}
+        </p>
+        <p
+          v-if="lifecycle.summaryRefreshing"
+          class="mt-2 text-sm text-primary-2"
+          role="status"
+          aria-live="polite"
+        >
+          {{ $t('settings.dangerZone.refreshingCounts') }}
+        </p>
+        <div
+          v-else-if="lifecycle.phase === 'ready' && lifecycle.error"
+          class="mt-3 flex flex-col gap-3 rounded-md bg-danger-bg px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+          role="alert"
+        >
+          <p class="text-sm text-danger">
+            {{ $t('settings.dangerZone.refreshError', { message: lifecycle.error.message }) }}
+          </p>
+          <button
+            type="button"
+            class="shrink-0 rounded-md border border-danger/50 px-3 py-1.5 text-sm font-medium text-danger transition-colors hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50"
+            @click="lifecycle.refreshSummary()"
+          >
+            {{ $t('settings.dangerZone.retryCounts') }}
+          </button>
+        </div>
+        <dl class="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
+          <div
+            v-for="key in countKeys"
+            :key="key"
+            class="border-b border-border pb-2"
+          >
+            <dt class="text-xs leading-5 text-fg-muted">
+              {{ $t(`settings.dangerZone.counts.${key}`) }}
+            </dt>
+            <dd class="mt-1 font-mono text-base text-fg">
+              {{ lifecycle.summary[key] }}
+            </dd>
+          </div>
+        </dl>
+
+        <div class="mt-8 divide-y divide-border-strong border-y border-border-strong">
+          <div class="grid gap-4 py-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div>
+              <h4 class="text-sm font-semibold text-fg">
+                {{ $t('settings.dangerZone.learningTitle') }}
+              </h4>
+              <p class="mt-1 max-w-3xl text-sm leading-6 text-fg-muted">
+                {{ $t('settings.dangerZone.learningBody') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md border border-danger/50 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="lifecycle.phase !== 'ready' || lifecycle.summaryRefreshing"
+              @click="lifecycle.requestLearningReset()"
+            >
+              {{ $t('dataLifecycle.actions.clearLearning') }}
+            </button>
+          </div>
+
+          <div class="grid gap-4 py-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div>
+              <h4 class="text-sm font-semibold text-fg">
+                {{ $t('settings.dangerZone.factoryTitle') }}
+              </h4>
+              <p class="mt-1 max-w-3xl text-sm leading-6 text-fg-muted">
+                {{ $t('settings.dangerZone.factoryBody') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md bg-danger px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-danger/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="lifecycle.phase !== 'ready' || lifecycle.summaryRefreshing"
+              @click="lifecycle.requestFactoryReset()"
+            >
+              {{ $t('dataLifecycle.actions.factoryReset') }}
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </template>

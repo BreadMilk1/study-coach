@@ -123,6 +123,121 @@ describe('startup inspection', () => {
   })
 })
 
+describe('ready summary refresh', () => {
+  it('updates counts without leaving ready or reopening the startup gate', async () => {
+    let resolveSummary!: (value: ReturnType<typeof summary>) => void
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: () => new Promise(resolve => { resolveSummary = resolve }),
+    }))
+    store.phase = 'ready'
+    store.summary = summary({ documents: 1, source_chunks: 3, vectors: 3 })
+    store.error = new Error('stale error')
+    const operationGeneration = store.operationGeneration
+
+    const refresh = store.refreshSummary()
+
+    expect(store.summaryRefreshing).toBe(true)
+    resolveSummary(summary({ documents: 4, source_chunks: 12, vectors: 10 }))
+    await refresh
+
+    expect(store.phase).toBe('ready')
+    expect(store.summaryRefreshing).toBe(false)
+    expect(store.operationGeneration).toBe(operationGeneration)
+    expect(store.summary).toMatchObject({ documents: 4, source_chunks: 12, vectors: 10 })
+    expect(store.error).toBeNull()
+  })
+
+  it('does nothing outside the ready phase', async () => {
+    const fetchSummary = vi.fn(async () => summary())
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ summary: fetchSummary }))
+    store.phase = 'checking'
+
+    await store.refreshSummary()
+
+    expect(fetchSummary).not.toHaveBeenCalled()
+    expect(store.phase).toBe('checking')
+    expect(store.summary).toBeNull()
+    expect(store.summaryRefreshing).toBe(false)
+  })
+
+  it('keeps the previous summary on failure and can retry in the same ready phase', async () => {
+    const previous = summary({ documents: 2, vectors: 7 })
+    let attempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('summary unavailable')
+        return summary({ documents: 6, vectors: 9 })
+      },
+    }))
+    store.phase = 'ready'
+    store.summary = previous
+
+    await store.refreshSummary()
+
+    expect(store.phase).toBe('ready')
+    expect(store.summary).toEqual(previous)
+    expect(store.error?.message).toBe('summary unavailable')
+    expect(store.summaryRefreshing).toBe(false)
+
+    await store.refreshSummary()
+
+    expect(store.phase).toBe('ready')
+    expect(store.summary).toMatchObject({ documents: 6, vectors: 9 })
+    expect(store.error).toBeNull()
+    expect(store.summaryRefreshing).toBe(false)
+  })
+
+  it('does not let a stale refresh overwrite an external reset', async () => {
+    let resolveSummary!: (value: ReturnType<typeof summary>) => void
+    const pendingSummary = new Promise<ReturnType<typeof summary>>(resolve => {
+      resolveSummary = resolve
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ summary: () => pendingSummary }))
+    const previous = summary({ documents: 2 })
+    store.phase = 'ready'
+    store.summary = previous
+
+    const refresh = store.refreshSummary()
+    await store.handleExternalReset('learning')
+    resolveSummary(summary({ documents: 99 }))
+    await refresh
+
+    expect(store.phase).toBe('external_reset')
+    expect(store.summary).toEqual(previous)
+    expect(store.summaryRefreshing).toBe(false)
+  })
+
+  it('keeps the newest overlapping refresh pending when an older request settles', async () => {
+    const resolvers: Array<(value: ReturnType<typeof summary>) => void> = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: () => new Promise(resolve => { resolvers.push(resolve) }),
+    }))
+    store.phase = 'ready'
+    store.summary = summary({ documents: 1 })
+
+    const first = store.refreshSummary()
+    const second = store.refreshSummary()
+    resolvers[0](summary({ documents: 5 }))
+    await first
+
+    expect(store.summaryRefreshing).toBe(true)
+    expect(store.summary.documents).toBe(1)
+
+    resolvers[1](summary({ documents: 8 }))
+    await second
+
+    expect(store.phase).toBe('ready')
+    expect(store.summary.documents).toBe(8)
+    expect(store.summaryRefreshing).toBe(false)
+  })
+})
+
 describe('reset confirmation', () => {
   it('returns learning confirmation to its originating ready or choice phase', async () => {
     const store = useDataLifecycle()

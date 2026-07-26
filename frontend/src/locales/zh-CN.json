@@ -88,7 +88,37 @@
     "localFirst": "本地优先学习空间，无需注册。",
     "debugMode": "调试模式",
     "language": "语言",
-    "save": "保存设置"
+    "save": "保存设置",
+    "dangerZone": {
+      "eyebrow": "本地实例控制",
+      "title": "危险区域",
+      "description": "这些操作会删除此本地 Study Coach 实例中的数据。继续前请核对各项实际存储数量。",
+      "countsTitle": "此实例中的存储数据",
+      "refreshingCounts": "正在刷新存储数量…",
+      "refreshError": "无法刷新存储数量：{message}",
+      "retryCounts": "重试数量刷新",
+      "counts": {
+        "documents": "文档",
+        "source_chunks": "来源片段（SQL）",
+        "vectors": "向量（实际 embeddings）",
+        "chat_sessions": "Chat 会话",
+        "messages": "消息",
+        "citations": "引用",
+        "goals": "目标",
+        "topics": "主题",
+        "questions": "题目",
+        "mistakes": "错题",
+        "mastery": "掌握度记录",
+        "plans": "计划",
+        "plan_milestones": "计划里程碑",
+        "plan_events": "计划事件",
+        "users": "用户"
+      },
+      "learningTitle": "清除学习数据",
+      "learningBody": "删除已导入的文档和实际向量、Chat 与 Quiz 历史、复习进度、目标、计划、错题及掌握度。模型、provider、API、语言和界面设置会保留。",
+      "factoryTitle": "恢复出厂设置",
+      "factoryBody": "删除所有学习数据、本地模型和界面设置、缓存的模型能力、本地身份，以及后端本地用户记录。此操作无法撤销。"
+    }
   },
   "mistakes": {
     "dueOnly": "仅到期",

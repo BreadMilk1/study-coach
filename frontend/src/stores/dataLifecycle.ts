@@ -50,6 +50,8 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
     externalClientReady: false,
     externalClientPending: false,
     operationGeneration: 0,
+    summaryRefreshGeneration: 0,
+    summaryRefreshing: false,
   }),
   getters: {
     canContinueWithoutClearing: state => state.phase === 'inspection_error',
@@ -76,6 +78,31 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         if (generation !== this.operationGeneration) return
         this.error = error instanceof Error ? error : new Error('Local data inspection failed.')
         this.phase = 'inspection_error'
+      }
+    },
+    async refreshSummary() {
+      if (this.phase !== 'ready') return
+      const operationGeneration = this.operationGeneration
+      const refreshGeneration = ++this.summaryRefreshGeneration
+      this.summaryRefreshing = true
+      this.error = null
+      try {
+        const summary = await dependencies().summary()
+        if (
+          operationGeneration !== this.operationGeneration
+          || refreshGeneration !== this.summaryRefreshGeneration
+          || this.phase !== 'ready'
+        ) return
+        this.summary = summary
+      } catch (error) {
+        if (
+          operationGeneration !== this.operationGeneration
+          || refreshGeneration !== this.summaryRefreshGeneration
+          || this.phase !== 'ready'
+        ) return
+        this.error = error instanceof Error ? error : new Error('Local data summary refresh failed.')
+      } finally {
+        if (refreshGeneration === this.summaryRefreshGeneration) this.summaryRefreshing = false
       }
     },
     continueExisting() {
