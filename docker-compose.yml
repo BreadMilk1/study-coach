@@ -10,6 +10,7 @@ services:
     environment:
       DATABASE_URL: sqlite:///data/study_coach.db
       CHROMA_PATH: /app/data/chroma
+      OLLAMA_HOST: http://ollama:11434
       STUDY_COACH_LOCAL_MODE: "1"
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -19,15 +20,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    ports: ["5173:5173"]
+    ports: ["127.0.0.1:5173:5173"]
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8000
     depends_on: [backend]
 
   ollama:
     image: ollama/ollama:latest
-    ports: ["11434:11434"]
+    ports: ["127.0.0.1:11434:11434"]
     volumes:
       - ollama_data:/root/.ollama
-    entrypoint: /bin/sh -c "ollama serve & sleep 3 && ollama pull gemma3:4b && ollama pull qwen2.5:7b && wait"
+    entrypoint: /bin/sh -c "ollama serve & sleep 3 && ollama pull nomic-embed-text && ollama pull gemma3:4b && ollama pull qwen2.5:7b && wait"
 
 volumes:
   ollama_data:

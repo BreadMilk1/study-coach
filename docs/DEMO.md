@@ -1,6 +1,6 @@
 # Study Coach Demo Guide
 
-> P4.5 automated gates verified. This is the reviewer-facing demo route for Study Coach.
+> P4.5 reviewer path verified. P5 automated gates are complete; the P5 destructive browser acceptance remains pending.
 > Use a PDF you own. Do not copy private course PDFs into this repository.
 
 ---
@@ -16,25 +16,43 @@ This guide demonstrates the Chat-first Study Coach loop:
 5. Refresh the frontend.
 6. Confirm chat history and Debug / Agent Run evidence are restored.
 
-P4.5 focuses on making this path stable before larger harness, durable memory, or multi-agent orchestration work.
+P4.5 made this path stable before larger harness, durable memory, or multi-agent orchestration work. P5 adds an explicit single-user local-instance lifecycle around the same learning flow.
 
 ## Verified Commands
 
-Verified on 2026-07-02:
+Verified on 2026-07-27:
 
 ```bash
 cd backend
+uv run pytest tests/db/test_data_lifecycle_repository.py -q
+uv run pytest tests/rag/test_runtime.py -q
+uv run pytest tests/test_data_lifecycle.py -q
+uv run pytest tests/api/test_data_routes.py -q
+uv run pytest tests/api/test_routes.py -q
+uv run pytest tests/test_deployment_config.py -q
 uv run pytest -q
 
 cd ../frontend
+pnpm test --run
 pnpm build
+
+cd ..
+docker compose config
 ```
 
 Result:
 
-- Backend: 256 tests passed.
-- Frontend: production build passed.
-- Existing Vite large chunk warning is accepted for this stage.
+- Focused backend lifecycle suites: 2 + 12 + 31 + 32 + 24 tests passed.
+- Focused deployment configuration suite: 12 tests passed, including build-context/order safeguards, frontend container listening, all three loopback bindings, the environment-aware Vite proxy, backend `OLLAMA_HOST=http://ollama:11434`, and all three model pre-pulls.
+- Full backend: 366 tests passed.
+- Frontend: 97 Vitest tests across 8 files passed; production build passed. Total automated tests: 463.
+- Compose render passed with backend/frontend/Ollama host bindings `127.0.0.1:8000`, `127.0.0.1:5173`, and `127.0.0.1:11434`; backend `STUDY_COACH_LOCAL_MODE=1`, `CHROMA_PATH=/app/data/chroma`, and `OLLAMA_HOST=http://ollama:11434`; frontend proxy target `http://backend:8000`; and pre-pulls for `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`.
+- A clean no-cache build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke passed for frontend `/`, direct backend `/api/health`, and frontend-proxied `/api/health` with HTTP 200.
+- The first backend cold start downloads about 1.1 GB of FastEmbed model data and may temporarily return `502` through the frontend proxy; wait until `/api/health` becomes ready before continuing.
+- Ollama embedding/model runtime was not smoke-tested on the uncached host; pulling the roughly 2.6 GB Ollama image was stopped without leaving containers or volumes. The successful HTTP smoke above does not prove model inference.
+- Fly keeps `STUDY_COACH_LOCAL_MODE=0`.
+- Static Google frontend runtime/UI search returned no matches; environment/config searches matched the intended local-mode and Chroma settings.
+- The existing Vite warning for chunks larger than 500 kB is accepted for this stage.
 
 ---
 
@@ -57,11 +75,27 @@ If using another model, confirm tool-calling support in Settings or via `/api/mo
 
 ## Start Services
 
+For the P5 local-data-lifecycle acceptance path, prefer Docker Compose. It enables reset only for the local deployment and publishes the backend on loopback:
+
+```bash
+docker compose up
+```
+
+Before uploading a PDF or starting Chat, verify the Compose Ollama service has finished all model pulls:
+
+```bash
+docker compose exec ollama ollama list
+```
+
+Continue only after `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b` appear. A successful backend `/api/health` response confirms the backend is ready, not that these Ollama models are ready.
+
+If running the services directly, enable the same local-only boundary explicitly.
+
 Terminal 1:
 
 ```bash
 cd study-coach/backend
-uv run uvicorn app.main:app --port 8000
+STUDY_COACH_LOCAL_MODE=1 CHROMA_PATH=./chroma_data uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Terminal 2:
@@ -235,6 +269,27 @@ Before treating this as the public reviewer demo path, verify:
 - [x] Failed `persist_quiz_question` does not leave a user-answerable MCQ in Chat.
 - [x] Debug Mode uses redacted Agent Run previews and restores persisted evidence after refresh.
 - [x] Manual browser demo with user-owned PDFs (2026-07-20): grounded Chat answer → agent-loop Quiz → deterministic grade → refresh restore.
+
+---
+
+## P5 Local Data Lifecycle Acceptance — Pending
+
+**Status (2026-07-27): not yet executed.** Automated verification above is complete, but the destructive browser acceptance below must remain unchecked until it is run with screenshots and short text evidence.
+
+1. [ ] Start Ollama, backend, and frontend through the supported local configuration.
+2. [ ] Import two user-owned PDFs and create Chat, Quiz, Plan, mistake, and mastery state.
+3. [ ] Open a new tab; verify startup blocks every other interaction.
+4. [ ] Choose Continue; verify all existing data remains.
+5. [ ] Refresh that tab; verify the gate does not reopen in the same tab session.
+6. [ ] Open another new tab; choose Start fresh and confirm learning reset.
+7. [ ] Verify Library, Chat, Quiz, Plan, milestones/events, mistakes, mastery, Chroma vectors, retriever cache, and checkpoint state are empty.
+8. [ ] Verify provider, model, Base URL, API key, language, and debug settings remain.
+9. [ ] Re-import a user-owned PDF, run Factory reset, observe the restart state, and verify a new anonymous first-run state.
+10. [ ] If a naturally reproducible transient failure occurs, retry the same reset and verify completion; do not add a production failure-injection control.
+
+During steps 3–9, explicitly check native-modal behavior: initial focus, keyboard reachability, Esc and backdrop blocking where required, and an inert background. With two tabs open, verify a learning reset requires acknowledgement in the other tab and a factory reset reloads the other tab.
+
+Injected Chroma failure, SQLite failure, lock conflict, stale response, and idempotent retry semantics are proven by automated tests. Manual failure reproduction is optional and must use only a naturally occurring transient failure; no production failure-injection switch is permitted.
 
 ---
 

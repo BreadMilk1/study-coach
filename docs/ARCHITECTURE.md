@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM (local Ollama + cloud BYOK). P4.5 automated closure — 256 backend tests, frontend production build.
+> Dual-track LLM (local Ollama + cloud BYOK). Current automated baseline — 366 backend tests and 97 frontend tests (463 total); production build passing.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (P4.5 automated):** 256 backend tests, frontend build passing. Agent loop ablation data: 792 records across P2.2 (Plan) + P2.3 (Quiz).
+**Current baseline (2026-07-27):** 366 backend tests and 97 frontend tests passing (463 total); frontend production build passing. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
 
 ---
 
@@ -55,6 +55,7 @@ erDiagram
   Goal ||--|| Plan : has
   Plan ||--o{ PlanMilestone : breaks-into
   Plan ||--o{ PlanEvent : logs
+  Topic ||--o{ PlanMilestone : grounds
   Topic ||--o{ Question : generates
   Topic ||--o{ Mastery : measured-by
   Question ||--o{ Mistake : triggers
@@ -62,7 +63,7 @@ erDiagram
   Message ||--o{ Citation : references
 ```
 
-- **User**: `id`, `fingerprint` (FingerprintJS guest), `google_id` (OAuth member), `email`, `created_at`
+- **User**: `id`, `fingerprint` (anonymous local identity), `google_id` / `email` (retained for the frozen, deferred OAuth backend), `created_at`
 - **Goal**: one active goal per user (P2.1-③ invariant). `title`, `exam_date?`, `status` (active/done/abandoned)
 - **Plan**: `milestones_json` (compatibility cache) + `PlanMilestone` normalized rows for stable progression
 - **PlanEvent**: audit log of milestone state changes (created/completed/reopened/applied)
@@ -140,6 +141,29 @@ erDiagram
 - `x-planner-mode` / `x-quiz-mode` extend the pattern for mode dispatch (ADR 3)
 - Frontend `llmHeaders()` helper constructs headers from the settings store
 
+### ADR 6: Single-User Local-First Instance Data Lifecycle
+
+**Context:** Chroma, the live retriever, the LangGraph checkpointer, and SQLite are instance-wide resources. Presenting partial per-user deletion on top of the global Chroma collection would imply an ownership guarantee the storage model does not provide. P5 therefore needs an honest portfolio boundary and a recoverable reset path without claiming a distributed transaction.
+
+**Decision:** P5 treats one running Study Coach deployment as a **single-user, local-first instance**.
+
+- `GET /api/data/summary` and `POST /api/data/reset` require a valid signed bearer token through `require_signed_user`; these lifecycle routes never use the legacy `"default-user"` fallback.
+- Reset is disabled by default (`STUDY_COACH_LOCAL_MODE=0`). The shipped Docker Compose configuration enables it and binds backend host traffic to `127.0.0.1:8000`; Fly explicitly keeps local mode off. P5 does not enforce request source IP, so the environment flag and deployment binding are the security boundary.
+- P5 supports one backend worker. The in-process lifecycle gate and object replacement are not a multi-worker coordination protocol.
+- Learning operations use a shared lease; Chat and upload retain it for the full response lifetime. Reset takes an exclusive lease; conflicts return stable `409` codes (`reset_in_progress` or `data_operation_in_progress`). Disabled reset returns `403 reset_disabled`; stage failure returns retryable `500 reset_failed` with `failed_stage`. Mismatched confirmation text returns `422 invalid_confirmation`; an unsupported scope is rejected separately by ordinary Pydantic validation with `422`.
+- Reset order is fixed: clear Chroma, rebuild and republish the **complete** retriever and replace the `InMemorySaver` checkpointer references, then execute one child-first SQLite transaction (`citations → messages → sessions`, `plan_events → plan_milestones → plans`, `mistakes/mastery/questions → topics → goals → documents`, then users for factory scope).
+- This order provides idempotent recovery, not a cross-store transaction. If SQLite fails after Chroma and in-memory replacement, retry observes an already-empty vector store and completes the remaining database deletion.
+- Strict bearer verification validates the signed token but does not require its user row to remain present. If a factory-reset success response is lost, the same still-valid token can therefore retry idempotently and receive a completed empty reset; this is accepted only inside the local-mode and loopback deployment boundary.
+
+Two scopes share that backend ordering:
+
+- `learning`: deletes all learning records, source chunks, vectors, retriever caches, and checkpoint state while preserving the local user row and browser model/provider/API/language/interface settings.
+- `factory`: deletes the learning scope plus backend user rows; after backend success, the frontend clears owned browser identity/settings keys and reloads into a new anonymous first-run state.
+
+Summary and reset responses expose the same 15 count fields: `users`, `documents`, `source_chunks`, `vectors`, `chat_sessions`, `messages`, `citations`, `goals`, `topics`, `plans`, `plan_milestones`, `plan_events`, `questions`, `mastery`, and `mistakes`. `source_chunks` is the sum of SQL `documents.chunks_count`; `vectors` is the live Chroma count, so interrupted operations and legacy/orphaned embeddings can make them differ. `has_learning_data` ignores a user row by itself but is true for any other learning row or vector.
+
+**Consequences:** The startup gate, Settings Danger Zone, two-scope confirmations, cross-tab invalidation, and retry behavior can describe exactly what the current storage model does. Summary remains readable when reset is disabled, but `reset_enabled=false` makes the frontend skip the startup gate and hide the Danger Zone. A future per-user Chroma design must add ownership metadata and filtered retrieval throughout dense/BM25/reranking/tool paths **and replace this global-reset contract**; it cannot layer per-user deletion on the P5 coordinator unchanged.
+
 ---
 
 ## 4. Agent Graph Topology
@@ -195,11 +219,11 @@ Key tables (full definition at `backend/app/db/models.py`):
 
 | Table | Key columns | Notes |
 |-------|------------|-------|
-| `users` | `id, fingerprint, google_id?, email?` | Guest (fingerprint) or member (Google OAuth) |
+| `users` | `id, fingerprint, google_id?, email?` | Anonymous local identity; OAuth columns retained for deferred backend work |
 | `goals` | `id, user_id, title, exam_date?, status` | One active goal per user |
 | `topics` | `id, goal_id, name, source_chunks` | `source_chunks` = chunk_ids from last quiz grounding |
 | `plans` | `id, goal_id, milestones_json, updated_at` | `milestones_json` = compatibility cache |
-| `plan_milestones` | `id, plan_id, title, due_at?, done, sort_order, source` | Normalized milestone rows for stable progression |
+| `plan_milestones` | `id, plan_id, topic_id?, topic_name?, title, due_at?, done, sort_order, source` | Normalized milestone rows for stable progression; optional FK to topics |
 | `plan_events` | `id, plan_id, milestone_id?, actor, action, before_json, after_json` | Audit log |
 | `questions` | `id, topic_id, prompt, options_json, answer, explanation` | 4-option MCQ |
 | `mastery` | `(user_id, topic_id) PK, score, last_reviewed` | 0..1, updated by quiz + mistake redo |
@@ -229,6 +253,7 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | Method | Path | Auth | Response |
 |--------|------|------|----------|
 | GET | `/api/health` | none | `{status, ollama_enabled}` |
+| GET | `/api/auth/config` | none | `{google_client_id}` (frozen backend-only OAuth config) |
 | POST | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | POST | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | POST | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
@@ -247,10 +272,12 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | POST | `/api/mistakes/{id}/mark-understood` | JWT/guest | `{mastery_score, next_due_at}` |
 | GET | `/api/mastery` | JWT/guest | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
 | GET | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
+| GET | `/api/data/summary` | strict signed bearer | `{reset_enabled, has_learning_data, ...15 counts}` |
+| POST | `/api/data/reset` | strict signed bearer + local mode | `{scope, status:"completed", deleted:{...15 counts}}` |
 | GET | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
 | GET | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
 
-All AI-bearing routes read **BYOK headers** (see §8) per request. Auth is JWT Bearer (`get_current_user` dependency) with `"default-user"` fallback for backward compatibility.
+All AI-bearing routes read **BYOK headers** (see §8) per request. Existing application routes use JWT Bearer through `get_current_user`, which retains a legacy `"default-user"` fallback for backward compatibility. Data summary/reset deliberately use `require_signed_user` and never fall back.
 
 ---
 
@@ -274,27 +301,29 @@ Tool-call detection: `GET /api/models/tool-check` probes model with dummy `ping`
 
 ```
 views/
-├── Overview.vue       → useOverviewStore (setup-store composing 4 stores)
-├── Chat.vue           → useChatStore (SSE streaming + current session / agent run restore)
-├── PlanTimeline.vue   → usePlanStore (milestones + MilestoneList + PlanGantt)
-├── QuizAdaptive.vue   → useQuizStore (adaptive quiz + MCQCard + GradeResult)
-├── MistakeBank.vue    → useMistakesStore (SM-2 due + redo + mark-understood)
-├── Library.vue        → useDocumentsStore (upload + list)
-├── Settings.vue       → useSettingsStore (BYOK + debug mode + language)
+├── Overview.vue       → useOverview (setup-store composing 4 stores)
+├── Chat.vue           → useChat (SSE streaming + current session / agent run restore)
+├── PlanTimeline.vue   → usePlan (milestones + MilestoneList + PlanGantt)
+├── QuizAdaptive.vue   → useQuiz (adaptive quiz + MCQCard + GradeResult)
+├── MistakeBank.vue    → useMistakes (SM-2 due + redo + mark-understood)
+├── Library.vue        → useDocuments (upload + list)
+├── Settings.vue       → useSettings + useDataLifecycle (BYOK preferences + capability-aware Danger Zone)
 └── Onboarding.vue     → 3-step wizard (name → date → upload)
 
-stores/               # Pinia — 1 store per resource group + 1 derived
+stores/               # Pinia — resource, lifecycle, notification, activity, and derived state
 ├── settings.ts        # provider/model/api_key (localStorage-persisted)
+├── dataLifecycle.ts   # startup gate, two-scope reset, summary refresh, cross-tab lifecycle phase
+├── activity.ts        # epoch-guarded activity heatmap state
+├── notifications.ts   # app-level toast queue, including local learning-reset success
 ├── chat.ts            # current session, streaming buffer, trace[], assistant agentRun
 ├── plan.ts            # milestones, planId, fetch/patch
 ├── quiz.ts            # currentMCQ, lastGrade, generate/grade
 ├── mistakes.ts        # due list, redo state
 ├── mastery.ts         # scores, weak_topics
 ├── documents.ts       # uploaded documents
-├── overview.ts        # derived: composes mastery + plan + mistakes + documents
-└── goal.ts            # active goal (for onboarding guard)
+└── overview.ts        # derived: composes mastery + plan + mistakes + documents
 
-components/           # shared UI primitives + view-specific components
+components/           # shared UI plus root StartupDataGate / ResetConfirmDialog / ToastHost
 composables/          # useMediaQuery (mobile detection)
 locales/              # en.json, zh-CN.json (vue-i18n)
 ```
@@ -308,17 +337,23 @@ Responsive: `<768px` — sidebar replaced by MobileNav bottom tab bar, Chat/Quiz
 ```
 Primary (local demo):
   Docker Compose
-  ├── backend  :8000 (FastAPI + LangGraph + Chroma + SQLite)
-  ├── frontend :5173 (Vite dev server)
-  └── ollama   :11434 (gemma3:4b + qwen2.5:7b pre-pulled)
+  ├── backend  127.0.0.1:8000 (FastAPI + LangGraph + Chroma + SQLite)
+  │   ├── STUDY_COACH_LOCAL_MODE=1
+  │   ├── CHROMA_PATH=/app/data/chroma
+  │   └── OLLAMA_HOST=http://ollama:11434
+  ├── frontend 127.0.0.1:5173 (Vite dev server; proxy target http://backend:8000)
+  └── ollama   127.0.0.1:11434 (nomic-embed-text + gemma3:4b + qwen2.5:7b pre-pulled)
 
 Fallback (cloud demo link):
   fly.io (HKG region)
   └── single container (backend + frontend static files)
       ├── OLLAMA_ENABLED=false
+      ├── STUDY_COACH_LOCAL_MODE=0
       ├── SQLite on fly volume
       └── BYOK cloud-only (no local model)
 ```
+
+The clean no-cache Compose build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200. It did not verify Ollama embedding or generation. On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
 
 ---
 
@@ -326,7 +361,8 @@ Fallback (cloud demo link):
 
 | Concern | Implementation |
 |---------|---------------|
-| Auth | Google OAuth (member) / FingerprintJS (guest) → JWT Bearer |
+| Auth | Shipped frontend auto-provisions an anonymous signed JWT. Google OAuth/upgrade routes and columns remain frozen in backend code, with no frontend login runtime or delivered account continuity. |
+| Data lifecycle | Summary/reset require strict signed bearer auth; reset defaults off and supported local-mode configurations bind the backend to loopback. The shipped Compose configuration enforces that binding; no request-IP enforcement is promised. |
 | API key storage | `x-api-key` never logged or persisted server-side; frontend `localStorage` (demo scope) |
 | CORS | FastAPI `CORSMiddleware` — frontend origin only |
 | SQL injection | SQLAlchemy ORM (parameterized queries) |
@@ -364,5 +400,6 @@ Fallback (cloud demo link):
 
 - Performance budgets: define P95 targets, run load tests
 - Observability: OpenTelemetry tracing, token usage dashboard
-- Full ADR set: expand from 5 to 15+ (chunking strategy, reranker selection, Chroma vs pgvector, InMemorySaver → PostgresSaver, eval methodology)
+- Full ADR set: expand from 6 to 15+ (chunking strategy, reranker selection, Chroma vs pgvector, InMemorySaver → PostgresSaver, eval methodology)
+- Multi-user data ownership: replace the global P5 reset with user/document metadata, filtered retrieval, cross-store migration, and per-user deletion semantics
 - Rate limiting, API key rotation policy, refresh token flow

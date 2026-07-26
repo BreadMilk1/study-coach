@@ -1,20 +1,21 @@
 # Study Coach — ROADMAP
 
-> Phase history + priority backlog. Current state: P4.5 product closure verified; P5 local-first data lifecycle design approved.
+> Phase history + priority backlog. Current state: P4.5 product closure verified; P5 local-first data lifecycle automated work complete, destructive browser acceptance pending.
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
-## Current Snapshot (2026-07-20)
+## Current Snapshot (2026-07-27)
 
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
-- **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + Google OAuth (JWT).
+- **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + signed JWT local anonymous identity. Google OAuth remains frozen in backend code and is not surfaced by the frontend.
 - **Agent graph**: memory hydrator → router → Tutor / QuizMaster / Planner (det + agent_loop) → Judge Guard → memory writer.
 - **Frontend**: Vue 3 + Pinia + Tailwind 4 + vue-i18n (en/zh-CN). 8 views: Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings / Onboarding. Mobile responsive (Chat/Quiz/Plan).
-- **Eval evidence**: P2.0 retrieval eval, P2.2 Plan agent-loop ablation (396 runs), P2.3 Quiz agent-loop ablation (792 runs).
-- **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 5 ADRs + deployment topology + security model).
+- **Eval evidence**: P2.0 retrieval eval; primary agent-loop matrices P2.2 Plan (396 runs) + P2.3 Quiz (396 runs) = 792; P2.3 no-retriever pilot adds 396, for 1,188 raw runs total.
+- **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 6 ADRs + deployment topology + security model).
 - **Deploy**: Docker Compose (local Ollama) + fly.io fallback (BYOK cloud-only).
-- **Verification baseline**: 256 backend tests passing; frontend production build passing.
+- **Verification baseline**: 366 backend tests passing; 97 frontend tests across 8 Vitest files passing (463 total); frontend production build and `docker compose config` passing. Clean Compose runtime smoke passed for frontend HTML plus direct/proxied health, but Ollama embedding/model runtime was not exercised; destructive browser acceptance remains pending. The existing Vite >500 kB chunk warning remains accepted.
+- **Recent (2026-07-27)**: P5.1–P5.3 implementation and automated verification completed — strict instance summary/reset, recoverable two-scope deletion, loopback-only local enablement, startup gate, cross-tab invalidation, Settings Danger Zone, lifecycle notifications, and stale-request-safe client reset. P5 remains open until the destructive browser acceptance in `docs/DEMO.md` is executed.
+- **Next**: run the P5 10-step browser acceptance with screenshots and short text evidence; close P5.4 only if modal, cross-tab, learning reset, and factory reset checks pass.
 - **Recent (2026-07-20)**: P4.5 manual browser demo passed with user-owned PDFs — grounded Chat answer, agent-loop Quiz generation, deterministic grading, and refresh restore all verified. Follow-up hardening prevents answer/explanation disclosure during GENERATE and strips trailing retrieval metadata before explanation persistence.
-- **Next (2026-07-20)**: P5 Local-first Data Lifecycle design approved — hide incomplete Google OAuth UI, add instance-level data summary and recoverable two-scope reset, require a per-tab startup choice when learning data exists, and add Danger Zone plus notification feedback. Design: `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md`.
 - **Recent (2026-07-02)**: P4.5 automated Product Closure implemented — Chat quiz MCQs are persisted before display, failed quiz persistence degrades safely, `persist_quiz_question` tolerates narrow local-model formatting near-misses, route tests no longer depend on live Ollama, and `docs/DEMO.md` documents the reviewer path. The final manual public-review gate was completed on 2026-07-20.
 - **Recent (2026-06-15)**: Recoverable Agent Run Trace shipped — Planner / QuizMaster `agent_loop` nodes emit SSE `agent_run` events, `/api/chat` persists them in `messages.tool_calls_json` assistant artifact envelopes, `GET /api/chat/sessions/{id}/messages` restores them after refresh, and Debug Mode TracePanel displays node/mode/exit reason, tool counts, token counts, latency, and redacted tool-call previews.
 - **Recent (2026-06-10)**: Chat persistence slice shipped — `/api/chat` now creates/reuses `ChatSession`, persists user/assistant `Message` rows plus assistant `Citation` rows, emits SSE `session` events, restores current Chat session after frontend refresh, refuses retrieval when the current user has no Library documents, and `GET /api/users/me/stats.total_sessions` reflects real session count.
@@ -277,7 +278,7 @@ Shipped:
 
 ## P4 — Done (deploy, demo readiness, ARCHITECTURE.md v2)
 
-**Shipped 2026-05-27. Current baseline: 252 backend tests, frontend build passing.**
+**Shipped 2026-05-27. Then-current baseline: 252 backend tests, frontend build passing.**
 
 ### P4a — Deploy & Auth Hardening
 - [x] Google OAuth + JWT auth (`app/auth.py`, `app/api/auth_routes.py`)
@@ -304,7 +305,7 @@ Shipped:
 ### P4c — Mobile & Docs
 - [x] Mobile responsive layout (MobileNav bottom tab bar, Chat/Quiz/Plan <768px)
 - [x] `useMediaQuery` composable
-- [x] ARCHITECTURE.md v2: Mermaid ER diagram, 5 ADRs, deployment topology, security model, A-tier expansion placeholders
+- [x] ARCHITECTURE.md v2: Mermaid ER diagram, 5 ADRs at P4 delivery, deployment topology, security model, A-tier expansion placeholders
 
 ### P4d — Chat Persistence & Activity Evidence
 - [x] `/api/chat` creates or reuses a persisted `ChatSession` and emits `{type:"session", session_id}` before graph events
@@ -338,17 +339,18 @@ Shipped:
 - Full Chroma corpus isolation: add `user_id` / `document_id` metadata to chunks and pass filters through dense, BM25, reranking, deterministic nodes, and agent-tool retrieval. Current P4d guard only refuses retrieval when the current user has no Library document rows.
 - shadcn-vue migration
 
-## P5 — Planned (Local-first Data Lifecycle)
+## P5 — In Progress (Automated Complete; Manual Pending)
 
-Design approved 2026-07-20. P5 deliberately treats Study Coach as a local-first, single-user portfolio product; multi-user auth and Chroma ownership move to a later isolated worktree.
+Design approved 2026-07-20; implementation and automated verification completed 2026-07-27. P5 deliberately treats Study Coach as a local-first, single-user portfolio product; multi-user auth and Chroma ownership move to a later isolated worktree. The phase is not closed because destructive browser acceptance has not yet run.
 
 - [x] Product direction, data scopes, failure semantics, startup gate, Danger Zone, and notification design approved.
 - [x] Design spec: `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md`.
 - [x] P5.0: remove incomplete Google OAuth UI/GIS runtime and align local-first README/product copy.
-- [ ] P5.1: backend summary and idempotent two-scope reset across Chroma, graph state, retriever caches, SQLite, local-mode/loopback deployment guard, Docker Chroma path fix, and unique temporary-upload cleanup.
-- [ ] P5.2: Vitest foundation and capability-aware, required once-per-tab startup gate (Continue plus Start fresh when local reset is enabled).
-- [ ] P5.3: Settings Danger Zone, confirmation flows, global notifications, and accessibility.
-- [ ] P5.4: full automated verification, manual demo, and final architecture/product docs sync.
+- [x] P5.1: backend summary and idempotent two-scope reset across Chroma, graph state, retriever caches, SQLite, local-mode/loopback deployment guard, Docker Chroma path fix, and unique temporary-upload cleanup.
+- [x] P5.2: Vitest foundation and capability-aware, required once-per-tab startup gate (Continue plus Start fresh when local reset is enabled).
+- [x] P5.3: Settings Danger Zone, confirmation flows, global notifications, accessibility, cross-tab lifecycle handling, and stale-request-safe client refresh.
+- [x] P5.4 automated verification and architecture/product documentation sync: focused backend lifecycle suites 2 + 12 + 31 + 32 + 24 and deployment config 12 passed; full backend 366/366; frontend 97/97 across 8 files; production build and Compose render passed. Compose now routes backend embeddings through `http://ollama:11434`, binds Ollama to loopback, and pre-pulls `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`. Clean image build reduced backend/frontend contexts to 47.96 kB / 4.77 kB, and runtime HTML/direct-health/proxied-health smoke returned HTTP 200; Ollama model runtime remains unverified and the existing Vite chunk warning is accepted.
+- [ ] P5.4 destructive browser acceptance: execute the exact 10-step path in `docs/DEMO.md`, including modal focus/Esc/backdrop/keyboard/inert behavior and cross-tab learning/factory behavior, then attach screenshots and short text evidence.
 
 **Deferred after P5:** a separate `feature/multi-user-auth` worktree for guest upgrade, Google OAuth, SQL/Chroma ownership, legacy migration, and data-continuity tests.
 
