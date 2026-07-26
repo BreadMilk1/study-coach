@@ -6,6 +6,7 @@ import {
 } from 'lucide-vue-next'
 import { useMediaQuery } from './composables/useMediaQuery'
 import MobileNav from './components/MobileNav.vue'
+import ToastHost from './components/ToastHost.vue'
 
 const isMobile = useMediaQuery('(max-width: 767px)')
 
@@ -60,5 +61,6 @@ const navSections = [
       <RouterView />
     </main>
     <MobileNav v-if="isMobile" />
+    <ToastHost />
   </div>
 </template>
