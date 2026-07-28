@@ -27,6 +27,7 @@ export interface LifecycleDependencies {
   markChoice: () => void
   clearChoice: () => void
   clearFactory: () => void
+  clearFactorySession: () => void
   broadcast: (scope: ResetScope) => void
   reload: () => void
   pause: (milliseconds: number) => Promise<void>
@@ -173,11 +174,21 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         const result = await dependencies().reset('factory')
         if (generation !== this.operationGeneration) return
         this.lastResult = result
-        dependencies().broadcast('factory')
+        let browserFailure: Error | null = null
+        try {
+          dependencies().clearFactory()
+        } catch (error) {
+          browserFailure = error instanceof Error ? error : new Error('Factory browser state clearing failed.')
+        }
+        try {
+          dependencies().broadcast('factory')
+        } catch (error) {
+          browserFailure ??= error instanceof Error ? error : new Error('Factory reset broadcast failed.')
+        }
+        if (browserFailure !== null) throw browserFailure
         this.phase = 'factory_restarting'
         await dependencies().pause(750)
         if (generation !== this.operationGeneration) return
-        dependencies().clearFactory()
         dependencies().reload()
       } catch (error) {
         if (generation !== this.operationGeneration) return
@@ -204,7 +215,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         this.externalClientPending = false
         let failure: Error | null = null
         try {
-          dependencies().clearFactory()
+          dependencies().clearFactorySession()
         } catch (error) {
           failure = error instanceof Error ? error : new Error('Factory browser state clearing failed.')
         }

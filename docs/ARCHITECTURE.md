@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM (local Ollama + cloud BYOK). Current automated baseline — 366 backend tests and 97 frontend tests (463 total); production build passing.
+> Dual-track LLM (local Ollama + cloud BYOK). Current automated baseline — 370 backend tests and 102 frontend tests (472 total); production build passing.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (2026-07-27):** 366 backend tests and 97 frontend tests passing (463 total); frontend production build passing. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
+**Current baseline (2026-07-28):** 370 backend tests and 102 frontend tests passing (472 total); frontend production build passing. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
 
 ---
 
@@ -126,6 +126,7 @@ erDiagram
 - fly.io fallback uses SQLite on fly volume (sufficient for single-user portfolio traffic)
 - Repository pattern isolates DB dialect: all queries use SQLAlchemy ORM, no raw SQL
 - Alembic migrations use `batch_alter_table` for SQLite compatibility
+- Alembic logging configuration preserves existing application loggers, so startup migrations do not disable Uvicorn access logs or exception tracebacks
 - Trade-off: no concurrent writes, no connection pooling in production. Acceptable for portfolio demo; migration to Postgres is a env-var change when needed
 
 ### ADR 5: BYOK Header Pattern (Not Server-Wide Env)
@@ -140,6 +141,8 @@ erDiagram
 - Every request re-initializes the model object — acceptable for demo scale (~100ms overhead)
 - `x-planner-mode` / `x-quiz-mode` extend the pattern for mode dispatch (ADR 3)
 - Frontend `llmHeaders()` helper constructs headers from the settings store
+- Settings hydration normalizes partial or invalid persisted objects against a complete default state. Anonymous token provisioning may create a token-only record before the Settings store exists; that record must still hydrate to a valid Ollama provider/model instead of sending `x-provider: undefined`.
+- Local Ollama chat and embedding clients set `trust_env=False`, preventing process proxy settings from intercepting loopback/self-hosted Ollama traffic. Cloud-provider client configuration is unchanged.
 
 ### ADR 6: Single-User Local-First Instance Data Lifecycle
 
@@ -158,7 +161,7 @@ erDiagram
 Two scopes share that backend ordering:
 
 - `learning`: deletes all learning records, source chunks, vectors, retriever caches, and checkpoint state while preserving the local user row and browser model/provider/API/language/interface settings.
-- `factory`: deletes the learning scope plus backend user rows; after backend success, the frontend clears owned browser identity/settings keys and reloads into a new anonymous first-run state.
+- `factory`: deletes the learning scope plus backend user rows; after backend success, the initiating tab clears shared browser identity/settings keys before broadcasting completion. Receiving tabs clear only their own session state and reload, so a delayed tab cannot delete the new shared identity. On the successful path, all tabs then reload into one anonymous first-run state. If initiating browser cleanup fails after backend completion, broadcast is still attempted and the initiating tab remains in the retryable error state rather than claiming completion.
 
 Summary and reset responses expose the same 15 count fields: `users`, `documents`, `source_chunks`, `vectors`, `chat_sessions`, `messages`, `citations`, `goals`, `topics`, `plans`, `plan_milestones`, `plan_events`, `questions`, `mastery`, and `mistakes`. `source_chunks` is the sum of SQL `documents.chunks_count`; `vectors` is the live Chroma count, so interrupted operations and legacy/orphaned embeddings can make them differ. `has_learning_data` ignores a user row by itself but is true for any other learning row or vector.
 

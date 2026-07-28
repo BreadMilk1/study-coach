@@ -5,6 +5,7 @@ import {
   CHAT_SESSION_KEY,
   STARTUP_CHOICE_KEY,
   clearFactoryBrowserState,
+  clearFactorySessionState,
   clearLearningBrowserState,
   clearStartupChoice,
   markStartupChoice,
@@ -87,6 +88,26 @@ describe('browser state clearing', () => {
     expect(local.length).toBe(1)
     expect(local.getItem('unrelated')).toBe('local-value')
     expect(session.length).toBe(1)
+    expect(session.getItem('unrelated')).toBe('session-value')
+  })
+
+  it('external factory clear removes only this tab session state', () => {
+    const local = memoryStorage({
+      'study-coach:settings': '{"accessToken":"new-token"}',
+      'study-coach:fingerprint': 'new-fingerprint',
+    })
+    const session = memoryStorage({
+      [STARTUP_CHOICE_KEY]: 'continue',
+      'study-coach:tab-state': 'value',
+      unrelated: 'session-value',
+    })
+
+    clearFactorySessionState(session)
+
+    expect(local.getItem('study-coach:settings')).toContain('new-token')
+    expect(local.getItem('study-coach:fingerprint')).toBe('new-fingerprint')
+    expect(session.getItem(STARTUP_CHOICE_KEY)).toBeNull()
+    expect(session.getItem('study-coach:tab-state')).toBeNull()
     expect(session.getItem('unrelated')).toBe('session-value')
   })
 })

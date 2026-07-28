@@ -14,7 +14,10 @@ class OllamaEmbedder:
     def _ensure_client(self):
         if self._client is None:
             import ollama
-            self._client = ollama.Client(host=self.base_url) if self.base_url else ollama.Client()
+            client_kwargs: dict[str, object] = {"trust_env": False}
+            if self.base_url:
+                client_kwargs["host"] = self.base_url
+            self._client = ollama.Client(**client_kwargs)
         return self._client
 
     def embed(self, texts: list[str]) -> list[list[float]]:

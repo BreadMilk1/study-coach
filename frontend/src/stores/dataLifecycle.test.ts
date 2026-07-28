@@ -35,6 +35,7 @@ function dependencies(overrides: Partial<LifecycleDependencies> = {}): Lifecycle
     markChoice: () => undefined,
     clearChoice: () => undefined,
     clearFactory: () => undefined,
+    clearFactorySession: () => undefined,
     broadcast: () => undefined,
     reload: () => undefined,
     pause: async () => undefined,
@@ -453,7 +454,7 @@ describe('learning reset', () => {
 })
 
 describe('factory reset', () => {
-  it('broadcasts completion, presents restart state, then clears browser data and reloads', async () => {
+  it('clears shared browser data before broadcasting completion, then reloads', async () => {
     const calls: string[] = []
     const store = useDataLifecycle()
     store.initialize(dependencies({
@@ -477,10 +478,10 @@ describe('factory reset', () => {
 
     expect(calls).toEqual([
       'reset:factory',
+      'clear-factory',
       'broadcast:factory',
       'pause:750:factory_restarting',
       'after-cancel:factory_restarting',
-      'clear-factory',
       'reload',
     ])
     expect(store.lastResult?.scope).toBe('factory')
@@ -517,11 +518,58 @@ describe('factory reset', () => {
     expect(calls).toEqual([
       'reset:factory',
       'reset:factory',
+      'clear-factory',
       'broadcast:factory',
       'pause',
-      'clear-factory',
       'reload',
     ])
+  })
+
+  it('still announces backend completion when initiating browser clear fails, then retries', async () => {
+    const calls: string[] = []
+    let clearAttempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      clearFactory: () => {
+        clearAttempts += 1
+        calls.push(`clear-factory:${clearAttempts}`)
+        if (clearAttempts === 1) throw new Error('storage blocked')
+      },
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      pause: async () => { calls.push('pause') },
+      reload: () => calls.push('reload'),
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(calls).toEqual([
+      'reset:factory',
+      'clear-factory:1',
+      'broadcast:factory',
+    ])
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('factory')
+    expect(store.error?.message).toBe('storage blocked')
+
+    await store.retryReset()
+
+    expect(calls).toEqual([
+      'reset:factory',
+      'clear-factory:1',
+      'broadcast:factory',
+      'reset:factory',
+      'clear-factory:2',
+      'broadcast:factory',
+      'pause',
+      'reload',
+    ])
+    expect(store.phase).toBe('factory_restarting')
   })
 
   it('does not let a stale local factory reset continue after an external reset takes over', async () => {
@@ -585,17 +633,18 @@ describe('external reset', () => {
     expect(store.phase).toBe('ready')
   })
 
-  it('clears every app browser key and reloads immediately after external factory reset', async () => {
+  it('clears only this tab session state and reloads after external factory reset', async () => {
     const calls: string[] = []
     const store = useDataLifecycle()
     store.initialize(dependencies({
       clearFactory: () => calls.push('clear-factory'),
+      clearFactorySession: () => calls.push('clear-factory-session'),
       reload: () => calls.push('reload'),
     }))
 
     await store.handleExternalReset('factory')
 
-    expect(calls).toEqual(['clear-factory', 'reload'])
+    expect(calls).toEqual(['clear-factory-session', 'reload'])
     expect(store.phase).toBe('factory_restarting')
   })
 
@@ -603,14 +652,14 @@ describe('external reset', () => {
     const calls: string[] = []
     const store = useDataLifecycle()
     store.initialize(dependencies({
-      clearFactory: () => { calls.push('clear-factory'); throw new Error('storage blocked') },
+      clearFactorySession: () => { calls.push('clear-factory-session'); throw new Error('storage blocked') },
       reload: () => calls.push('reload'),
     }))
     store.phase = 'ready'
 
     await store.handleExternalReset('factory')
 
-    expect(calls).toEqual(['clear-factory', 'reload'])
+    expect(calls).toEqual(['clear-factory-session', 'reload'])
     expect(store.phase).toBe('factory_restarting')
     expect(store.error?.message).toBe('storage blocked')
   })
@@ -682,6 +731,7 @@ describe('external reset', () => {
       },
       markChoice: () => calls.push('choice'),
       clearFactory: () => calls.push('clear-factory'),
+      clearFactorySession: () => calls.push('clear-factory-session'),
       reload: () => calls.push('reload'),
     }))
     await store.handleExternalReset('learning')
@@ -691,7 +741,7 @@ describe('external reset', () => {
     finishRetry()
     await acknowledgement
 
-    expect(calls).toEqual(['client:1', 'client:2', 'clear-factory', 'reload'])
+    expect(calls).toEqual(['client:1', 'client:2', 'clear-factory-session', 'reload'])
     expect(store.phase).toBe('factory_restarting')
   })
 

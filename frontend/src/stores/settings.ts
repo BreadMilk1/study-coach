@@ -20,6 +20,21 @@ interface SettingsState {
 
 const STORAGE_KEY = 'study-coach:settings'
 
+const DEFAULT_SETTINGS: SettingsState = {
+  provider: 'ollama',
+  model: 'gemma3:4b',
+  apiKey: '',
+  baseUrl: '',
+  judgeModel: '',
+  defaultPlannerMode: 'agent_loop',
+  defaultQuizMode: 'agent_loop',
+  toolCapable: null,
+  debugMode: false,
+  language: 'en',
+  accessToken: '',
+  tier: 'guest',
+}
+
 let _tokenPromise: Promise<string> | null = null
 
 export async function getAccessToken(): Promise<string> {
@@ -87,19 +102,47 @@ function persistToolCapable(model: string, capable: boolean) {
   localStorage.setItem(`${TOOL_CAPABLE_KEY}:${model}`, String(capable))
 }
 
+function normalizeSettings(value: unknown): SettingsState {
+  const saved = typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : {}
+  const provider = saved.provider
+  const model = saved.model
+  const plannerMode = saved.defaultPlannerMode
+  const quizMode = saved.defaultQuizMode
+
+  return {
+    provider: provider === 'ollama'
+      || provider === 'openai'
+      || provider === 'anthropic'
+      || provider === 'gemini'
+      ? provider
+      : DEFAULT_SETTINGS.provider,
+    model: typeof model === 'string' && model.trim() ? model : DEFAULT_SETTINGS.model,
+    apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : DEFAULT_SETTINGS.apiKey,
+    baseUrl: typeof saved.baseUrl === 'string' ? saved.baseUrl : DEFAULT_SETTINGS.baseUrl,
+    judgeModel: typeof saved.judgeModel === 'string' ? saved.judgeModel : DEFAULT_SETTINGS.judgeModel,
+    defaultPlannerMode: plannerMode === 'agent_loop' || plannerMode === 'deterministic'
+      ? plannerMode
+      : DEFAULT_SETTINGS.defaultPlannerMode,
+    defaultQuizMode: quizMode === 'agent_loop' || quizMode === 'deterministic'
+      ? quizMode
+      : DEFAULT_SETTINGS.defaultQuizMode,
+    toolCapable: null,
+    debugMode: typeof saved.debugMode === 'boolean' ? saved.debugMode : DEFAULT_SETTINGS.debugMode,
+    language: saved.language === 'en' || saved.language === 'zh-CN'
+      ? saved.language
+      : DEFAULT_SETTINGS.language,
+    accessToken: typeof saved.accessToken === 'string' ? saved.accessToken : DEFAULT_SETTINGS.accessToken,
+    tier: saved.tier === 'guest' || saved.tier === 'member' ? saved.tier : DEFAULT_SETTINGS.tier,
+  }
+}
+
 function loadInitial(): SettingsState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw)
-      const base = {
-        defaultPlannerMode: 'agent_loop' as Mode,
-        defaultQuizMode: 'agent_loop' as Mode,
-        toolCapable: null as boolean | null,
-        debugMode: parsed.debugMode ?? false,
-        language: parsed.language ?? 'en',
-        ...parsed,
-      }
+      const base = normalizeSettings(JSON.parse(raw))
       // Restore per-model tool-capable cache (not stored in settings JSON)
       base.toolCapable = loadToolCapable(base.model)
       return base
@@ -107,20 +150,7 @@ function loadInitial(): SettingsState {
   } catch {
     /* empty */
   }
-  return {
-    provider: 'ollama',
-    model: 'gemma3:4b',
-    apiKey: '',
-    baseUrl: '',
-    judgeModel: '',
-    defaultPlannerMode: 'agent_loop' as Mode,
-    defaultQuizMode: 'agent_loop' as Mode,
-    toolCapable: null,
-    debugMode: false,
-    language: 'en',
-    accessToken: '',
-    tier: 'guest' as const,
-  }
+  return { ...DEFAULT_SETTINGS }
 }
 
 export const useSettings = defineStore('settings', {

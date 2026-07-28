@@ -4,6 +4,7 @@ Verifies that `alembic upgrade head` against an empty SQLite DB produces the
 P1 baseline schema (users + documents tables + alembic_version bookkeeping).
 """
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -223,3 +224,16 @@ def test_migrate_to_head_is_idempotent(tmp_path, monkeypatch):
 
     engine = create_engine(f"sqlite:///{db_path}")
     assert "goals" in set(inspect(engine).get_table_names())
+
+
+def test_migrate_to_head_keeps_existing_application_loggers_enabled(tmp_path, monkeypatch):
+    db_path = tmp_path / "logging.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    application_logger = logging.getLogger("uvicorn.error")
+    application_logger.disabled = False
+
+    from app.db.session import migrate_to_head
+
+    migrate_to_head()
+
+    assert application_logger.disabled is False

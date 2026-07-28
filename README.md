@@ -148,10 +148,10 @@ docker compose up
 
 ```bash
 cd backend
-uv run pytest -q        # 366 tests, no live Ollama required
+uv run pytest -q        # 370 tests, no live Ollama required
 
 cd ../frontend
-pnpm test --run         # 97 tests across 8 Vitest files
+pnpm test --run         # 102 tests across 9 Vitest files
 pnpm build              # typecheck + production build
 ```
 

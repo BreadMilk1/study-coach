@@ -43,11 +43,18 @@ export function clearStartupChoice(session: Storage): void {
   session.removeItem(STARTUP_CHOICE_KEY)
 }
 
-export function clearFactoryBrowserState(local: Storage, session: Storage): void {
-  for (const storage of [local, session]) {
-    const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
-    for (const key of keys) {
-      if (key?.startsWith(APP_PREFIX)) storage.removeItem(key)
-    }
+function clearAppState(storage: Storage): void {
+  const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
+  for (const key of keys) {
+    if (key?.startsWith(APP_PREFIX)) storage.removeItem(key)
   }
+}
+
+export function clearFactorySessionState(session: Storage): void {
+  clearAppState(session)
+}
+
+export function clearFactoryBrowserState(local: Storage, session: Storage): void {
+  clearAppState(local)
+  clearFactorySessionState(session)
 }

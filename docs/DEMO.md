@@ -1,6 +1,6 @@
 # Study Coach Demo Guide
 
-> P4.5 reviewer path verified. P5 automated gates are complete; the P5 destructive browser acceptance remains pending.
+> P4.5 reviewer path verified. P5 local-first data lifecycle automated and browser acceptance are complete.
 > Use a PDF you own. Do not copy private course PDFs into this repository.
 
 ---
@@ -20,7 +20,7 @@ P4.5 made this path stable before larger harness, durable memory, or multi-agent
 
 ## Verified Commands
 
-Verified on 2026-07-27:
+Verified on 2026-07-28:
 
 ```bash
 cd backend
@@ -44,12 +44,12 @@ Result:
 
 - Focused backend lifecycle suites: 2 + 12 + 31 + 32 + 24 tests passed.
 - Focused deployment configuration suite: 12 tests passed, including build-context/order safeguards, frontend container listening, all three loopback bindings, the environment-aware Vite proxy, backend `OLLAMA_HOST=http://ollama:11434`, and all three model pre-pulls.
-- Full backend: 366 tests passed.
-- Frontend: 97 Vitest tests across 8 files passed; production build passed. Total automated tests: 463.
+- Full backend: 370 tests passed.
+- Frontend: 102 Vitest tests across 9 files passed; production build passed. Total automated tests: 472.
 - Compose render passed with backend/frontend/Ollama host bindings `127.0.0.1:8000`, `127.0.0.1:5173`, and `127.0.0.1:11434`; backend `STUDY_COACH_LOCAL_MODE=1`, `CHROMA_PATH=/app/data/chroma`, and `OLLAMA_HOST=http://ollama:11434`; frontend proxy target `http://backend:8000`; and pre-pulls for `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`.
 - A clean no-cache build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke passed for frontend `/`, direct backend `/api/health`, and frontend-proxied `/api/health` with HTTP 200.
 - The first backend cold start downloads about 1.1 GB of FastEmbed model data and may temporarily return `502` through the frontend proxy; wait until `/api/health` becomes ready before continuing.
-- Ollama embedding/model runtime was not smoke-tested on the uncached host; pulling the roughly 2.6 GB Ollama image was stopped without leaving containers or volumes. The successful HTTP smoke above does not prove model inference.
+- Host-run Ollama verification passed with `gemma4:e4b` and `nomic-embed-text`: Settings connection returned Connected, embedding produced vectors, and the user-owned Topic 1 PDF indexed 49 chunks before and after a learning reset. This is host-run evidence, not a Compose model-runtime claim.
 - Fly keeps `STUDY_COACH_LOCAL_MODE=0`.
 - Static Google frontend runtime/UI search returned no matches; environment/config searches matched the intended local-mode and Chroma settings.
 - The existing Vite warning for chunks larger than 500 kB is accepted for this stage.
@@ -95,7 +95,10 @@ Terminal 1:
 
 ```bash
 cd study-coach/backend
-STUDY_COACH_LOCAL_MODE=1 CHROMA_PATH=./chroma_data uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+STUDY_COACH_LOCAL_MODE=1 \
+OLLAMA_HOST=http://127.0.0.1:11434 \
+CHROMA_PATH=./chroma_data \
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Terminal 2:
@@ -272,20 +275,20 @@ Before treating this as the public reviewer demo path, verify:
 
 ---
 
-## P5 Local Data Lifecycle Acceptance — Pending
+## P5 Local Data Lifecycle Acceptance — Complete
 
-**Status (2026-07-27): not yet executed.** Automated verification above is complete, but the destructive browser acceptance below must remain unchecked until it is run with screenshots and short text evidence.
+**Status (2026-07-28): passed end to end.** Learning reset, post-reset re-upload, Factory reset, cross-tab reload, Settings removal, and the single new anonymous first-run identity were verified in Chrome.
 
-1. [ ] Start Ollama, backend, and frontend through the supported local configuration.
-2. [ ] Import two user-owned PDFs and create Chat, Quiz, Plan, mistake, and mastery state.
-3. [ ] Open a new tab; verify startup blocks every other interaction.
-4. [ ] Choose Continue; verify all existing data remains.
-5. [ ] Refresh that tab; verify the gate does not reopen in the same tab session.
-6. [ ] Open another new tab; choose Start fresh and confirm learning reset.
-7. [ ] Verify Library, Chat, Quiz, Plan, milestones/events, mistakes, mastery, Chroma vectors, retriever cache, and checkpoint state are empty.
-8. [ ] Verify provider, model, Base URL, API key, language, and debug settings remain.
-9. [ ] Re-import a user-owned PDF, run Factory reset, observe the restart state, and verify a new anonymous first-run state.
-10. [ ] If a naturally reproducible transient failure occurs, retry the same reset and verify completion; do not add a production failure-injection control.
+1. [x] Start Ollama, backend, and frontend through the supported local configuration.
+2. [x] Import two user-owned PDFs and create Chat, Quiz, Plan, mistake, and mastery state.
+3. [x] Open a new tab; verify startup blocks every other interaction.
+4. [x] Choose Continue; verify all existing data remains.
+5. [x] Refresh that tab; verify the gate does not reopen in the same tab session.
+6. [x] Open another new tab; choose Start fresh and confirm learning reset.
+7. [x] Verify Library, Chat, Quiz, Plan, milestones/events, mistakes, mastery, Chroma vectors, retriever cache, and checkpoint state are empty.
+8. [x] Verify provider, model, Base URL, API key, language, and debug settings remain.
+9. [x] Re-import passed with `Topic 1 - Introduction to Prompt Engineering.pdf` (49 chunks). Factory reset then restored default Settings, emptied Library and all learning counts, reloaded the second tab, and converged on one new anonymous user rather than creating one user per tab.
+10. [x] No natural transient failure occurred. Injected failure and idempotent retry behavior remain covered by automated tests; no production failure-injection control was added.
 
 During steps 3–9, explicitly check native-modal behavior: initial focus, keyboard reachability, Esc and backdrop blocking where required, and an inert background. With two tabs open, verify a learning reset requires acknowledgement in the other tab and a factory reset reloads the other tab.
 

@@ -10,6 +10,7 @@ import { getDataSummary, resetData } from './lib/api'
 import { createDataLifecycleChannel } from './lib/dataLifecycleChannel'
 import {
   clearFactoryBrowserState,
+  clearFactorySessionState,
   clearStartupChoice,
   clearStoredChatSessionId,
   markStartupChoice,
@@ -63,6 +64,7 @@ lifecycle.initialize({
   markChoice: () => markStartupChoice(sessionStorage),
   clearChoice: () => clearStartupChoice(sessionStorage),
   clearFactory: () => clearFactoryBrowserState(localStorage, sessionStorage),
+  clearFactorySession: () => clearFactorySessionState(sessionStorage),
   broadcast: scope => lifecycleChannel.publish(scope),
   reload: () => window.location.reload(),
   pause: milliseconds => new Promise(resolve => globalThis.setTimeout(resolve, milliseconds)),
