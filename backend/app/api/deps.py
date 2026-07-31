@@ -4,7 +4,6 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.auth import decode_token
-from app.data_lifecycle import ResetInProgress, ResetRecoveryRequired
 from app.db.repositories import (
     GoalRepository,
     MasteryRepository,
@@ -83,31 +82,6 @@ def get_checkpointer(request: Request):
 
 def get_lifecycle_gate(request: Request):
     return request.app.state.data_lifecycle_gate
-
-
-def data_operation_lease(
-    gate: Annotated[object, Depends(get_lifecycle_gate)],
-):
-    try:
-        with gate.shared_operation():
-            yield
-    except ResetRecoveryRequired as exc:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "reset_recovery_required",
-                "required_scope": exc.required_scope,
-                "message": "A previous data reset is incomplete. Retry that reset.",
-            },
-        ) from None
-    except ResetInProgress:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "reset_in_progress",
-                "message": "Data reset is in progress.",
-            },
-        ) from None
 
 
 def get_retriever_runtime(request: Request):

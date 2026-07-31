@@ -19,6 +19,7 @@ interface SettingsState {
 }
 
 const STORAGE_KEY = 'study-coach:settings'
+const FINGERPRINT_KEY = 'study-coach:fingerprint'
 
 const DEFAULT_SETTINGS: SettingsState = {
   provider: 'ollama',
@@ -36,36 +37,88 @@ const DEFAULT_SETTINGS: SettingsState = {
 }
 
 let _tokenPromise: Promise<string> | null = null
+let _identityGeneration = 0
+
+function readStoredObject(raw: string | null): unknown {
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
+}
+
+export function invalidateAnonymousProvisioning(): void {
+  _identityGeneration += 1
+  _tokenPromise = null
+}
+
+async function requestAnonymousToken(fingerprint: string): Promise<{ access_token: string; tier: string }> {
+  const resp = await fetch('/api/auth/anonymous', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fingerprint }),
+  })
+  if (!resp.ok) throw new Error('anonymous auth failed')
+  const body = await resp.json() as { access_token?: unknown; tier?: unknown }
+  if (typeof body.access_token !== 'string' || !body.access_token.trim()) {
+    throw new Error('anonymous auth failed')
+  }
+  return {
+    access_token: body.access_token,
+    tier: typeof body.tier === 'string' ? body.tier : 'guest',
+  }
+}
+
+function persistIdentity(
+  generation: number,
+  capturedFingerprint: string,
+  updater: (current: SettingsState) => SettingsState,
+): string {
+  if (generation !== _identityGeneration) {
+    throw new Error('identity provisioning invalidated')
+  }
+  // Shared fingerprint/epoch must still match the request-time capture so a
+  // stale tab cannot resurrect a deleted identity after another tab factory-reset.
+  if (localStorage.getItem(FINGERPRINT_KEY) !== capturedFingerprint) {
+    throw new Error('identity provisioning invalidated')
+  }
+  const next = updater(normalizeSettings(readStoredObject(localStorage.getItem(STORAGE_KEY))))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  return next.accessToken
+}
 
 export async function getAccessToken(): Promise<string> {
-  const raw = localStorage.getItem(STORAGE_KEY)
+  let raw: string | null = null
+  try {
+    raw = localStorage.getItem(STORAGE_KEY)
+  } catch {
+    raw = null
+  }
   if (raw) {
     try {
-      const parsed = JSON.parse(raw)
+      const parsed = normalizeSettings(JSON.parse(raw))
       if (parsed.accessToken) return parsed.accessToken
     } catch { /* ignore */ }
   }
   // No token yet — provision anonymous
   if (!_tokenPromise) {
+    const generation = _identityGeneration
     const provisioning = (async () => {
       const fp = crypto.randomUUID()
-      const stored = localStorage.getItem('study-coach:fingerprint')
+      const stored = localStorage.getItem(FINGERPRINT_KEY)
       const fingerprint = stored || fp
-      if (!stored) localStorage.setItem('study-coach:fingerprint', fingerprint)
-      const resp = await fetch('/api/auth/anonymous', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fingerprint }),
-      })
-      if (!resp.ok) throw new Error('anonymous auth failed')
-      const { access_token, tier } = await resp.json()
-      // Persist token into settings
-      const existingRaw = localStorage.getItem(STORAGE_KEY)
-      const existing = existingRaw ? JSON.parse(existingRaw) : {}
-      existing.accessToken = access_token
-      existing.tier = tier || 'guest'
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(existing))
-      return access_token as string
+      if (generation !== _identityGeneration) {
+        throw new Error('identity provisioning invalidated')
+      }
+      if (!stored) localStorage.setItem(FINGERPRINT_KEY, fingerprint)
+      const capturedFingerprint = fingerprint
+      const { access_token, tier } = await requestAnonymousToken(fingerprint)
+      return persistIdentity(generation, capturedFingerprint, current => ({
+        ...current,
+        accessToken: access_token,
+        tier: tier === 'member' ? 'member' : 'guest',
+      }))
     })()
     _tokenPromise = provisioning
     void provisioning.catch(() => {
@@ -75,6 +128,21 @@ export async function getAccessToken(): Promise<string> {
   return _tokenPromise
 }
 
+/** Establish a fresh local identity after factory browser clear. */
+export async function provisionFactoryIdentity(): Promise<string> {
+  invalidateAnonymousProvisioning()
+  const generation = _identityGeneration
+  const fingerprint = crypto.randomUUID()
+  localStorage.setItem(FINGERPRINT_KEY, fingerprint)
+  const capturedFingerprint = fingerprint
+  const { access_token, tier } = await requestAnonymousToken(fingerprint)
+  return persistIdentity(generation, capturedFingerprint, () => ({
+    ...DEFAULT_SETTINGS,
+    accessToken: access_token,
+    tier: tier === 'member' ? 'member' : 'guest',
+  }))
+}
+
 export function authHeaders(): Record<string, string> {
   // Synchronous fallback: return bearer header if we have it in storage.
   // For first-ever call, the fetch will still work because backend
@@ -82,7 +150,7 @@ export function authHeaders(): Record<string, string> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw)
+      const parsed = normalizeSettings(JSON.parse(raw))
       if (parsed.accessToken) {
         return { Authorization: `Bearer ${parsed.accessToken}` }
       }
@@ -107,7 +175,7 @@ function persistToolCapable(model: string, capable: boolean) {
 }
 
 function normalizeSettings(value: unknown): SettingsState {
-  const saved = typeof value === 'object' && value !== null
+  const saved = typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {}
   const provider = saved.provider

@@ -13,8 +13,6 @@ from app.auth import (
 from app.db.repositories import UserRepository
 from app.db.session import get_session
 
-from .deps import data_operation_lease
-
 auth_router = APIRouter(prefix="/api/auth")
 
 
@@ -37,11 +35,8 @@ class AuthOut(BaseModel):
     tier: str
 
 
-@auth_router.post(
-    "/google",
-    response_model=AuthOut,
-    dependencies=[Depends(data_operation_lease, scope="request")],
-)
+# Identity-mutating auth POSTs participate via DataLifecycleLeaseMiddleware.
+@auth_router.post("/google", response_model=AuthOut)
 def login_google(body: GoogleLoginIn, session: Annotated[Session, Depends(get_session)]):
     try:
         payload = verify_google_credential(body.credential)
@@ -54,22 +49,14 @@ def login_google(body: GoogleLoginIn, session: Annotated[Session, Depends(get_se
     return AuthOut(access_token=token, user_id=user.id, tier="member")
 
 
-@auth_router.post(
-    "/anonymous",
-    response_model=AuthOut,
-    dependencies=[Depends(data_operation_lease, scope="request")],
-)
+@auth_router.post("/anonymous", response_model=AuthOut)
 def login_anonymous(body: AnonymousLoginIn, session: Annotated[Session, Depends(get_session)]):
     user = UserRepository(session).get_or_create(body.fingerprint)
     token = issue_token(user.id, "guest", ANONYMOUS_TOKEN_TTL_SECONDS)
     return AuthOut(access_token=token, user_id=user.id, tier="guest")
 
 
-@auth_router.post(
-    "/upgrade",
-    response_model=AuthOut,
-    dependencies=[Depends(data_operation_lease, scope="request")],
-)
+@auth_router.post("/upgrade", response_model=AuthOut)
 def upgrade_guest(body: GuestUpgradeIn, session: Annotated[Session, Depends(get_session)]):
     try:
         payload = verify_google_credential(body.credential)

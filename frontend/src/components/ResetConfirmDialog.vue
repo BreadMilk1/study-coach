@@ -10,6 +10,7 @@ const props = defineProps<{
   scope: ResetScope | null
   summary: DataSummaryDto | null
   error: Error | null
+  recoveryRequired?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -24,7 +25,9 @@ const primaryAction = ref<HTMLElement | null>(null)
 const factoryText = ref('')
 const factoryConfirmed = computed(() => factoryText.value === 'RESET')
 const cancelable = computed(() => (
-  props.phase === 'confirming_learning' || props.phase === 'confirming_factory'
+  props.phase === 'confirming_learning'
+  || props.phase === 'confirming_factory'
+  || (props.phase === 'reset_error' && !props.recoveryRequired)
 ))
 const shouldOpen = computed(() => [
   'confirming_learning',
@@ -184,6 +187,14 @@ onBeforeUnmount(() => {
             {{ $t('dataLifecycle.reset.failedStage', { stage: failedStage }) }}
           </p>
           <div class="mt-7 flex justify-end gap-3">
+            <button
+              v-if="!recoveryRequired"
+              type="button"
+              class="rounded-md border border-border-strong px-4 py-2 text-sm font-medium text-fg-muted transition-colors hover:bg-white/5 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-ring"
+              @click="emit('cancel')"
+            >
+              {{ $t('dataLifecycle.actions.cancel') }}
+            </button>
             <button
               ref="primaryAction"
               type="button"

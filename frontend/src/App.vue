@@ -25,6 +25,10 @@ import { useMistakes } from './stores/mistakes'
 import { useNotifications } from './stores/notifications'
 import { usePlan } from './stores/plan'
 import { useQuiz } from './stores/quiz'
+import {
+  invalidateAnonymousProvisioning,
+  provisionFactoryIdentity,
+} from './stores/settings'
 import { useMediaQuery } from './composables/useMediaQuery'
 import MobileNav from './components/MobileNav.vue'
 import ResetConfirmDialog from './components/ResetConfirmDialog.vue'
@@ -65,6 +69,8 @@ lifecycle.initialize({
   clearChoice: () => clearStartupChoice(sessionStorage),
   clearFactory: () => clearFactoryBrowserState(localStorage, sessionStorage),
   clearFactorySession: () => clearFactorySessionState(sessionStorage),
+  provisionFactoryIdentity,
+  invalidateProvisioning: invalidateAnonymousProvisioning,
   broadcast: scope => lifecycleChannel.publish(scope),
   reload: () => window.location.reload(),
   pause: milliseconds => new Promise(resolve => globalThis.setTimeout(resolve, milliseconds)),
@@ -157,6 +163,7 @@ const navSections = [
       :scope="lifecycle.pendingScope"
       :summary="lifecycle.summary"
       :error="lifecycle.error"
+      :recovery-required="lifecycle.recoveryScope !== null"
       @cancel="lifecycle.cancelReset()"
       @confirm-learning="lifecycle.confirmLearningReset()"
       @confirm-factory="lifecycle.confirmFactoryReset()"

@@ -25,7 +25,6 @@ from app.db.session import get_session
 from app.llm.provider import LLMConfig
 
 from .deps import (
-    data_operation_lease,
     get_document_processor,
     get_graph,
     get_judge_dependencies,
@@ -43,9 +42,8 @@ from .deps import (
 )
 
 router = APIRouter(prefix="/api")
-learning_router = APIRouter(
-    dependencies=[Depends(data_operation_lease, scope="request")],
-)
+# Shared lease is acquired by DataLifecycleLeaseMiddleware before body read.
+learning_router = APIRouter()
 
 _SAME_MODEL_WARNING = (
     "⚠️ Self-check note: the judge is using the same model as the generator — "
@@ -370,17 +368,31 @@ async def upload_document(
             tmp_path = Path(tmp.name)
             tmp.write(content)
         chunks = document_processor.process_pdf(tmp_path)
-        for chunk in chunks:
-            chunk["source"] = file.filename or chunk.get("source", "uploaded.pdf")
+        docs = DocumentRepository(session)
+        existing = docs.get_by_user_and_hash(user_id=user_id, hash_=file_hash)
+        # SQL row wins when present; otherwise the request filename is the
+        # authoritative source written to Chroma/BM25 and (on success) SQL.
+        canonical_filename = existing.filename if existing else (file.filename or "uploaded.pdf")
+        for index, chunk in enumerate(chunks):
+            chunk["source"] = canonical_filename
+            # Content-hash IDs stay stable across temp paths and filenames so
+            # duplicate uploads / partial retries upsert instead of accumulating.
+            chunk["chunk_id"] = f"{file_hash}:{chunk.get('page', -1)}:{index}"
         if chunks:
             retriever.add_chunks(chunks)
 
-        doc = DocumentRepository(session).create(
+        doc = docs.create(
             user_id=user_id,
-            filename=file.filename or "uploaded.pdf",
+            filename=canonical_filename,
             hash_=file_hash,
             chunks_count=len(chunks),
         )
+        # A concurrent first upload may have won SQL with a different filename.
+        # Reconcile index metadata to the returned document before responding.
+        if chunks and doc.filename != canonical_filename:
+            for chunk in chunks:
+                chunk["source"] = doc.filename
+            retriever.add_chunks(chunks)
         return {
             "document_id": doc.id,
             "filename": doc.filename,

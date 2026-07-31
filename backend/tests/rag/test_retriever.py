@@ -19,3 +19,20 @@ def test_retriever_returns_chunk_most_similar_to_query_first(fake_embedder, chro
     assert results[0]["source"] == "b.pdf"
     assert results[0]["page"] == 1
     assert "score" in results[0]
+
+
+def test_retriever_add_chunks_is_idempotent_for_stable_ids(fake_embedder, chroma_collection):
+    retriever = Retriever(collection=chroma_collection, embedder=fake_embedder)
+    chunk = {
+        "chunk_id": "abc123:1:0",
+        "content": "Stable content about HyDE retrieval.",
+        "source": "notes.pdf",
+        "page": 1,
+    }
+
+    retriever.add_chunks([chunk])
+    retriever.add_chunks([{**chunk, "source": "renamed.pdf"}])
+
+    assert chroma_collection.count() == 1
+    stored = chroma_collection.get(ids=["abc123:1:0"])
+    assert stored["metadatas"][0]["source"] == "renamed.pdf"

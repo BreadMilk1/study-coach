@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -104,7 +105,14 @@ class UserRepository:
             return existing
         user = User(id=_uuid(), fingerprint=fingerprint)
         self.session.add(user)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            existing = self.session.execute(stmt).scalar_one_or_none()
+            if existing is None:
+                raise
+            return existing
         self.session.refresh(user)
         return user
 
@@ -146,12 +154,15 @@ class DocumentRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def create(self, *, user_id: str, filename: str, hash_: str, chunks_count: int) -> Document:
+    def get_by_user_and_hash(self, *, user_id: str, hash_: str) -> Document | None:
         stmt = select(Document).where(
             Document.user_id == user_id,
             Document.hash == hash_,
         )
-        existing = self.session.execute(stmt).scalar_one_or_none()
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def create(self, *, user_id: str, filename: str, hash_: str, chunks_count: int) -> Document:
+        existing = self.get_by_user_and_hash(user_id=user_id, hash_=hash_)
         if existing:
             return existing
         doc = Document(
@@ -162,7 +173,14 @@ class DocumentRepository:
             chunks_count=chunks_count,
         )
         self.session.add(doc)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            existing = self.get_by_user_and_hash(user_id=user_id, hash_=hash_)
+            if existing is None:
+                raise
+            return existing
         self.session.refresh(doc)
         return doc
 

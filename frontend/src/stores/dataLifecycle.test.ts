@@ -36,6 +36,8 @@ function dependencies(overrides: Partial<LifecycleDependencies> = {}): Lifecycle
     clearChoice: () => undefined,
     clearFactory: () => undefined,
     clearFactorySession: () => undefined,
+    provisionFactoryIdentity: async () => 'factory-token',
+    invalidateProvisioning: () => undefined,
     broadcast: () => undefined,
     reload: () => undefined,
     pause: async () => undefined,
@@ -519,7 +521,7 @@ describe('learning reset', () => {
 })
 
 describe('factory reset', () => {
-  it('clears shared browser data before broadcasting completion, then reloads', async () => {
+  it('clears shared browser data, provisions replacement identity, then broadcasts and reloads', async () => {
     const calls: string[] = []
     const store = useDataLifecycle()
     store.initialize(dependencies({
@@ -534,6 +536,11 @@ describe('factory reset', () => {
         calls.push(`after-cancel:${store.phase}`)
       },
       clearFactory: () => calls.push('clear-factory'),
+      invalidateProvisioning: () => calls.push('invalidate'),
+      provisionFactoryIdentity: async () => {
+        calls.push('provision-identity')
+        return 'new-token'
+      },
       reload: () => calls.push('reload'),
     }))
     store.phase = 'ready'
@@ -543,7 +550,9 @@ describe('factory reset', () => {
 
     expect(calls).toEqual([
       'reset:factory',
+      'invalidate',
       'clear-factory',
+      'provision-identity',
       'broadcast:factory',
       'pause:750:factory_restarting',
       'after-cancel:factory_restarting',
@@ -567,6 +576,11 @@ describe('factory reset', () => {
       broadcast: scope => calls.push(`broadcast:${scope}`),
       pause: async () => { calls.push('pause') },
       clearFactory: () => calls.push('clear-factory'),
+      invalidateProvisioning: () => calls.push('invalidate'),
+      provisionFactoryIdentity: async () => {
+        calls.push('provision-identity')
+        return 'new-token'
+      },
       reload: () => calls.push('reload'),
     }))
     store.phase = 'ready'
@@ -577,20 +591,23 @@ describe('factory reset', () => {
     expect(calls).toEqual(['reset:factory'])
     expect(store.phase).toBe('reset_error')
     expect(store.pendingScope).toBe('factory')
+    expect(store.recoveryScope).toBe('factory')
 
     await store.retryReset()
 
     expect(calls).toEqual([
       'reset:factory',
       'reset:factory',
+      'invalidate',
       'clear-factory',
+      'provision-identity',
       'broadcast:factory',
       'pause',
       'reload',
     ])
   })
 
-  it('still announces backend completion when initiating browser clear fails, then retries', async () => {
+  it('does not broadcast when initiating browser clear fails, then retries', async () => {
     const calls: string[] = []
     let clearAttempts = 0
     const store = useDataLifecycle()
@@ -604,6 +621,11 @@ describe('factory reset', () => {
         calls.push(`clear-factory:${clearAttempts}`)
         if (clearAttempts === 1) throw new Error('storage blocked')
       },
+      invalidateProvisioning: () => calls.push('invalidate'),
+      provisionFactoryIdentity: async () => {
+        calls.push('provision-identity')
+        return 'new-token'
+      },
       broadcast: scope => calls.push(`broadcast:${scope}`),
       pause: async () => { calls.push('pause') },
       reload: () => calls.push('reload'),
@@ -615,21 +637,24 @@ describe('factory reset', () => {
 
     expect(calls).toEqual([
       'reset:factory',
+      'invalidate',
       'clear-factory:1',
-      'broadcast:factory',
     ])
     expect(store.phase).toBe('reset_error')
     expect(store.pendingScope).toBe('factory')
+    expect(store.recoveryScope).toBe('factory')
     expect(store.error?.message).toBe('storage blocked')
 
     await store.retryReset()
 
     expect(calls).toEqual([
       'reset:factory',
+      'invalidate',
       'clear-factory:1',
-      'broadcast:factory',
       'reset:factory',
+      'invalidate',
       'clear-factory:2',
+      'provision-identity',
       'broadcast:factory',
       'pause',
       'reload',
@@ -704,12 +729,13 @@ describe('external reset', () => {
     store.initialize(dependencies({
       clearFactory: () => calls.push('clear-factory'),
       clearFactorySession: () => calls.push('clear-factory-session'),
+      invalidateProvisioning: () => calls.push('invalidate'),
       reload: () => calls.push('reload'),
     }))
 
     await store.handleExternalReset('factory')
 
-    expect(calls).toEqual(['clear-factory-session', 'reload'])
+    expect(calls).toEqual(['invalidate', 'clear-factory-session', 'reload'])
     expect(store.phase).toBe('factory_restarting')
   })
 
@@ -718,13 +744,14 @@ describe('external reset', () => {
     const store = useDataLifecycle()
     store.initialize(dependencies({
       clearFactorySession: () => { calls.push('clear-factory-session'); throw new Error('storage blocked') },
+      invalidateProvisioning: () => calls.push('invalidate'),
       reload: () => calls.push('reload'),
     }))
     store.phase = 'ready'
 
     await store.handleExternalReset('factory')
 
-    expect(calls).toEqual(['clear-factory-session', 'reload'])
+    expect(calls).toEqual(['invalidate', 'clear-factory-session', 'reload'])
     expect(store.phase).toBe('factory_restarting')
     expect(store.error?.message).toBe('storage blocked')
   })
@@ -797,6 +824,7 @@ describe('external reset', () => {
       markChoice: () => calls.push('choice'),
       clearFactory: () => calls.push('clear-factory'),
       clearFactorySession: () => calls.push('clear-factory-session'),
+      invalidateProvisioning: () => calls.push('invalidate'),
       reload: () => calls.push('reload'),
     }))
     await store.handleExternalReset('learning')
@@ -806,7 +834,7 @@ describe('external reset', () => {
     finishRetry()
     await acknowledgement
 
-    expect(calls).toEqual(['client:1', 'client:2', 'clear-factory-session', 'reload'])
+    expect(calls).toEqual(['client:1', 'client:2', 'invalidate', 'clear-factory-session', 'reload'])
     expect(store.phase).toBe('factory_restarting')
   })
 
@@ -824,5 +852,152 @@ describe('external reset', () => {
     expect(calls).toEqual(['clear-choice', 'client'])
     expect(store.phase).toBe('external_reset')
     expect(store.error?.message).toBe('storage blocked')
+  })
+})
+
+describe('safe reset refusals', () => {
+  function apiError(
+    status: number,
+    code: string,
+    message: string,
+    failedStage: string | null = null,
+  ) {
+    return Object.assign(new Error(message), {
+      name: 'DataLifecycleApiError',
+      status,
+      code,
+      failedStage,
+      retryable: failedStage !== null,
+      requiredScope: null,
+    })
+  }
+
+  it.each([
+    ['data_operation_in_progress', 409],
+    ['reset_in_progress', 409],
+    ['reset_disabled', 403],
+    ['invalid_confirmation', 422],
+  ] as const)('keeps Cancel available for %s without recovery latch', async (code, status) => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async () => {
+        throw apiError(status, code, 'refused')
+      },
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.recoveryScope).toBeNull()
+    store.cancelReset()
+    expect(store.phase).toBe('ready')
+  })
+
+  it('latches recovery for reset_failed and rejects Cancel', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async () => {
+        throw apiError(500, 'reset_failed', 'failed', 'chroma')
+      },
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.recoveryScope).toBe('learning')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+  })
+
+  it('latches recovery for ambiguous network failure', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async () => { throw new TypeError('Failed to fetch') },
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(store.recoveryScope).toBe('factory')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+  })
+})
+
+describe('reset_recovery_required scope switching', () => {
+  function recoveryRequired(scope: 'learning' | 'factory') {
+    return Object.assign(new Error('Retry the incomplete reset.'), {
+      name: 'DataLifecycleApiError',
+      status: 409,
+      code: 'reset_recovery_required',
+      failedStage: null,
+      retryable: true,
+      requiredScope: scope,
+    })
+  }
+
+  it('switches factory request to learning retry when required_scope=learning', async () => {
+    const resetCalls: Array<'learning' | 'factory'> = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async (scope) => {
+        resetCalls.push(scope)
+        if (resetCalls.length === 1) throw recoveryRequired('learning')
+        return { scope, status: 'completed', deleted: summary({ has_learning_data: false }) }
+      },
+      summary: async () => summary({ has_learning_data: false }),
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+    expect(store.workspaceUnlocked).toBe(false)
+
+    await store.retryReset()
+
+    expect(resetCalls).toEqual(['factory', 'learning'])
+    expect(store.phase).toBe('ready')
+    expect(store.recoveryScope).toBeNull()
+  })
+
+  it('switches learning request to factory retry when required_scope=factory', async () => {
+    const resetCalls: Array<'learning' | 'factory'> = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async (scope) => {
+        resetCalls.push(scope)
+        if (resetCalls.length === 1) throw recoveryRequired('factory')
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      clearFactory: () => undefined,
+      provisionFactoryIdentity: async () => 'fresh-token',
+      pause: async () => undefined,
+      reload: () => undefined,
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('factory')
+    expect(store.recoveryScope).toBe('factory')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+
+    await store.retryReset()
+
+    expect(resetCalls).toEqual(['learning', 'factory'])
+    expect(store.phase).toBe('factory_restarting')
   })
 })

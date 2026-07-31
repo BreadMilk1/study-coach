@@ -28,10 +28,19 @@ export interface LifecycleDependencies {
   clearChoice: () => void
   clearFactory: () => void
   clearFactorySession: () => void
+  provisionFactoryIdentity: () => Promise<string>
+  invalidateProvisioning: () => void
   broadcast: (scope: ResetScope) => void
   reload: () => void
   pause: (milliseconds: number) => Promise<void>
 }
+
+const SAFE_RESET_REFUSAL_CODES = new Set([
+  'data_operation_in_progress',
+  'reset_in_progress',
+  'reset_disabled',
+  'invalid_confirmation',
+])
 
 let lifecycleDependencies: LifecycleDependencies | null = null
 
@@ -50,6 +59,26 @@ function requiredRecoveryScope(error: unknown): ResetScope | null {
   return lifecycleError.requiredScope === 'learning' || lifecycleError.requiredScope === 'factory'
     ? lifecycleError.requiredScope
     : null
+}
+
+function asLifecycleApiError(error: unknown): DataLifecycleApiError | null {
+  if (!(error instanceof Error)) return null
+  const candidate = error as DataLifecycleApiError
+  if (typeof candidate.code !== 'string' || typeof candidate.status !== 'number') return null
+  return candidate
+}
+
+function isSafeResetRefusal(error: unknown): boolean {
+  const lifecycleError = asLifecycleApiError(error)
+  if (lifecycleError === null) return false
+  if (SAFE_RESET_REFUSAL_CODES.has(lifecycleError.code)) return true
+  return lifecycleError.status === 401 || lifecycleError.status === 422
+}
+
+function shouldLatchRecovery(error: unknown, backendCompleted: boolean): boolean {
+  if (backendCompleted) return true
+  if (isSafeResetRefusal(error)) return false
+  return true
 }
 
 export const useDataLifecycle = defineStore('dataLifecycle', {
@@ -191,9 +220,18 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         this.phase = 'ready'
       } catch (error) {
         if (generation !== this.operationGeneration) return
-        if (!backendCompleted) this.recoveryScope = 'learning'
+        const requiredScope = requiredRecoveryScope(error)
+        if (requiredScope !== null) {
+          this.recoveryScope = requiredScope
+          this.pendingScope = requiredScope
+        } else if (shouldLatchRecovery(error, backendCompleted)) {
+          this.recoveryScope = 'learning'
+          this.pendingScope = 'learning'
+        } else {
+          this.recoveryScope = null
+          this.pendingScope = 'learning'
+        }
         this.error = error instanceof Error ? error : new Error('Learning reset failed.')
-        this.pendingScope = 'learning'
         this.phase = 'reset_error'
       }
     },
@@ -209,27 +247,29 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         this.recoveryScope = null
         if (generation !== this.operationGeneration) return
         this.lastResult = result
-        let browserFailure: Error | null = null
-        try {
-          dependencies().clearFactory()
-        } catch (error) {
-          browserFailure = error instanceof Error ? error : new Error('Factory browser state clearing failed.')
-        }
-        try {
-          dependencies().broadcast('factory')
-        } catch (error) {
-          browserFailure ??= error instanceof Error ? error : new Error('Factory reset broadcast failed.')
-        }
-        if (browserFailure !== null) throw browserFailure
+        dependencies().invalidateProvisioning()
+        dependencies().clearFactory()
+        await dependencies().provisionFactoryIdentity()
+        if (generation !== this.operationGeneration) return
+        dependencies().broadcast('factory')
         this.phase = 'factory_restarting'
         await dependencies().pause(750)
         if (generation !== this.operationGeneration) return
         dependencies().reload()
       } catch (error) {
         if (generation !== this.operationGeneration) return
-        if (!backendCompleted) this.recoveryScope = 'factory'
+        const requiredScope = requiredRecoveryScope(error)
+        if (requiredScope !== null) {
+          this.recoveryScope = requiredScope
+          this.pendingScope = requiredScope
+        } else if (shouldLatchRecovery(error, backendCompleted)) {
+          this.recoveryScope = 'factory'
+          this.pendingScope = 'factory'
+        } else {
+          this.recoveryScope = null
+          this.pendingScope = 'factory'
+        }
         this.error = error instanceof Error ? error : new Error('Factory reset failed.')
-        this.pendingScope = 'factory'
         this.phase = 'reset_error'
       }
     },
@@ -253,6 +293,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         this.externalClientPending = false
         let failure: Error | null = null
         try {
+          dependencies().invalidateProvisioning()
           dependencies().clearFactorySession()
         } catch (error) {
           failure = error instanceof Error ? error : new Error('Factory browser state clearing failed.')

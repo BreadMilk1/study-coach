@@ -82,17 +82,20 @@ export const usePlan = defineStore('plan', {
     },
     async toggleMilestone(milestoneId: string, done: boolean) {
       if (!this.plan) return
+      const epoch = captureLearningStateEpoch()
       this.updatingMilestoneId = milestoneId
       this.error = null
       try {
         const result = await patchMilestoneDone(this.plan.plan_id, milestoneId, done)
+        if (!isLearningStateEpochCurrent(epoch)) return
         this.plan = result.plan
         this.lastValidationHint = result.validation_hint
         this.events = [result.event, ...this.events.filter(e => e.id !== result.event.id)].slice(0, 20)
       } catch (e: any) {
+        if (!isLearningStateEpochCurrent(epoch)) return
         this.error = e?.message ?? 'failed'
       } finally {
-        this.updatingMilestoneId = null
+        if (isLearningStateEpochCurrent(epoch)) this.updatingMilestoneId = null
       }
     },
     setMindmap(mermaid: string) {

@@ -19,6 +19,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Study Coach", version="0.0.1")
     app.state.data_lifecycle_gate = DataLifecycleGate()
 
+    # Lifecycle first (inner): acquires the shared lease before FastAPI reads
+    # multipart bodies and holds it until streaming responses finish.
+    # CORS second (outer): wraps lifecycle so middleware-generated 409 JSON
+    # responses still receive Access-Control-* headers. CORS does not read the
+    # request body, so this order does not reintroduce the multipart race.
+    from app.api.lifecycle_middleware import DataLifecycleLeaseMiddleware
+
+    app.add_middleware(DataLifecycleLeaseMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(","),

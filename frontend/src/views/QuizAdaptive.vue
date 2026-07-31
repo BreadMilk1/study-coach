@@ -6,7 +6,7 @@ import { useMistakes } from '../stores/mistakes'
 import { useMastery } from '../stores/mastery'
 import { useDocuments } from '../stores/documents'
 import { useSettings, type Mode } from '../stores/settings'
-import { reviewMistake, streamChat } from '../lib/api'
+import { streamChat } from '../lib/api'
 import DifficultySelector from '../components/DifficultySelector.vue'
 import MCQCard from '../components/MCQCard.vue'
 import GradeResult from '../components/GradeResult.vue'
@@ -99,14 +99,8 @@ function generate() {
 async function submit(choice: string) {
   if (quiz.currentMistakeId) {
     try {
-      const result = await reviewMistake(quiz.currentMistakeId, choice)
-      quiz.lastGrade = {
-        correct: result.correct,
-        correctAnswer: result.correct_answer,
-        explanation: result.explanation,
-      }
-      quiz.currentMCQ = null
-      quiz.currentMistakeId = null
+      const reviewed = await quiz.reviewCurrentMistake(choice)
+      if (!reviewed) return
       await Promise.all([mastery.fetch(), mistakes.fetch()])
     } catch (e) {
       console.error('review failed', e)
