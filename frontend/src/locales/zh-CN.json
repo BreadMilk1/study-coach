@@ -89,6 +89,7 @@
     "debugMode": "调试模式",
     "language": "语言",
     "save": "保存设置",
+    "saved": "设置已保存。",
     "dangerZone": {
       "eyebrow": "本地实例控制",
       "title": "危险区域",

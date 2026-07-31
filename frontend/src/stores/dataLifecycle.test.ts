@@ -60,6 +60,7 @@ describe('startup inspection', () => {
     await store.inspect()
 
     expect(store.phase).toBe('choice_required')
+    expect(store.workspaceUnlocked).toBe(false)
     expect(store.canStartFresh).toBe(true)
   })
 
@@ -74,11 +75,72 @@ describe('startup inspection', () => {
     await store.inspect()
 
     expect(store.phase).toBe('inspection_error')
+    expect(store.workspaceUnlocked).toBe(false)
     expect(store.canContinueWithoutClearing).toBe(true)
     expect(store.canStartFresh).toBe(false)
     store.continueWithoutClearing()
     expect(calls).toEqual(['choice'])
     expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
+  })
+
+  it('requires the interrupted reset scope to be retried after a reload', async () => {
+    const recoveryError = Object.assign(new Error('Retry the incomplete reset.'), {
+      code: 'reset_recovery_required',
+      requiredScope: 'learning',
+    })
+    let summaryAttempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => {
+        summaryAttempts += 1
+        if (summaryAttempts === 1) throw recoveryError
+        return summary({ has_learning_data: false })
+      },
+    }))
+
+    await store.inspect()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    expect(store.workspaceUnlocked).toBe(false)
+    expect(store.canContinueWithoutClearing).toBe(false)
+
+    store.cancelReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    expect(store.workspaceUnlocked).toBe(false)
+
+    await store.retryReset()
+
+    expect(store.phase).toBe('ready')
+    expect(store.pendingScope).toBeNull()
+    expect(store.recoveryScope).toBeNull()
+    expect(store.workspaceUnlocked).toBe(true)
+  })
+
+  it('keeps recovery blocking when the required-scope retry fails again', async () => {
+    const recoveryError = Object.assign(new Error('Retry the incomplete reset.'), {
+      code: 'reset_recovery_required',
+      requiredScope: 'learning',
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => { throw recoveryError },
+      reset: async () => { throw new Error('retry failed') },
+    }))
+    await store.inspect()
+
+    await store.retryReset()
+    store.cancelReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    expect(store.workspaceUnlocked).toBe(false)
   })
 
   it.each([
@@ -91,6 +153,7 @@ describe('startup inspection', () => {
     await store.inspect()
 
     expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
     expect(store.canStartFresh).toBe(false)
   })
 
@@ -104,6 +167,7 @@ describe('startup inspection', () => {
 
     expect(calls).toEqual(['choice'])
     expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
   })
 
   it('does not let a stale inspection overwrite an external reset', async () => {
@@ -120,6 +184,7 @@ describe('startup inspection', () => {
     await inspection
 
     expect(store.phase).toBe('external_reset')
+    expect(store.workspaceUnlocked).toBe(false)
     expect(store.summary).toBeNull()
   })
 })

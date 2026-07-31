@@ -446,6 +446,7 @@ export class DataLifecycleApiError extends Error {
   public readonly code: string
   public readonly failedStage: string | null
   public readonly retryable: boolean
+  public readonly requiredScope: ResetScope | null
 
   constructor(
     status: number,
@@ -453,6 +454,7 @@ export class DataLifecycleApiError extends Error {
     failedStage: string | null,
     retryable: boolean,
     detail: string,
+    requiredScope: ResetScope | null = null,
   ) {
     super(detail)
     this.name = 'DataLifecycleApiError'
@@ -460,6 +462,7 @@ export class DataLifecycleApiError extends Error {
     this.code = code
     this.failedStage = failedStage
     this.retryable = retryable
+    this.requiredScope = requiredScope
   }
 
   static async fromResponse(response: Response): Promise<DataLifecycleApiError> {
@@ -479,6 +482,9 @@ export class DataLifecycleApiError extends Error {
       typeof raw?.failed_stage === 'string' ? raw.failed_stage : null,
       raw?.retryable === true,
       message,
+      raw?.required_scope === 'learning' || raw?.required_scope === 'factory'
+        ? raw.required_scope
+        : null,
     )
   }
 }

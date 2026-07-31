@@ -89,6 +89,7 @@
     "debugMode": "Debug Mode",
     "language": "Language",
     "save": "Save Settings",
+    "saved": "Settings saved.",
     "dangerZone": {
       "eyebrow": "Local instance controls",
       "title": "Danger Zone",

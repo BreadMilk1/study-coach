@@ -16,6 +16,7 @@ from app.data_lifecycle import (
     DataOperationInProgress,
     ResetCoordinator,
     ResetInProgress,
+    ResetRecoveryRequired,
     ResetStageError,
 )
 from app.db.repositories import DataLifecycleRepository
@@ -88,6 +89,15 @@ def data_summary(
 ):
     try:
         return coordinator.summary(reset_enabled=reset_enabled())
+    except ResetRecoveryRequired as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "reset_recovery_required",
+                "required_scope": exc.required_scope,
+                "message": "A previous data reset is incomplete. Retry that reset.",
+            },
+        ) from None
     except ResetInProgress:
         raise HTTPException(
             409,
@@ -126,6 +136,15 @@ def reset_data(
         ) from None
     try:
         return coordinator.reset(body.scope)
+    except ResetRecoveryRequired as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "reset_recovery_required",
+                "required_scope": exc.required_scope,
+                "message": "A previous data reset is incomplete. Retry that reset.",
+            },
+        ) from None
     except ResetInProgress:
         raise HTTPException(
             409,

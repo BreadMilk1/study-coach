@@ -148,7 +148,25 @@ describe('strict lifecycle API', () => {
       code: 'reset_stage_failed',
       failedStage: 'sqlite',
       retryable: true,
+      requiredScope: null,
       message: 'Reset failed. Retry is safe.',
+    })
+  })
+
+  it('parses the required reset scope for interrupted-reset recovery', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      detail: {
+        code: 'reset_recovery_required',
+        required_scope: 'learning',
+        message: 'Retry the incomplete reset.',
+      },
+    }, 409)))
+
+    await expect(getDataSummary()).rejects.toMatchObject({
+      status: 409,
+      code: 'reset_recovery_required',
+      requiredScope: 'learning',
+      message: 'Retry the incomplete reset.',
     })
   })
 
@@ -165,6 +183,7 @@ describe('strict lifecycle API', () => {
       code: 'data_lifecycle_failed',
       failedStage: null,
       retryable: false,
+      requiredScope: null,
       message: 'Data lifecycle request failed.',
     })
   })
@@ -183,6 +202,7 @@ describe('strict lifecycle API', () => {
       code: 'data_lifecycle_failed',
       failedStage: null,
       retryable: false,
+      requiredScope: null,
       message: 'Data lifecycle request failed.',
     })
     expect(error.message).not.toContain('password')

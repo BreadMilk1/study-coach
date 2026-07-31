@@ -313,6 +313,36 @@ def test_summary_reports_active_reset_conflict(client, app):
     assert response.json()["detail"]["code"] == "reset_in_progress"
 
 
+def test_incomplete_reset_only_allows_same_scope_recovery(client, app, monkeypatch):
+    enable_reset(monkeypatch)
+    app.state.data_lifecycle_gate.mark_recovery_required("learning")
+
+    summary = client.get("/api/data/summary", headers=bearer())
+    wrong_scope = client.post(
+        "/api/data/reset",
+        headers=bearer(),
+        json={"scope": "factory", "confirmation": "FACTORY_RESET"},
+    )
+
+    expected_detail = {
+        "code": "reset_recovery_required",
+        "required_scope": "learning",
+        "message": "A previous data reset is incomplete. Retry that reset.",
+    }
+    assert summary.status_code == 409
+    assert summary.json()["detail"] == expected_detail
+    assert wrong_scope.status_code == 409
+    assert wrong_scope.json()["detail"] == expected_detail
+
+    retry = client.post(
+        "/api/data/reset",
+        headers=bearer(),
+        json=reset_payload(),
+    )
+    assert retry.status_code == 200
+    assert client.get("/api/data/summary", headers=bearer()).status_code == 200
+
+
 @pytest.mark.parametrize("stage", ["chroma", "sqlite"])
 def test_reset_stage_failure_has_stable_safe_payload(
     client,

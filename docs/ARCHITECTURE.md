@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM (local Ollama + cloud BYOK). Current automated baseline — 370 backend tests and 102 frontend tests (472 total); production build passing.
+> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 376 backend tests and 109 frontend tests (485 total); production build passing.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (2026-07-28):** 370 backend tests and 102 frontend tests passing (472 total); frontend production build passing. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
+**Current baseline (2026-07-28):** 376 backend tests and 109 frontend tests passing (485 total); frontend production build passing. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
 
 ---
 
@@ -123,7 +123,7 @@ erDiagram
 
 **Consequences:**
 - Zero ops burden for Docker Compose demo (`docker compose up` includes SQLite volume)
-- fly.io fallback uses SQLite on fly volume (sufficient for single-user portfolio traffic)
+- Cloud deployment remains deferred; the retained Fly files are an unverified scaffold, not a supported runtime topology
 - Repository pattern isolates DB dialect: all queries use SQLAlchemy ORM, no raw SQL
 - Alembic migrations use `batch_alter_table` for SQLite compatibility
 - Alembic logging configuration preserves existing application loggers, so startup migrations do not disable Uvicorn access logs or exception tracebacks
@@ -151,11 +151,11 @@ erDiagram
 **Decision:** P5 treats one running Study Coach deployment as a **single-user, local-first instance**.
 
 - `GET /api/data/summary` and `POST /api/data/reset` require a valid signed bearer token through `require_signed_user`; these lifecycle routes never use the legacy `"default-user"` fallback.
-- Reset is disabled by default (`STUDY_COACH_LOCAL_MODE=0`). The shipped Docker Compose configuration enables it and binds backend host traffic to `127.0.0.1:8000`; Fly explicitly keeps local mode off. P5 does not enforce request source IP, so the environment flag and deployment binding are the security boundary.
+- Reset is disabled by default (`STUDY_COACH_LOCAL_MODE=0`). The shipped Docker Compose configuration enables it and binds backend host traffic to `127.0.0.1:8000`; the deferred Fly scaffold keeps local mode off but is not a supported deployment. P5 does not enforce request source IP, so the environment flag and deployment binding are the security boundary.
 - P5 supports one backend worker. The in-process lifecycle gate and object replacement are not a multi-worker coordination protocol.
-- Learning operations use a shared lease; Chat and upload retain it for the full response lifetime. Reset takes an exclusive lease; conflicts return stable `409` codes (`reset_in_progress` or `data_operation_in_progress`). Disabled reset returns `403 reset_disabled`; stage failure returns retryable `500 reset_failed` with `failed_stage`. Mismatched confirmation text returns `422 invalid_confirmation`; an unsupported scope is rejected separately by ordinary Pydantic validation with `422`.
+- Learning operations and identity-mutating auth POST routes use a shared lease; Chat and upload retain it for the full response lifetime. Read-only `/api/auth/config` remains available. Reset takes an exclusive lease; conflicts return stable `409` codes (`reset_in_progress` or `data_operation_in_progress`). Disabled reset returns `403 reset_disabled`; stage failure returns retryable `500 reset_failed` with `failed_stage`. Once the destructive stage starts, failure leaves a scope-specific recovery latch: shared work and the other reset scope receive `409 reset_recovery_required`, while retrying the required scope is allowed. Mismatched confirmation text returns `422 invalid_confirmation`; an unsupported scope is rejected separately by ordinary Pydantic validation with `422`.
 - Reset order is fixed: clear Chroma, rebuild and republish the **complete** retriever and replace the `InMemorySaver` checkpointer references, then execute one child-first SQLite transaction (`citations → messages → sessions`, `plan_events → plan_milestones → plans`, `mistakes/mastery/questions → topics → goals → documents`, then users for factory scope).
-- This order provides idempotent recovery, not a cross-store transaction. If SQLite fails after Chroma and in-memory replacement, retry observes an already-empty vector store and completes the remaining database deletion.
+- This order provides idempotent recovery, not a cross-store transaction. If Chroma replacement or SQLite deletion fails after the destructive stage begins, the in-process recovery latch remains until the same scope completes. A retry observes any already-empty store and safely finishes the remaining deletion. The latch is intentionally single-process and is lost on backend restart, matching the one-worker P5 boundary.
 - Strict bearer verification validates the signed token but does not require its user row to remain present. If a factory-reset success response is lost, the same still-valid token can therefore retry idempotently and receive a completed empty reset; this is accepted only inside the local-mode and loopback deployment boundary.
 
 Two scopes share that backend ordering:
@@ -165,7 +165,7 @@ Two scopes share that backend ordering:
 
 Summary and reset responses expose the same 15 count fields: `users`, `documents`, `source_chunks`, `vectors`, `chat_sessions`, `messages`, `citations`, `goals`, `topics`, `plans`, `plan_milestones`, `plan_events`, `questions`, `mastery`, and `mistakes`. `source_chunks` is the sum of SQL `documents.chunks_count`; `vectors` is the live Chroma count, so interrupted operations and legacy/orphaned embeddings can make them differ. `has_learning_data` ignores a user row by itself but is true for any other learning row or vector.
 
-**Consequences:** The startup gate, Settings Danger Zone, two-scope confirmations, cross-tab invalidation, and retry behavior can describe exactly what the current storage model does. Summary remains readable when reset is disabled, but `reset_enabled=false` makes the frontend skip the startup gate and hide the Danger Zone. A future per-user Chroma design must add ownership metadata and filtered retrieval throughout dense/BM25/reranking/tool paths **and replace this global-reset contract**; it cannot layer per-user deletion on the P5 coordinator unchanged.
+**Consequences:** The startup gate, Settings Danger Zone, two-scope confirmations, cross-tab invalidation, and retry behavior can describe exactly what the current storage model does. The routed page is not mounted until the startup decision unlocks the workspace, so child lifecycle hooks cannot perform requests behind the gate. A reload during recovery reopens the blocking reset error with only the required-scope Retry action. Summary remains readable when reset is disabled, but `reset_enabled=false` makes the frontend skip the startup gate and hide the Danger Zone. A future per-user Chroma design must add ownership metadata and filtered retrieval throughout dense/BM25/reranking/tool paths **and replace this global-reset contract**; it cannot layer per-user deletion on the P5 coordinator unchanged.
 
 ---
 
@@ -347,13 +347,13 @@ Primary (local demo):
   ├── frontend 127.0.0.1:5173 (Vite dev server; proxy target http://backend:8000)
   └── ollama   127.0.0.1:11434 (nomic-embed-text + gemma3:4b + qwen2.5:7b pre-pulled)
 
-Fallback (cloud demo link):
-  fly.io (HKG region)
-  └── single container (backend + frontend static files)
-      ├── OLLAMA_ENABLED=false
+Deferred cloud scaffold:
+  fly.toml + Dockerfile.fly
+  └── not a verified deployment path
       ├── STUDY_COACH_LOCAL_MODE=0
-      ├── SQLite on fly volume
-      └── BYOK cloud-only (no local model)
+      ├── frontend static serving is not wired
+      ├── final image/runtime packaging is not validated
+      └── retrieval still requires an embedding-provider design
 ```
 
 The clean no-cache Compose build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200. It did not verify Ollama embedding or generation. On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
@@ -364,7 +364,7 @@ The clean no-cache Compose build reduced backend/frontend contexts from 384.90 M
 
 | Concern | Implementation |
 |---------|---------------|
-| Auth | Shipped frontend auto-provisions an anonymous signed JWT. Google OAuth/upgrade routes and columns remain frozen in backend code, with no frontend login runtime or delivered account continuity. |
+| Auth | Shipped frontend auto-provisions an anonymous signed JWT. Identity-mutating auth POST routes participate in the lifecycle shared lease. Google OAuth/upgrade routes and columns remain frozen in backend code, with no frontend login runtime or delivered account continuity. |
 | Data lifecycle | Summary/reset require strict signed bearer auth; reset defaults off and supported local-mode configurations bind the backend to loopback. The shipped Compose configuration enforces that binding; no request-IP enforcement is promised. |
 | API key storage | `x-api-key` never logged or persisted server-side; frontend `localStorage` (demo scope) |
 | CORS | FastAPI `CORSMiddleware` — frontend origin only |

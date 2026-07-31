@@ -248,6 +248,41 @@ def test_upload_removes_exact_temporary_path_when_processing_fails(
     assert not captured[0].exists()
 
 
+def test_upload_removes_partial_temporary_file_when_write_fails(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    partial_path = tmp_path / "partial-upload.pdf"
+
+    class FailingTemporaryFile:
+        name = str(partial_path)
+
+        def __enter__(self):
+            partial_path.touch()
+            return self
+
+        def write(self, content):
+            partial_path.write_bytes(content[:4])
+            raise OSError("disk full")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "app.api.routes.tempfile.NamedTemporaryFile",
+        lambda **_kwargs: FailingTemporaryFile(),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        client.post(
+            "/api/documents",
+            files={"file": ("partial.pdf", b"%PDF-1.4", "application/pdf")},
+        )
+
+    assert not partial_path.exists()
+
+
 def test_reset_is_rejected_until_streaming_chat_response_finishes(
     app,
     client,

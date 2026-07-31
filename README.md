@@ -13,7 +13,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-463%20passed-10b981)]()
+[![Tests](https://img.shields.io/badge/Tests-485%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -97,7 +97,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 ### Deployment
 
 - **Docker Compose** — Enables local reset, binds backend/frontend/Ollama host ports to loopback, routes backend embeddings to the Ollama service, and passes frontend HTML plus direct/proxied health runtime smoke checks
-- **fly.io fallback** — Single-container cloud deploy with BYOK cloud-only mode (`OLLAMA_ENABLED=false`) and destructive reset disabled
+- **Cloud deployment** — Deferred. `fly.toml` / `Dockerfile.fly` are retained as an experimental scaffold, not a verified or supported deployment path
 
 ## Quickstart
 
@@ -148,10 +148,10 @@ docker compose up
 
 ```bash
 cd backend
-uv run pytest -q        # 370 tests, no live Ollama required
+uv run pytest -q        # 376 tests, no live Ollama required
 
 cd ../frontend
-pnpm test --run         # 102 tests across 9 Vitest files
+pnpm test --run         # 109 tests across 12 Vitest files
 pnpm build              # typecheck + production build
 ```
 
@@ -160,7 +160,7 @@ pnpm build              # typecheck + production build
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `JWT_SECRET` | Production | `dev-secret-change-me` | Development fallback only. Production must set a random signing secret; generate one with `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `OLLAMA_ENABLED` | No | `true` | Set to `false` to disable local Ollama (cloud BYOK only) |
+| `OLLAMA_ENABLED` | No | `true` | Health-response capability flag only; it does not replace the Ollama-backed embedding runtime |
 | `STUDY_COACH_LOCAL_MODE` | No | `0` | Enables the instance-wide reset API only when set to `1`; keep disabled outside a loopback-only local deployment |
 | `CHROMA_PATH` | No | `./chroma_data` | Persistent Chroma directory; Docker Compose uses `/app/data/chroma` |
 
@@ -194,7 +194,7 @@ See `docs/ARCHITECTURE.md` v2 for:
 - **Mermaid ER diagram** — 13 tables, 15 relationships
 - **6 Architecture Decision Records** — LangGraph vs chain-of-prompts, SM-2 vs Leitner, deterministic vs agent loop, SQLite-only, BYOK header pattern, single-user local-first instance lifecycle
 - **Security model** — JWT auth, API key handling, CORS, XSS prevention
-- **Deployment topology** — Docker Compose (local) + fly.io (cloud fallback)
+- **Deployment topology** — Verified host-run and Docker Compose local paths; cloud deployment is deferred
 
 ## API Reference
 
@@ -255,7 +255,7 @@ study-coach/
 │   │   ├── db/{models,repositories,session}.py # SQLAlchemy + Alembic
 │   │   ├── eval/                           # P2.2 / P2.3 ablation harnesses
 │   │   └── srs/sm2.py                      # SM-2 spaced repetition scheduler
-│   └── tests/                              # 366 backend tests
+│   └── tests/                              # 376 backend tests
 ├── frontend/
 │   └── src/
 │       ├── views/                          # 8 views: Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding
@@ -274,7 +274,7 @@ study-coach/
 │   └── screenshots/                        # UI screenshots (add before GitHub push)
 ├── design-system/MASTER.md                 # Modern Dark Cinema design tokens
 ├── docker-compose.yml                      # Local 3-service deployment
-├── fly.toml                                # Cloud fallback config
+├── fly.toml                                # Deferred cloud-deployment scaffold; not verified
 └── .env.example                            # Environment variable template
 ```
 
@@ -296,7 +296,7 @@ study-coach/
 - **Agent loop treated empirically**: 792 runs across the two primary matrices, plus a 396-run P2.3 no-retriever pilot (1,188 raw runs total) — not assumed, measured
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace / Agent Run, and EmptyCorpusBanner
-- **Portfolio-grade engineering**: 463 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
+- **Portfolio-grade engineering**: 485 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
 
 ## Origin
 

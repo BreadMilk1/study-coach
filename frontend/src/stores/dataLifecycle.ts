@@ -40,13 +40,27 @@ function dependencies(): LifecycleDependencies {
   return lifecycleDependencies
 }
 
+function requiredRecoveryScope(error: unknown): ResetScope | null {
+  if (!(error instanceof Error)) return null
+  const lifecycleError = error as Error & {
+    code?: unknown
+    requiredScope?: unknown
+  }
+  if (lifecycleError.code !== 'reset_recovery_required') return null
+  return lifecycleError.requiredScope === 'learning' || lifecycleError.requiredScope === 'factory'
+    ? lifecycleError.requiredScope
+    : null
+}
+
 export const useDataLifecycle = defineStore('dataLifecycle', {
   state: () => ({
     phase: 'checking' as LifecyclePhase,
+    workspaceUnlocked: false,
     summary: null as DataSummaryDto | null,
     lastResult: null as ResetResultDto | null,
     error: null as DataLifecycleApiError | Error | null,
     pendingScope: null as ResetScope | null,
+    recoveryScope: null as ResetScope | null,
     returnPhase: 'ready' as 'ready' | 'choice_required',
     externalClientReady: false,
     externalClientPending: false,
@@ -65,6 +79,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
     async inspect() {
       const generation = ++this.operationGeneration
       this.phase = 'checking'
+      this.workspaceUnlocked = false
       this.error = null
       try {
         const summary = await dependencies().summary()
@@ -74,11 +89,20 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
           resetEnabled: this.summary.reset_enabled,
           hasLearningData: this.summary.has_learning_data,
         }, sessionStorage)
+        this.recoveryScope = null
         this.phase = decision === 'ready' ? 'ready' : 'choice_required'
+        this.workspaceUnlocked = decision === 'ready'
       } catch (error) {
         if (generation !== this.operationGeneration) return
         this.error = error instanceof Error ? error : new Error('Local data inspection failed.')
-        this.phase = 'inspection_error'
+        const recoveryScope = requiredRecoveryScope(error)
+        if (recoveryScope !== null) {
+          this.pendingScope = recoveryScope
+          this.recoveryScope = recoveryScope
+          this.phase = 'reset_error'
+        } else {
+          this.phase = 'inspection_error'
+        }
       }
     },
     async refreshSummary() {
@@ -109,11 +133,13 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
     continueExisting() {
       if (this.phase !== 'choice_required') return
       dependencies().markChoice()
+      this.workspaceUnlocked = true
       this.phase = 'ready'
     },
     continueWithoutClearing() {
       if (this.phase !== 'inspection_error') return
       dependencies().markChoice()
+      this.workspaceUnlocked = true
       this.phase = 'ready'
     },
     requestLearningReset() {
@@ -136,6 +162,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         && this.phase !== 'confirming_factory'
         && this.phase !== 'reset_error'
       ) return
+      if (this.phase === 'reset_error' && this.recoveryScope !== null) return
       this.pendingScope = null
       this.error = null
       this.phase = this.returnPhase
@@ -143,10 +170,13 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
     async confirmLearningReset() {
       if (this.phase !== 'confirming_learning') return
       const generation = ++this.operationGeneration
+      let backendCompleted = false
       this.phase = 'resetting'
       this.error = null
       try {
         const result = await dependencies().reset('learning')
+        backendCompleted = true
+        this.recoveryScope = null
         if (generation !== this.operationGeneration) return
         this.lastResult = result
         await dependencies().resetClient()
@@ -157,9 +187,11 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         if (generation !== this.operationGeneration) return
         this.summary = summary
         this.pendingScope = null
+        this.workspaceUnlocked = true
         this.phase = 'ready'
       } catch (error) {
         if (generation !== this.operationGeneration) return
+        if (!backendCompleted) this.recoveryScope = 'learning'
         this.error = error instanceof Error ? error : new Error('Learning reset failed.')
         this.pendingScope = 'learning'
         this.phase = 'reset_error'
@@ -168,10 +200,13 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
     async confirmFactoryReset() {
       if (this.phase !== 'confirming_factory') return
       const generation = ++this.operationGeneration
+      let backendCompleted = false
       this.phase = 'resetting'
       this.error = null
       try {
         const result = await dependencies().reset('factory')
+        backendCompleted = true
+        this.recoveryScope = null
         if (generation !== this.operationGeneration) return
         this.lastResult = result
         let browserFailure: Error | null = null
@@ -192,6 +227,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         dependencies().reload()
       } catch (error) {
         if (generation !== this.operationGeneration) return
+        if (!backendCompleted) this.recoveryScope = 'factory'
         this.error = error instanceof Error ? error : new Error('Factory reset failed.')
         this.pendingScope = 'factory'
         this.phase = 'reset_error'
@@ -209,6 +245,8 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
     },
     async handleExternalReset(scope: ResetScope) {
       const generation = ++this.operationGeneration
+      this.workspaceUnlocked = false
+      this.recoveryScope = null
       if (scope === 'factory') {
         this.phase = 'factory_restarting'
         this.externalClientReady = false
@@ -282,6 +320,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         return
       }
       this.error = null
+      this.workspaceUnlocked = true
       this.phase = 'ready'
     },
   },

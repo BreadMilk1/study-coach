@@ -519,8 +519,17 @@ def test_chroma_or_memory_failure_is_wrapped_without_touching_sql_and_releases_g
         assert runtime.retriever is previous_runtime_retriever
         assert runtime.vectors == previous_vectors
         assert events == ["count", "vectors", "checkpointer_factory"]
-    with gate.exclusive_reset():
-        pass
+    if failure_at == "reset":
+        with pytest.raises(ResetInProgress):
+            with gate.shared_operation():
+                pass
+        with gate.exclusive_reset("learning"):
+            pass
+    else:
+        with gate.shared_operation():
+            pass
+        with gate.exclusive_reset():
+            pass
 
 
 def test_permanent_publish_recovery_failure_keeps_original_cause_and_skips_sql(monkeypatch):
@@ -637,6 +646,11 @@ def test_sqlite_failure_rolls_back_and_same_coordinator_retry_completes(failure_
     assert caught.value.retryable is True
     assert isinstance(caught.value.__cause__, RuntimeError)
     assert events[-1] == "rollback"
+    with pytest.raises(ResetInProgress):
+        coordinator.reset("learning")
+    with pytest.raises(ResetInProgress):
+        with gate.shared_operation():
+            pass
 
     result = coordinator.reset("factory")
 
@@ -644,6 +658,8 @@ def test_sqlite_failure_rolls_back_and_same_coordinator_retry_completes(failure_
     assert result.deleted == {**RESET_COUNTS, "vectors": 0}
     assert repository.counts == {key: 0 for key in RESET_COUNTS}
     assert events.count("rollback") == 1
+    with gate.shared_operation():
+        pass
     with gate.exclusive_reset():
         pass
 
@@ -734,7 +750,10 @@ def test_rollback_failure_does_not_mask_original_sqlite_write_error(failure_at):
     assert caught.value.__cause__ is original
     assert "rollback exploded" not in str(caught.value)
     assert events[-1] == "rollback"
-    with gate.exclusive_reset():
+    with pytest.raises(ResetInProgress):
+        with gate.shared_operation():
+            pass
+    with gate.exclusive_reset("factory"):
         pass
 
 
@@ -795,8 +814,9 @@ def test_runtime_builder_failure_keeps_public_refs_and_retry_publishes_consisten
         built_checkpointers.append(checkpointer)
         return checkpointer
 
+    gate = DataLifecycleGate()
     coordinator = ResetCoordinator(
-        gate=DataLifecycleGate(),
+        gate=gate,
         runtime=runtime,
         repository=repository,
         session=session,
@@ -819,6 +839,9 @@ def test_runtime_builder_failure_keeps_public_refs_and_retry_publishes_consisten
     assert not any(event.startswith("sqlite:") for event in events)
     assert "commit" not in events
     assert "rollback" not in events
+    with pytest.raises(ResetInProgress):
+        with gate.shared_operation():
+            pass
 
     result = coordinator.reset("factory")
 
@@ -830,6 +853,8 @@ def test_runtime_builder_failure_keeps_public_refs_and_retry_publishes_consisten
     assert events.count("sqlite:True") == 1
     assert events.count("commit") == 1
     assert "rollback" not in events
+    with gate.shared_operation():
+        pass
 
 
 def test_runtime_recreate_failure_is_retryable_through_same_coordinator():

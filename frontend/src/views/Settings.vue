@@ -4,11 +4,13 @@ import { AlertTriangle } from 'lucide-vue-next'
 
 import { useSettings } from '../stores/settings'
 import { useDataLifecycle } from '../stores/dataLifecycle'
+import { useNotifications } from '../stores/notifications'
 import { checkToolCapable, pingModel, type DataCounts } from '../lib/api'
 import { useI18n } from 'vue-i18n'
 
-const { locale } = useI18n()
+const { locale, t } = useI18n()
 const lifecycle = useDataLifecycle()
+const notifications = useNotifications()
 const s = useSettings()
 const toolTesting = ref(false)
 const toolNote = ref('')
@@ -39,6 +41,10 @@ watch(() => lifecycle.phase, (phase) => {
 
 function save() {
   s.persist()
+  notifications.push({
+    kind: 'success',
+    message: t('settings.saved'),
+  })
 }
 
 function onLanguageChange() {

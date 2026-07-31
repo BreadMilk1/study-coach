@@ -138,7 +138,7 @@ const navSections = [
       <div class="mt-auto text-xs text-fg-dim px-2">P5 · local-first</div>
     </nav>
     <main class="flex-1 overflow-hidden" :class="{ 'pb-14': isMobile }">
-      <RouterView />
+      <RouterView v-if="lifecycle.workspaceUnlocked" />
     </main>
     <MobileNav v-if="isMobile" />
     <StartupDataGate

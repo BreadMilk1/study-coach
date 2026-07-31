@@ -193,15 +193,28 @@ Success response:
 }
 ```
 
-Failure response:
+Stage-failure response (`HTTP 500`):
 
 ```json
 {
-  "scope": "learning",
-  "status": "failed",
-  "failed_stage": "sqlite",
-  "retryable": true,
-  "detail": "Learning data could not be fully cleared. Retry to finish the reset."
+  "detail": {
+    "code": "reset_failed",
+    "failed_stage": "sqlite",
+    "retryable": true,
+    "message": "Data reset failed. Please retry."
+  }
+}
+```
+
+After a destructive stage has started, other operations and the wrong reset scope receive `HTTP 409` until the original scope completes:
+
+```json
+{
+  "detail": {
+    "code": "reset_recovery_required",
+    "required_scope": "learning",
+    "message": "A previous data reset is incomplete. Retry that reset."
+  }
 }
 ```
 
@@ -237,7 +250,7 @@ Responsibilities:
 7. Delete relational rows in one SQLite transaction.
 8. Delete users only for factory scope.
 9. Return a stable summary object.
-10. Release the lock on success or failure.
+10. Release the active exclusive lease on success or failure. If failure occurs after the destructive stage begins, retain a scope-specific recovery latch until the same scope completes.
 
 The route stays responsible for HTTP validation and status mapping. Repositories remain responsible for relational operations. The reset service coordinates them.
 
@@ -262,7 +275,7 @@ SQLite and Chroma cannot participate in one atomic transaction. P5 uses a fixed 
 2. in-memory graph and retrieval state second.
 3. SQLite transaction last.
 
-If Chroma fails, SQL remains untouched. If Chroma succeeds and SQLite fails, a retry sees an already-empty Chroma collection and finishes SQL deletion safely. Deleting absent rows or recreating an already-reset collection must be a success condition.
+If setup fails before destructive work starts, ordinary operations remain available. Once Chroma replacement begins, failure leaves a scope-specific recovery latch. Shared operations and the other reset scope fail with `409 reset_recovery_required`; only the required scope may retry. If Chroma succeeds and SQLite fails, that retry sees an already-empty Chroma collection and finishes SQL deletion safely. Deleting absent rows or recreating an already-reset collection must be a success condition. The latch is in-process and intentionally follows P5's one-worker boundary.
 
 The frontend does not unlock the startup gate or clear browser identity until the backend returns `status=completed`.
 
@@ -272,6 +285,7 @@ While reset is running:
 
 - a second reset receives `409 reset_in_progress`;
 - all routes that read or write learning data, including streaming Chat, upload, Library, Plan, Quiz, mistakes, mastery, and stats, participate in one lifecycle gate;
+- identity-mutating auth POST routes (`anonymous`, frozen `google`, and `upgrade`) use the same shared lease so reset cannot race with user-row creation or mutation; read-only auth config remains available;
 - an already-active data operation makes reset return `409 data_operation_in_progress` instead of terminating the operation mid-stream;
 - after reset begins, new data operations receive `409 reset_in_progress` until the reset completes;
 - P5 local-first mode supports one backend worker. A future multi-worker deployment requires a cross-process lock and is outside this phase;
@@ -300,8 +314,11 @@ Startup sequence:
 6. Start fresh opens the clear-learning confirmation.
 7. Successful reset clears the current chat id, sets the tab-scoped key, refreshes affected stores, shows a completion summary, and unlocks the app.
 8. Failed reset keeps the gate open and exposes retry.
+9. If a reload observes `reset_recovery_required`, restore the blocking reset error using the backend-provided required scope; do not offer Continue without clearing.
 
 If summary fails, the gate shows a persistent inspection error with Retry and **Continue without clearing**. It must not offer Start fresh with unknown counts, and it must not silently fail open into the application.
+
+The routed page is not mounted until the workspace is unlocked. Hiding only a visual overlay is insufficient because child `setup()` / `onMounted()` hooks could otherwise issue requests before the required choice.
 
 The gate appears once per browser tab session. A normal refresh in the same tab does not ask again. A new tab asks again when learning data exists.
 

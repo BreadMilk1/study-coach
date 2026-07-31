@@ -29,6 +29,7 @@ uv run pytest tests/rag/test_runtime.py -q
 uv run pytest tests/test_data_lifecycle.py -q
 uv run pytest tests/api/test_data_routes.py -q
 uv run pytest tests/api/test_routes.py -q
+uv run pytest tests/api/test_auth_routes.py -q
 uv run pytest tests/test_deployment_config.py -q
 uv run pytest -q
 
@@ -42,15 +43,15 @@ docker compose config
 
 Result:
 
-- Focused backend lifecycle suites: 2 + 12 + 31 + 32 + 24 tests passed.
+- Focused backend lifecycle suites: 2 + 12 + 31 + 33 + 25 + 10 tests passed.
 - Focused deployment configuration suite: 12 tests passed, including build-context/order safeguards, frontend container listening, all three loopback bindings, the environment-aware Vite proxy, backend `OLLAMA_HOST=http://ollama:11434`, and all three model pre-pulls.
-- Full backend: 370 tests passed.
-- Frontend: 102 Vitest tests across 9 files passed; production build passed. Total automated tests: 472.
+- Full backend: 376 tests passed.
+- Frontend: 109 Vitest tests across 12 files passed; production build passed. Total automated tests: 485.
 - Compose render passed with backend/frontend/Ollama host bindings `127.0.0.1:8000`, `127.0.0.1:5173`, and `127.0.0.1:11434`; backend `STUDY_COACH_LOCAL_MODE=1`, `CHROMA_PATH=/app/data/chroma`, and `OLLAMA_HOST=http://ollama:11434`; frontend proxy target `http://backend:8000`; and pre-pulls for `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`.
 - A clean no-cache build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke passed for frontend `/`, direct backend `/api/health`, and frontend-proxied `/api/health` with HTTP 200.
 - The first backend cold start downloads about 1.1 GB of FastEmbed model data and may temporarily return `502` through the frontend proxy; wait until `/api/health` becomes ready before continuing.
 - Host-run Ollama verification passed with `gemma4:e4b` and `nomic-embed-text`: Settings connection returned Connected, embedding produced vectors, and the user-owned Topic 1 PDF indexed 49 chunks before and after a learning reset. This is host-run evidence, not a Compose model-runtime claim.
-- Fly keeps `STUDY_COACH_LOCAL_MODE=0`.
+- The retained Fly scaffold keeps `STUDY_COACH_LOCAL_MODE=0`, but cloud deployment is deferred and was not runtime-verified.
 - Static Google frontend runtime/UI search returned no matches; environment/config searches matched the intended local-mode and Chroma settings.
 - The existing Vite warning for chunks larger than 500 kB is accepted for this stage.
 

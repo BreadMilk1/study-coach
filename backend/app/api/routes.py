@@ -367,8 +367,8 @@ async def upload_document(
             suffix=".pdf",
             delete=False,
         ) as tmp:
-            tmp.write(content)
             tmp_path = Path(tmp.name)
+            tmp.write(content)
         chunks = document_processor.process_pdf(tmp_path)
         for chunk in chunks:
             chunk["source"] = file.filename or chunk.get("source", "uploaded.pdf")

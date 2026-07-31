@@ -11,9 +11,9 @@
 - **Frontend**: Vue 3 + Pinia + Tailwind 4 + vue-i18n (en/zh-CN). 8 views: Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings / Onboarding. Mobile responsive (Chat/Quiz/Plan).
 - **Eval evidence**: P2.0 retrieval eval; primary agent-loop matrices P2.2 Plan (396 runs) + P2.3 Quiz (396 runs) = 792; P2.3 no-retriever pilot adds 396, for 1,188 raw runs total.
 - **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 6 ADRs + deployment topology + security model).
-- **Deploy**: Docker Compose (local Ollama) + fly.io fallback (BYOK cloud-only).
-- **Verification baseline**: 370 backend tests passing; 102 frontend tests across 9 Vitest files passing (472 total); frontend production build and `docker compose config` passing. Clean Compose runtime smoke passed for frontend HTML plus direct/proxied health. Host-run Ollama connection, embedding, upload, learning reset, re-upload, and Factory reset now pass; the existing Vite >500 kB chunk warning remains accepted.
-- **Recent (2026-07-28)**: Manual lifecycle validation found and fixed Settings partial hydration, environment proxy interception of local Ollama, Alembic logger suppression, and a Factory reset cross-tab identity race. Chrome verified Save → refresh → `Connected`, upload → learning reset → re-upload at 49 chunks, then Factory reset → default Settings, empty Library/counts, second-tab reload, and exactly one new anonymous user.
+- **Deploy**: verified host-run and Docker Compose paths with local Ollama. Cloud deployment is deferred; the retained Fly files are an unverified scaffold.
+- **Verification baseline**: 376 backend tests passing; 109 frontend tests across 12 Vitest files passing (485 total); frontend production build and `docker compose config` passing. Clean Compose runtime smoke passed for frontend HTML plus direct/proxied health. Host-run Ollama connection, embedding, upload, learning reset, re-upload, and Factory reset now pass; the existing Vite >500 kB chunk warning remains accepted.
+- **Recent (2026-07-28)**: PR review hardening prevents route side effects before the startup choice, makes anonymous provisioning retryable without stale Pinia overwrite, leases identity-mutating auth during reset, preserves a same-scope recovery latch after partial reset, cleans partial temp uploads, and adds Settings save confirmation. Manual lifecycle validation previously verified Save → refresh → `Connected`, upload → learning reset → re-upload at 49 chunks, then Factory reset → default Settings, empty Library/counts, second-tab reload, and exactly one new anonymous user.
 - **Next**: choose the next portfolio slice; multi-user auth remains deliberately deferred to a separate worktree.
 - **Recent (2026-07-20)**: P4.5 manual browser demo passed with user-owned PDFs — grounded Chat answer, agent-loop Quiz generation, deterministic grading, and refresh restore all verified. Follow-up hardening prevents answer/explanation disclosure during GENERATE and strips trailing retrieval metadata before explanation persistence.
 - **Recent (2026-07-02)**: P4.5 automated Product Closure implemented — Chat quiz MCQs are persisted before display, failed quiz persistence degrades safely, `persist_quiz_question` tolerates narrow local-model formatting near-misses, route tests no longer depend on live Ollama, and `docs/DEMO.md` documents the reviewer path. The final manual public-review gate was completed on 2026-07-20.
@@ -288,7 +288,7 @@ Shipped:
 - [x] Frontend auth integration: auto-provision anonymous JWT, `authHeaders()` on all API calls
 - [x] Real Google One Tap sign-in (GIS, `GET /api/auth/config`)
 - [x] Docker Compose (backend + frontend + ollama)
-- [x] fly.io fallback config (`fly.toml`, `Dockerfile.fly`)
+- [x] Initial fly.io configuration scaffold (`fly.toml`, `Dockerfile.fly`); later review classified it as deferred and unverified rather than a supported fallback
 - [x] `GET /api/health` returns `ollama_enabled` flag
 
 ### P4b — Product Polish
@@ -349,7 +349,7 @@ Design approved 2026-07-20; implementation, automated verification, and complete
 - [x] P5.1: backend summary and idempotent two-scope reset across Chroma, graph state, retriever caches, SQLite, local-mode/loopback deployment guard, Docker Chroma path fix, and unique temporary-upload cleanup.
 - [x] P5.2: Vitest foundation and capability-aware, required once-per-tab startup gate (Continue plus Start fresh when local reset is enabled).
 - [x] P5.3: Settings Danger Zone, confirmation flows, global notifications, accessibility, cross-tab lifecycle handling, and stale-request-safe client refresh.
-- [x] P5.4 automated verification and architecture/product documentation sync: full backend 370/370; frontend 102/102 across 9 files; production build and Compose render passed. Compose routes backend embeddings through `http://ollama:11434`, binds Ollama to loopback, and pre-pulls `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`. Clean image build reduced backend/frontend contexts to 47.96 kB / 4.77 kB, and runtime HTML/direct-health/proxied-health smoke returned HTTP 200; the existing Vite chunk warning is accepted.
+- [x] P5.4 automated verification and architecture/product documentation sync: full backend 376/376; frontend 109/109 across 12 files; production build and Compose render passed. Compose routes backend embeddings through `http://ollama:11434`, binds Ollama to loopback, and pre-pulls `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`. Clean image build reduced backend/frontend contexts to 47.96 kB / 4.77 kB, and runtime HTML/direct-health/proxied-health smoke returned HTTP 200; the existing Vite chunk warning is accepted.
 - [x] P5.4 destructive browser acceptance: startup choice, learning reset, cross-tab acknowledgement, Settings preservation, 49-chunk re-import, Factory reset, second-tab reload, Settings removal, empty learning state, and convergence on exactly one new anonymous user passed in Chrome on 2026-07-28.
 
 **Deferred after P5:** a separate `feature/multi-user-auth` worktree for guest upgrade, Google OAuth, SQL/Chroma ownership, legacy migration, and data-continuity tests.

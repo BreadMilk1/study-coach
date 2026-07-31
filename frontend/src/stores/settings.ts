@@ -47,7 +47,7 @@ export async function getAccessToken(): Promise<string> {
   }
   // No token yet — provision anonymous
   if (!_tokenPromise) {
-    _tokenPromise = (async () => {
+    const provisioning = (async () => {
       const fp = crypto.randomUUID()
       const stored = localStorage.getItem('study-coach:fingerprint')
       const fingerprint = stored || fp
@@ -67,6 +67,10 @@ export async function getAccessToken(): Promise<string> {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(existing))
       return access_token as string
     })()
+    _tokenPromise = provisioning
+    void provisioning.catch(() => {
+      if (_tokenPromise === provisioning) _tokenPromise = null
+    })
   }
   return _tokenPromise
 }
@@ -157,6 +161,16 @@ export const useSettings = defineStore('settings', {
   state: () => loadInitial(),
   actions: {
     persist() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY)
+        const stored = raw ? normalizeSettings(JSON.parse(raw)) : null
+        if (stored?.accessToken && stored.accessToken !== this.accessToken) {
+          this.accessToken = stored.accessToken
+          this.tier = stored.tier
+        }
+      } catch {
+        // Persist the active state when no valid stored identity is available.
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.$state))
     },
     setToolCapable(capable: boolean) {

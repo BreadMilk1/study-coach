@@ -2128,7 +2128,7 @@ git commit -m "feat: add local data danger zone"
 Add an ADR covering:
 
 ```text
-P5 is a single-user, local-first instance boundary. Summary is readable with a strict signed bearer token; global reset is disabled unless STUDY_COACH_LOCAL_MODE=1. Docker Compose enables it only behind 127.0.0.1 host binding, while Fly keeps it disabled. Reset order is Chroma, complete in-memory retriever/checkpointer replacement, then one child-first SQLite transaction. This is idempotent recovery, not a cross-store transaction. P5 supports one backend worker and does not enforce request source IP.
+P5 is a single-user, local-first instance boundary. Summary is readable with a strict signed bearer token; global reset is disabled unless STUDY_COACH_LOCAL_MODE=1. Docker Compose enables it only behind 127.0.0.1 host binding; the deferred Fly scaffold keeps it disabled but is not a supported deployment. Reset order is Chroma, complete in-memory retriever/checkpointer replacement, then one child-first SQLite transaction. This is idempotent recovery, not a cross-store transaction. P5 supports one backend worker and does not enforce request source IP.
 ```
 
 Document the complete count fields, both scopes, stable 403/409/500 error codes, strict no-fallback auth, and the future requirement to replace global reset when per-user Chroma ownership is introduced.
@@ -2211,15 +2211,29 @@ git commit -m "docs: close p5 local-first data lifecycle"
 
 ## Final Release Gate
 
+### PR review remediation (2026-07-28)
+
+The implementation review added these release requirements without changing the approved product direction:
+
+- Do not mount `RouterView` until the startup decision unlocks the workspace; a modal overlay alone does not prevent child lifecycle side effects.
+- Anonymous token provisioning must clear its cached promise after rejection, and delayed provisioning must not be overwritten by a Settings store created from stale storage.
+- Identity-mutating auth POST routes share the data-operation lease; `/api/auth/config` remains readable during reset.
+- Once destructive reset work begins, a failure leaves a scope-specific recovery latch. Shared operations and the other reset scope return `409 reset_recovery_required`; the frontend restores a blocking same-scope Retry after reload. The latch clears only after successful same-scope completion.
+- Assign the per-request upload temp path before writing so partial-write exceptions still remove the exact file.
+- Settings Save emits the existing notification-store success toast.
+- The Fly files are documented as a deferred, unverified scaffold. Docker Compose and the host-run workflow are the supported deployment paths for this phase.
+
 Before pushing or merging, verify all of the following:
 
 - Missing or invalid bearer tokens never reach summary/reset and never fall back to `default-user`.
 - `STUDY_COACH_LOCAL_MODE` defaults off; reset-disabled startup skips the gate and hides Danger Zone.
-- Docker Compose is loopback-only for backend host traffic; Fly explicitly disables reset.
+- Docker Compose is loopback-only for backend host traffic; the deferred Fly scaffold keeps reset disabled and is not claimed as a working deployment.
 - Summary and reset report all 15 count fields, including topics, mastery, citations, milestones, and events.
 - Foreign-key-on tests prove `plan_events` and `plan_milestones` are deleted before topics.
 - Active learning operations and reset are mutually exclusive for the full response lifetime.
+- Identity-mutating auth routes cannot create or mutate user rows during reset.
 - Chroma is cleared before SQLite, complete retriever/checkpointer references are replaced, and retry finishes partial reset.
+- Partial reset failure blocks shared work and wrong-scope reset until the required scope succeeds, including after a frontend reload.
 - Start fresh always uses learning scope; factory browser keys survive backend failure and clear only after success.
 - Every other tab is invalidated; remote learning reset requires acknowledgement and remote factory reset reloads.
 - The startup dialog cannot be bypassed with Esc or backdrop and has keyboard-reachable choices.

@@ -57,6 +57,32 @@ def test_anonymous_login_same_fingerprint_same_user(client):
     assert r1.json()["user_id"] == r2.json()["user_id"]
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/auth/anonymous", {"fingerprint": "reset-race"}),
+        ("/api/auth/google", {"credential": "fake"}),
+        (
+            "/api/auth/upgrade",
+            {"credential": "fake", "fingerprint": "reset-race"},
+        ),
+    ],
+)
+def test_user_writing_auth_routes_are_rejected_during_reset(app, client, path, payload):
+    with app.state.data_lifecycle_gate.exclusive_reset():
+        response = client.post(path, json=payload)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "reset_in_progress"
+
+
+def test_auth_config_remains_available_during_reset(app, client):
+    with app.state.data_lifecycle_gate.exclusive_reset():
+        response = client.get("/api/auth/config")
+
+    assert response.status_code == 200
+
+
 def test_protected_route_accepts_valid_token(client):
     token = issue_token("test-user-id", "member")
     resp = client.get(

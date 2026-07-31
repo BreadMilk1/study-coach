@@ -12,6 +12,12 @@ class ResetInProgress(RuntimeError):
     pass
 
 
+class ResetRecoveryRequired(ResetInProgress):
+    def __init__(self, required_scope: "ResetScope") -> None:
+        self.required_scope = required_scope
+        super().__init__(f"Retry the incomplete {required_scope} reset")
+
+
 class DataOperationInProgress(RuntimeError):
     pass
 
@@ -40,12 +46,15 @@ class DataLifecycleGate:
         self._lock = Lock()
         self._active_operations = 0
         self._reset_active = False
+        self._recovery_scope: ResetScope | None = None
 
     @contextmanager
     def shared_operation(self) -> Iterator[None]:
         with self._lock:
             if self._reset_active:
                 raise ResetInProgress("A data reset is in progress")
+            if self._recovery_scope is not None:
+                raise ResetRecoveryRequired(self._recovery_scope)
             self._active_operations += 1
         try:
             yield
@@ -54,18 +63,29 @@ class DataLifecycleGate:
                 self._active_operations -= 1
 
     @contextmanager
-    def exclusive_reset(self) -> Iterator[None]:
+    def exclusive_reset(self, scope: ResetScope | None = None) -> Iterator[None]:
         with self._lock:
             if self._reset_active:
                 raise ResetInProgress("A data reset is in progress")
             if self._active_operations:
                 raise DataOperationInProgress("A data operation is in progress")
+            if self._recovery_scope is not None and scope != self._recovery_scope:
+                raise ResetRecoveryRequired(self._recovery_scope)
             self._reset_active = True
         try:
             yield
         finally:
             with self._lock:
                 self._reset_active = False
+
+    def mark_recovery_required(self, scope: ResetScope) -> None:
+        with self._lock:
+            self._recovery_scope = scope
+
+    def complete_reset(self, scope: ResetScope) -> None:
+        with self._lock:
+            if self._recovery_scope == scope:
+                self._recovery_scope = None
 
 
 class ResetCoordinator:
@@ -118,7 +138,7 @@ class ResetCoordinator:
             logger.exception("Failed to recover checkpointer after publish failure")
 
     def reset(self, scope: ResetScope) -> ResetResult:
-        with self.gate.exclusive_reset():
+        with self.gate.exclusive_reset(scope):
             try:
                 counts = dict(self.repository.count_all())
             except Exception as exc:
@@ -127,6 +147,7 @@ class ResetCoordinator:
             try:
                 vectors = self.runtime.vector_count()
                 new_checkpointer = self.checkpointer_factory()
+                self.gate.mark_recovery_required(scope)
                 self.runtime.reset_empty()
             except Exception as exc:
                 raise ResetStageError("chroma") from exc
@@ -145,6 +166,7 @@ class ResetCoordinator:
             except Exception as exc:
                 self._raise_sqlite_stage(exc)
 
+            self.gate.complete_reset(scope)
             deleted = {**counts, "vectors": vectors}
             if not include_users:
                 deleted["users"] = 0

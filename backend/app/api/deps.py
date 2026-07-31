@@ -4,7 +4,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.auth import decode_token
-from app.data_lifecycle import ResetInProgress
+from app.data_lifecycle import ResetInProgress, ResetRecoveryRequired
 from app.db.repositories import (
     GoalRepository,
     MasteryRepository,
@@ -91,6 +91,15 @@ def data_operation_lease(
     try:
         with gate.shared_operation():
             yield
+    except ResetRecoveryRequired as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "reset_recovery_required",
+                "required_scope": exc.required_scope,
+                "message": "A previous data reset is incomplete. Retry that reset.",
+            },
+        ) from None
     except ResetInProgress:
         raise HTTPException(
             409,
