@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 411 backend tests and 130 frontend tests (541 total); production build passing. Automated remediation and current-head Chrome acceptance verified 2026-07-31.
+> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 411 backend tests and 131 frontend tests (542 total); production build passing. Automated remediation and current-head Chrome acceptance verified 2026-07-31.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (2026-07-31):** 411 backend tests and 130 frontend tests across 14 Vitest files passing (541 total); frontend production build passing (existing >500 kB chunk warning accepted). Automated PR remediation and current-head Chrome acceptance are complete. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
+**Current baseline (2026-07-31):** 411 backend tests and 131 frontend tests across 15 Vitest files passing (542 total); frontend production build passing (existing >500 kB chunk warning accepted). Automated PR remediation and current-head Chrome acceptance are complete. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
 
 ---
 
@@ -164,11 +164,11 @@ erDiagram
 Two scopes share that backend ordering:
 
 - `learning`: deletes all learning records, source chunks, vectors, retriever caches, and checkpoint state while preserving the local user row and browser model/provider/API/language/interface settings.
-- `factory`: deletes the learning scope plus backend user rows; the initiating tab stages the shared replacement fingerprint before reset, then clears old browser identity/settings keys only after backend success. Receiving tabs clear only their own session state and reload. The staged target survives local clearing and is reused by response-lost or delayed tabs, so all tabs converge on one anonymous first-run user. If initiating browser cleanup fails after backend completion, broadcast is still attempted and the initiating tab remains in the retryable error state rather than claiming completion.
+- `factory`: deletes the learning scope plus backend user rows; the initiating tab stages the shared replacement fingerprint before reset, then clears old browser identity/settings keys only after backend success. Receiving tabs clear only their own session state and reload. The staged target survives local clearing and is reused by response-lost or delayed tabs, so all tabs converge on one anonymous first-run user. If initiating browser cleanup fails after backend completion, the completion broadcast is withheld and the initiating tab remains in the retryable error state.
 
 Summary and reset responses expose the same 15 count fields: `users`, `documents`, `source_chunks`, `vectors`, `chat_sessions`, `messages`, `citations`, `goals`, `topics`, `plans`, `plan_milestones`, `plan_events`, `questions`, `mastery`, and `mistakes`. `source_chunks` is the sum of SQL `documents.chunks_count`; `vectors` is the live Chroma count, so interrupted operations and legacy/orphaned embeddings can make them differ. `has_learning_data` ignores a user row by itself but is true for any other learning row or vector. Summary also includes `current_user_exists` (boolean for the calling signed bearer only — no user id is returned) so the frontend can detect a stale Factory-reset identity before unlocking the workspace.
 
-**Consequences:** The startup gate, Settings Danger Zone, two-scope confirmations, cross-tab invalidation, and retry behavior can describe exactly what the current storage model does. The routed page is not mounted until the startup decision unlocks the workspace, so child lifecycle hooks cannot perform requests behind the gate. A reload during recovery reopens the blocking reset error with only the required-scope Retry action. Summary remains readable when reset is disabled, but `reset_enabled=false` makes the frontend skip the startup gate and hide the Danger Zone. A future per-user Chroma design must add ownership metadata and filtered retrieval throughout dense/BM25/reranking/tool paths **and replace this global-reset contract**; it cannot layer per-user deletion on the P5 coordinator unchanged.
+**Consequences:** The startup gate, Settings Danger Zone, two-scope confirmations, cross-tab invalidation, and retry behavior can describe exactly what the current storage model does. The routed page is not mounted until the startup decision unlocks the workspace, so child lifecycle hooks cannot perform requests behind the gate. Chat also cancels its post-restore auto-prompt continuation when the routed view is unmounted, preventing an external reset from being followed by a fresh write before acknowledgement. A reload during recovery reopens the blocking reset error with only the required-scope Retry action. Summary remains readable when reset is disabled, but `reset_enabled=false` makes the frontend skip the startup gate and hide the Danger Zone. A future per-user Chroma design must add ownership metadata and filtered retrieval throughout dense/BM25/reranking/tool paths **and replace this global-reset contract**; it cannot layer per-user deletion on the P5 coordinator unchanged.
 
 ---
 
@@ -370,7 +370,7 @@ Deferred cloud scaffold:
       └── retrieval still requires an embedding-provider design
 ```
 
-Current-head Path A Chrome verification (2026-07-31): `gemma4:e4b` + `qwen2.5:7b` judge + `nomic-embed-text` — Settings Connected and tool calling supported; 49/61-chunk indexing; grounded Chat; Quiz/mistake/mastery; Plan/milestones/events; learning reset, re-upload, cross-tab acknowledgement; Factory defaults/reload; old-JWT refusal/retry; and concurrent three-tab recovery to one user. Historical Compose runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200; it did not verify Ollama embedding or generation inside the container. Automated remediation re-verified on 2026-07-31 (411/130/541, build, `docker compose config`). On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
+Current-head Path A Chrome verification (2026-07-31): `gemma4:e4b` + `qwen2.5:7b` judge + `nomic-embed-text` — Settings Connected and tool calling supported; 49/61-chunk indexing; grounded Chat; Quiz/mistake/mastery; Plan/milestones/events; learning reset, re-upload, cross-tab acknowledgement; Factory defaults/reload; old-JWT refusal/retry; and concurrent three-tab recovery to one user. Historical Compose runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200; it did not verify Ollama embedding or generation inside the container. Automated remediation re-verified on 2026-07-31 (411/131/542, build, `docker compose config`). On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
 
 ---
 

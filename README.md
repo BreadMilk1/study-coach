@@ -13,7 +13,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-541%20passed-10b981)]()
+[![Tests](https://img.shields.io/badge/Tests-542%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -154,7 +154,7 @@ cd backend
 uv run pytest -q        # 411 tests, no live Ollama required
 
 cd ../frontend
-pnpm test --run         # 129 tests across 14 Vitest files
+pnpm test --run         # 131 tests across 15 Vitest files
 pnpm build              # typecheck + production build
 ```
 
@@ -299,7 +299,7 @@ study-coach/
 - **Agent loop treated empirically**: 792 runs across the two primary matrices, plus a 396-run P2.3 no-retriever pilot (1,188 raw runs total) — not assumed, measured
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace / Agent Run, and EmptyCorpusBanner
-- **Portfolio-grade engineering**: 541 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
+- **Portfolio-grade engineering**: 542 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
 
 ## Origin
 

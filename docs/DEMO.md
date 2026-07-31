@@ -38,7 +38,7 @@ git diff --check
 Result:
 
 - Full backend: 411 tests passed.
-- Frontend: 130 Vitest tests across 14 files passed; production build passed. Total automated tests: 541.
+- Frontend: 131 Vitest tests across 15 files passed; production build passed. Total automated tests: 542.
 - Compose render (`docker compose config --quiet`) passed.
 - Existing Vite warning for chunks larger than 500 kB is accepted for this stage.
 - Current-head Chrome acceptance passed on Path A with `gemma4:e4b`, `qwen2.5:7b` judge, and `nomic-embed-text`; this is not a Compose model-runtime claim.
