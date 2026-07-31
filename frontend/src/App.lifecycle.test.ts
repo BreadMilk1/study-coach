@@ -14,4 +14,22 @@ describe('application lifecycle boundary', () => {
       /<RouterView\s+v-if="lifecycle\.workspaceUnlocked"\s*\/>/,
     )
   })
+
+  it('keeps lifecycle dialogs synchronized with store state when Escape is pressed', () => {
+    const startupGateSource = readFileSync(
+      fileURLToPath(new URL('./components/StartupDataGate.vue', import.meta.url)),
+      'utf8',
+    )
+    const resetDialogSource = readFileSync(
+      fileURLToPath(new URL('./components/ResetConfirmDialog.vue', import.meta.url)),
+      'utf8',
+    )
+
+    expect(startupGateSource).toMatch(
+      /@keydown\.esc\.prevent\.stop="preventCancel"/,
+    )
+    expect(resetDialogSource).toMatch(
+      /@keydown\.esc\.prevent\.stop="handleCancel"/,
+    )
+  })
 })

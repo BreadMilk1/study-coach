@@ -15,7 +15,9 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk
 
+from app.auth import issue_token
 from app.main import create_app
+from tests.helpers import ensure_user
 
 
 class StubRetriever:
@@ -107,6 +109,7 @@ def _seed_default_document() -> None:
     from app.db.session import session_scope
 
     with session_scope() as session:
+        ensure_user(session, "default-user")
         DocumentRepository(session).create(
             user_id="default-user",
             filename="fixture.pdf",
@@ -138,6 +141,11 @@ def _make_app(
         "llm": stub_judge_llm,
         "same_model": same_model,
     }
+    if not seed_document:
+        from app.db.session import session_scope
+
+        with session_scope() as session:
+            ensure_user(session, "default-user")
     if seed_document:
         _seed_default_document()
     return app
@@ -154,7 +162,10 @@ def app(tmp_path, stub_retriever, stub_llm, stub_judge_llm, monkeypatch):
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    return TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    )
 
 
 def _read_sse_events(resp) -> list[dict]:
@@ -439,7 +450,10 @@ def test_chat_without_user_documents_refuses_before_retrieval(
         same_model=False,
         seed_document=False,
     )
-    client = TestClient(app)
+    client = TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    )
 
     with client.stream("POST", "/api/chat",
                        json={"message": "What is HyDE?"},
@@ -565,7 +579,10 @@ def test_chat_emits_same_model_warning_right_after_citations_on_tutor_path(
     tokens) so the user can see the self-preference risk inline in the answer."""
     app = _make_app(tmp_path, monkeypatch, stub_retriever, stub_llm, stub_judge_llm,
                     same_model=True)
-    client = TestClient(app)
+    client = TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    )
 
     with client.stream("POST", "/api/chat",
                        json={"message": "What is HyDE?"},
@@ -594,7 +611,10 @@ def test_chat_omits_warning_when_x_judge_model_explicitly_set(
     """When the user has set x-judge-model to a distinct model, no warning fires."""
     app = _make_app(tmp_path, monkeypatch, stub_retriever, stub_llm, stub_judge_llm,
                     same_model=False)
-    client = TestClient(app)
+    client = TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    )
 
     headers = {**_HEADERS, "x-judge-model": "qwen2.5:7b"}
     with client.stream("POST", "/api/chat",
@@ -618,7 +638,10 @@ def test_chat_stub_paths_do_not_emit_warning_even_when_same_model(
     The warning gate keys on non-empty citations (proxy for real LLM output)."""
     app = _make_app(tmp_path, monkeypatch, stub_retriever, stub_llm, stub_judge_llm,
                     same_model=True)
-    client = TestClient(app)
+    client = TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    )
 
     with client.stream("POST", "/api/chat",
                        json={"message": "测我一下"},

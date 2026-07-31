@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import issue_token
 from app.main import create_app
+from tests.helpers import ensure_user
 
 
 @pytest.fixture
@@ -16,6 +17,9 @@ def client(tmp_path, monkeypatch):
     session_mod._engine = None
     session_mod._SessionLocal = None
     app = create_app()
+    from app.db.session import session_scope
+    with session_scope() as session:
+        ensure_user(session, "default-user")
     with TestClient(app) as c:
         yield c
 

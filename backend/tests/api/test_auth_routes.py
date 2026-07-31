@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import issue_token
 from app.main import create_app
+from tests.helpers import ensure_user
 
 
 class StubRetriever:
@@ -84,6 +85,10 @@ def test_auth_config_remains_available_during_reset(app, client):
 
 
 def test_protected_route_accepts_valid_token(client):
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "test-user-id")
     token = issue_token("test-user-id", "member")
     resp = client.get(
         "/api/documents",

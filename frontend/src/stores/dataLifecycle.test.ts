@@ -8,6 +8,7 @@ function summary(overrides: Partial<Awaited<ReturnType<LifecycleDependencies['su
   return {
     reset_enabled: true,
     has_learning_data: true,
+    current_user_exists: true,
     users: 1,
     documents: 1,
     source_chunks: 3,
@@ -36,6 +37,7 @@ function dependencies(overrides: Partial<LifecycleDependencies> = {}): Lifecycle
     clearChoice: () => undefined,
     clearFactory: () => undefined,
     clearFactorySession: () => undefined,
+    stageFactoryIdentity: async () => 'factory-recovery-fingerprint',
     provisionFactoryIdentity: async () => 'factory-token',
     invalidateProvisioning: () => undefined,
     broadcast: () => undefined,
@@ -157,6 +159,98 @@ describe('startup inspection', () => {
     expect(store.phase).toBe('ready')
     expect(store.workspaceUnlocked).toBe(true)
     expect(store.canStartFresh).toBe(false)
+  })
+
+  it('provisions a new identity before unlock after factory response-lost reload', async () => {
+    const calls: string[] = []
+    let summaryAttempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => {
+        summaryAttempts += 1
+        if (summaryAttempts === 1) {
+          return summary({
+            users: 0,
+            has_learning_data: false,
+            current_user_exists: false,
+            documents: 0,
+            source_chunks: 0,
+            vectors: 0,
+          })
+        }
+        return summary({
+          users: 1,
+          has_learning_data: false,
+          current_user_exists: true,
+          documents: 0,
+          source_chunks: 0,
+          vectors: 0,
+        })
+      },
+      invalidateProvisioning: () => { calls.push('invalidate') },
+      clearFactory: () => { calls.push('clearFactory') },
+      stageFactoryIdentity: async (forceRotate?: boolean) => {
+        calls.push(`stage:${String(forceRotate)}`)
+        return 'shared-recovery-fingerprint'
+      },
+      provisionFactoryIdentity: async (fingerprint?: string) => {
+        calls.push(`provision:${String(fingerprint)}`)
+        return 'fresh-after-lost-response'
+      },
+    }))
+
+    await store.inspect()
+
+    expect(calls).toEqual([
+      'stage:false',
+      'invalidate',
+      'clearFactory',
+      'provision:shared-recovery-fingerprint',
+    ])
+    expect(summaryAttempts).toBe(2)
+    expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
+    expect(store.summary?.current_user_exists).toBe(true)
+    expect(store.summary?.users).toBe(1)
+  })
+
+  it('keeps workspace locked when stale-identity recovery fails', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => summary({
+        users: 0,
+        has_learning_data: false,
+        current_user_exists: false,
+      }),
+      provisionFactoryIdentity: async () => {
+        throw new Error('anonymous auth failed')
+      },
+    }))
+
+    await store.inspect()
+
+    expect(store.phase).toBe('inspection_error')
+    expect(store.workspaceUnlocked).toBe(false)
+  })
+
+  it('does not clear identity on ordinary inspection network failure', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => { throw new Error('network down') },
+      invalidateProvisioning: () => { calls.push('invalidate') },
+      clearFactory: () => { calls.push('clearFactory') },
+      provisionFactoryIdentity: async () => {
+        calls.push('provision')
+        return 'should-not-run'
+      },
+    }))
+
+    await store.inspect()
+
+    expect(calls).toEqual([])
+    expect(store.phase).toBe('inspection_error')
+    expect(store.workspaceUnlocked).toBe(false)
   })
 
   it('records an explicit decision to continue existing learning data', async () => {
@@ -529,6 +623,10 @@ describe('factory reset', () => {
         calls.push(`reset:${scope}`)
         return { scope, status: 'completed', deleted: summary() }
       },
+      stageFactoryIdentity: async (forceRotate?: boolean) => {
+        calls.push(`stage:${String(forceRotate)}`)
+        return 'shared-recovery-fingerprint'
+      },
       broadcast: scope => calls.push(`broadcast:${scope}`),
       pause: async milliseconds => {
         calls.push(`pause:${milliseconds}:${store.phase}`)
@@ -537,8 +635,8 @@ describe('factory reset', () => {
       },
       clearFactory: () => calls.push('clear-factory'),
       invalidateProvisioning: () => calls.push('invalidate'),
-      provisionFactoryIdentity: async () => {
-        calls.push('provision-identity')
+      provisionFactoryIdentity: async (fingerprint?: string) => {
+        calls.push(`provision-identity:${String(fingerprint)}`)
         return 'new-token'
       },
       reload: () => calls.push('reload'),
@@ -549,10 +647,11 @@ describe('factory reset', () => {
     await store.confirmFactoryReset()
 
     expect(calls).toEqual([
+      'stage:true',
       'reset:factory',
       'invalidate',
       'clear-factory',
-      'provision-identity',
+      'provision-identity:shared-recovery-fingerprint',
       'broadcast:factory',
       'pause:750:factory_restarting',
       'after-cancel:factory_restarting',
@@ -664,13 +763,17 @@ describe('factory reset', () => {
 
   it('does not let a stale local factory reset continue after an external reset takes over', async () => {
     const calls: string[] = []
-    let finishBackend!: (result: Awaited<ReturnType<LifecycleDependencies['reset']>>) => void
-    const backend = new Promise<Awaited<ReturnType<LifecycleDependencies['reset']>>>(resolve => {
-      finishBackend = resolve
+    let finishStaging!: (fingerprint: string) => void
+    const staging = new Promise<string>(resolve => {
+      finishStaging = resolve
     })
     const store = useDataLifecycle()
     store.initialize(dependencies({
-      reset: scope => { calls.push(`reset:${scope}`); return backend },
+      stageFactoryIdentity: async () => staging,
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        return { scope, status: 'completed', deleted: summary() }
+      },
       broadcast: scope => calls.push(`broadcast:${scope}`),
       pause: async () => { calls.push('pause') },
       clearFactory: () => calls.push('clear-factory'),
@@ -683,10 +786,10 @@ describe('factory reset', () => {
     const localReset = store.confirmFactoryReset()
 
     await store.handleExternalReset('learning')
-    finishBackend({ scope: 'factory', status: 'completed', deleted: summary() })
+    finishStaging('staged-but-cancelled')
     await localReset
 
-    expect(calls).toEqual(['reset:factory', 'clear-choice', 'client'])
+    expect(calls).toEqual(['clear-choice', 'client'])
     expect(store.phase).toBe('external_reset')
   })
 })

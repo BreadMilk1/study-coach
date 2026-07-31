@@ -1,5 +1,6 @@
 export const STARTUP_CHOICE_KEY = 'study-coach:startup-choice-made'
 export const CHAT_SESSION_KEY = 'study-coach:current-chat-session-id'
+export const FACTORY_RECOVERY_FINGERPRINT_KEY = 'study-coach:factory-recovery-fingerprint'
 
 const APP_PREFIX = 'study-coach:'
 let learningStateEpoch = 0
@@ -43,10 +44,10 @@ export function clearStartupChoice(session: Storage): void {
   session.removeItem(STARTUP_CHOICE_KEY)
 }
 
-function clearAppState(storage: Storage): void {
+function clearAppState(storage: Storage, preservedKeys: ReadonlySet<string> = new Set()): void {
   const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
   for (const key of keys) {
-    if (key?.startsWith(APP_PREFIX)) storage.removeItem(key)
+    if (key?.startsWith(APP_PREFIX) && !preservedKeys.has(key)) storage.removeItem(key)
   }
 }
 
@@ -55,6 +56,6 @@ export function clearFactorySessionState(session: Storage): void {
 }
 
 export function clearFactoryBrowserState(local: Storage, session: Storage): void {
-  clearAppState(local)
+  clearAppState(local, new Set([FACTORY_RECOVERY_FINGERPRINT_KEY]))
   clearFactorySessionState(session)
 }

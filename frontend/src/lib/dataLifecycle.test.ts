@@ -71,10 +71,11 @@ describe('browser state clearing', () => {
     expect(local.getItem('unrelated')).toBe('keep-me')
   })
 
-  it('factory clear removes every app key from local and session storage only', () => {
+  it('factory clear preserves only the staged recovery fingerprint among app keys', () => {
     const local = memoryStorage({
       'study-coach:settings': '{}',
       [CHAT_SESSION_KEY]: 'session-id',
+      'study-coach:factory-recovery-fingerprint': 'next-fingerprint',
       unrelated: 'local-value',
     })
     const session = memoryStorage({
@@ -85,7 +86,8 @@ describe('browser state clearing', () => {
 
     clearFactoryBrowserState(local, session)
 
-    expect(local.length).toBe(1)
+    expect(local.length).toBe(2)
+    expect(local.getItem('study-coach:factory-recovery-fingerprint')).toBe('next-fingerprint')
     expect(local.getItem('unrelated')).toBe('local-value')
     expect(session.length).toBe(1)
     expect(session.getItem('unrelated')).toBe('session-value')

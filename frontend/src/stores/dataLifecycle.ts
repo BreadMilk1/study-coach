@@ -28,7 +28,8 @@ export interface LifecycleDependencies {
   clearChoice: () => void
   clearFactory: () => void
   clearFactorySession: () => void
-  provisionFactoryIdentity: () => Promise<string>
+  stageFactoryIdentity: (forceRotate?: boolean) => Promise<string>
+  provisionFactoryIdentity: (fingerprint?: string) => Promise<string>
   invalidateProvisioning: () => void
   broadcast: (scope: ResetScope) => void
   reload: () => void
@@ -111,8 +112,31 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
       this.workspaceUnlocked = false
       this.error = null
       try {
-        const summary = await dependencies().summary()
+        let summary = await dependencies().summary()
         if (generation !== this.operationGeneration) return
+
+        // Factory reset may complete while the success response is lost. The
+        // stale JWT can still call summary (row-less retry semantics) and see
+        // empty learning data — but must not unlock until a live identity exists.
+        // Only this explicit summary flag triggers re-provision (not arbitrary 401s).
+        if (summary.current_user_exists === false) {
+          const recoveryFingerprint = await dependencies().stageFactoryIdentity(false)
+          if (generation !== this.operationGeneration) return
+          dependencies().invalidateProvisioning()
+          dependencies().clearFactory()
+          await dependencies().provisionFactoryIdentity(recoveryFingerprint)
+          if (generation !== this.operationGeneration) return
+          summary = await dependencies().summary()
+          if (generation !== this.operationGeneration) return
+          if (summary.current_user_exists === false) {
+            this.summary = summary
+            this.error = new Error('Local identity could not be restored after factory reset.')
+            this.phase = 'inspection_error'
+            this.workspaceUnlocked = false
+            return
+          }
+        }
+
         this.summary = summary
         const decision = resolveStartupDecision({
           resetEnabled: this.summary.reset_enabled,
@@ -132,6 +156,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         } else {
           this.phase = 'inspection_error'
         }
+        this.workspaceUnlocked = false
       }
     },
     async refreshSummary() {
@@ -242,6 +267,10 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
       this.phase = 'resetting'
       this.error = null
       try {
+        // Stage the replacement identity before the destructive request so a
+        // lost success response and delayed tabs still share one fingerprint.
+        const recoveryFingerprint = await dependencies().stageFactoryIdentity(true)
+        if (generation !== this.operationGeneration) return
         const result = await dependencies().reset('factory')
         backendCompleted = true
         this.recoveryScope = null
@@ -249,7 +278,7 @@ export const useDataLifecycle = defineStore('dataLifecycle', {
         this.lastResult = result
         dependencies().invalidateProvisioning()
         dependencies().clearFactory()
-        await dependencies().provisionFactoryIdentity()
+        await dependencies().provisionFactoryIdentity(recoveryFingerprint)
         if (generation !== this.operationGeneration) return
         dependencies().broadcast('factory')
         this.phase = 'factory_restarting'

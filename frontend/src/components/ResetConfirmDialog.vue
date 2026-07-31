@@ -77,6 +77,7 @@ onBeforeUnmount(() => {
       aria-labelledby="reset-dialog-title"
       :aria-busy="phase === 'resetting' || phase === 'factory_restarting'"
       @cancel="handleCancel"
+      @keydown.esc.prevent.stop="handleCancel"
       @click.self.prevent
     >
       <section class="p-6 sm:p-7">

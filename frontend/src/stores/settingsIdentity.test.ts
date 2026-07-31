@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { memoryStorage } from '../test/memoryStorage'
 
-function authResponse(token: string, tier = 'guest'): Response {
+const nativeSubtle = globalThis.crypto.subtle
+
+function authResponse(token: string, tier = 'guest', userId = 'user-1'): Response {
   return {
     ok: true,
-    json: vi.fn().mockResolvedValue({ access_token: token, tier }),
+    json: vi.fn().mockResolvedValue({ access_token: token, user_id: userId, tier }),
   } as unknown as Response
 }
 
@@ -55,6 +57,110 @@ describe('anonymous identity provisioning', () => {
       accessToken: 'new-token',
       tier: 'guest',
     })
+  })
+
+  it('converges multi-tab factory recovery without resurrecting a deleted identity', async () => {
+    const sharedStorage = memoryStorage()
+    sharedStorage.setItem('study-coach:fingerprint', 'pre-factory-fp')
+    sharedStorage.setItem('study-coach:settings', JSON.stringify({
+      accessToken: 'stale-deleted-user-token',
+      provider: 'ollama',
+      model: 'gemma3:4b',
+    }))
+
+    // Tab B starts provisioning against the pre-factory fingerprint.
+    vi.resetModules()
+    vi.stubGlobal('localStorage', sharedStorage)
+    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'tab-b-fp') })
+    let finishTabB!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => {
+      finishTabB = resolve
+    })))
+    const tabB = await import('./settings')
+    // Clear token so Tab B actually enters anonymous provisioning.
+    sharedStorage.setItem('study-coach:settings', JSON.stringify({
+      provider: 'ollama',
+      model: 'gemma3:4b',
+    }))
+    const staleB = tabB.getAccessToken()
+
+    // Tab A recovers first via factory identity provision (new fingerprint + token).
+    vi.resetModules()
+    vi.stubGlobal('localStorage', sharedStorage)
+    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'tab-a-recovery-fp') })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(authResponse('tab-a-recovery-token')))
+    const tabA = await import('./settings')
+    await expect(tabA.provisionFactoryIdentity()).resolves.toBe('tab-a-recovery-token')
+
+    finishTabB(authResponse('tab-b-would-resurrect-old'))
+    await expect(staleB).rejects.toThrow('identity provisioning invalidated')
+
+    expect(sharedStorage.getItem('study-coach:fingerprint')).toBe('tab-a-recovery-fp')
+    expect(JSON.parse(sharedStorage.getItem('study-coach:settings') ?? '{}')).toMatchObject({
+      accessToken: 'tab-a-recovery-token',
+    })
+    expect(JSON.parse(sharedStorage.getItem('study-coach:settings') ?? '{}').accessToken)
+      .not.toBe('stale-deleted-user-token')
+    expect(JSON.parse(sharedStorage.getItem('study-coach:settings') ?? '{}').accessToken)
+      .not.toBe('tab-b-would-resurrect-old')
+  })
+
+  it('stages one recovery fingerprint before concurrent tabs create backend users', async () => {
+    const sharedStorage = memoryStorage({
+      'study-coach:fingerprint': 'pre-factory-fp',
+      'study-coach:settings': JSON.stringify({
+        accessToken: 'stale-deleted-user-token',
+        provider: 'ollama',
+        model: 'gemma3:4b',
+      }),
+    })
+    const backendUsers = new Map<string, string>()
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { fingerprint?: string }
+      const fingerprint = body.fingerprint ?? ''
+      let userId = backendUsers.get(fingerprint)
+      if (!userId) {
+        userId = `user-${backendUsers.size + 1}`
+        backendUsers.set(fingerprint, userId)
+      }
+      return authResponse(`token-${userId}`, 'guest', userId)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('localStorage', sharedStorage)
+    vi.stubGlobal('crypto', {
+      randomUUID: vi.fn()
+        .mockReturnValueOnce('tab-a-random-fingerprint')
+        .mockReturnValueOnce('tab-b-random-fingerprint'),
+      subtle: nativeSubtle,
+    })
+
+    vi.resetModules()
+    const tabA = await import('./settings')
+    vi.resetModules()
+    const tabB = await import('./settings')
+
+    const recoveryA = await tabA.stageFactoryRecoveryFingerprint()
+
+    // Factory clear removes the stale identity, but the staged target survives
+    // for a second tab whose stale summary resolves later.
+    sharedStorage.removeItem('study-coach:settings')
+    sharedStorage.removeItem('study-coach:fingerprint')
+    const recoveryB = await tabB.stageFactoryRecoveryFingerprint()
+    expect(recoveryA).toBe(recoveryB)
+
+    const [tokenA, tokenB] = await Promise.all([
+      tabA.provisionFactoryIdentity(recoveryA),
+      tabB.provisionFactoryIdentity(recoveryB),
+    ])
+
+    expect(backendUsers.size).toBe(1)
+    expect(tokenA).toBe(tokenB)
+    expect(sharedStorage.getItem('study-coach:fingerprint')).toBe(recoveryA)
+
+    const nextResetFingerprint = await tabA.stageFactoryRecoveryFingerprint(true)
+    expect(nextResetFingerprint).not.toBe(recoveryA)
+    expect(sharedStorage.getItem('study-coach:factory-recovery-fingerprint'))
+      .toBe(nextResetFingerprint)
   })
 
   it('does not let a stale tab write old token after shared fingerprint changes', async () => {

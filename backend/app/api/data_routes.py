@@ -19,7 +19,7 @@ from app.data_lifecycle import (
     ResetRecoveryRequired,
     ResetStageError,
 )
-from app.db.repositories import DataLifecycleRepository
+from app.db.repositories import DataLifecycleRepository, UserRepository
 from app.db.session import get_session
 
 
@@ -49,6 +49,9 @@ class DataCounts(BaseModel):
 class DataSummary(DataCounts):
     reset_enabled: bool
     has_learning_data: bool
+    # True when the signed bearer still maps to a user row. False after factory
+    # reset deletes users; does not expose user ids or other identity fields.
+    current_user_exists: bool
 
 
 class ResetRequest(BaseModel):
@@ -85,10 +88,11 @@ def get_reset_coordinator(
 @data_router.get("/summary", response_model=DataSummary)
 def data_summary(
     _user_id: Annotated[str, Depends(require_signed_user)],
+    session: Annotated[Session, Depends(get_session)],
     coordinator: Annotated[ResetCoordinator, Depends(get_reset_coordinator)],
 ):
     try:
-        return coordinator.summary(reset_enabled=reset_enabled())
+        payload = coordinator.summary(reset_enabled=reset_enabled())
     except ResetRecoveryRequired as exc:
         raise HTTPException(
             409,
@@ -106,6 +110,10 @@ def data_summary(
                 "message": "A data reset is already in progress.",
             },
         ) from None
+    return {
+        **payload,
+        "current_user_exists": UserRepository(session).get_by_id(_user_id) is not None,
+    }
 
 
 @data_router.post("/reset", response_model=ResetResponse)

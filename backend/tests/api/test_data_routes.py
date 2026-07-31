@@ -90,6 +90,19 @@ def test_summary_accepts_signed_token_when_user_row_does_not_exist(client):
 
     assert response.status_code == 200
     assert response.json()["users"] == 0
+    assert response.json()["current_user_exists"] is False
+
+
+def test_summary_reports_current_user_exists_for_live_identity(client):
+    with session_scope() as session:
+        session.add(User(id="live-user", fingerprint="fp-live"))
+        session.commit()
+
+    response = client.get("/api/data/summary", headers=bearer("live-user"))
+
+    assert response.status_code == 200
+    assert response.json()["current_user_exists"] is True
+    assert response.json()["users"] == 1
 
 
 def test_reset_is_disabled_by_default(client):
@@ -170,7 +183,12 @@ def test_summary_reports_source_chunks_separately_from_vectors(client, app):
 
     assert response.status_code == 200
     payload = response.json()
-    assert set(payload) == COUNT_KEYS | {"reset_enabled", "has_learning_data"}
+    assert set(payload) == COUNT_KEYS | {
+        "reset_enabled",
+        "has_learning_data",
+        "current_user_exists",
+    }
+    assert payload["current_user_exists"] is True
     assert payload["source_chunks"] == 7
     assert payload["vectors"] == 3
 
@@ -466,3 +484,46 @@ def test_factory_reset_can_retry_with_same_token_after_user_is_deleted(
     assert retry_response.status_code == 200
     assert retry_response.json()["status"] == "completed"
     assert retry_response.json()["deleted"]["users"] == 0
+
+
+def test_factory_reset_old_token_cannot_recreate_learning_data(
+    client,
+    app,
+    monkeypatch,
+):
+    """Old JWT may retry factory reset, but must not write orphan learning rows."""
+    enable_reset(monkeypatch)
+    with session_scope() as session:
+        session.add(User(id="u-old", fingerprint="fp-old"))
+        session.commit()
+    headers = bearer("u-old")
+
+    reset_response = client.post(
+        "/api/data/reset",
+        headers=headers,
+        json=reset_payload("factory"),
+    )
+    assert reset_response.status_code == 200
+
+    # Response-lost retry must remain available for the same signed token.
+    retry = client.post(
+        "/api/data/reset",
+        headers=headers,
+        json=reset_payload("factory"),
+    )
+    assert retry.status_code == 200
+
+    goal_response = client.post(
+        "/api/goals",
+        headers=headers,
+        json={"title": "orphan after factory"},
+    )
+    assert goal_response.status_code in {401, 409}
+
+    summary = client.get("/api/data/summary", headers=headers)
+    assert summary.status_code == 200
+    payload = summary.json()
+    assert payload["users"] == 0
+    assert payload["goals"] == 0
+    assert payload["has_learning_data"] is False
+    assert payload["current_user_exists"] is False

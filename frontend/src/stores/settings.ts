@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 
+import { FACTORY_RECOVERY_FINGERPRINT_KEY } from '../lib/dataLifecycle'
+
 export type Provider = 'ollama' | 'openai' | 'anthropic' | 'gemini'
 export type Mode = 'agent_loop' | 'deterministic'
 
@@ -128,11 +130,39 @@ export async function getAccessToken(): Promise<string> {
   return _tokenPromise
 }
 
+async function derivedFactoryFingerprint(seed: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`study-coach:factory-recovery:${seed}`)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  const hex = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  return `factory-${hex.slice(0, 32)}`
+}
+
+/**
+ * Stage one replacement fingerprint before a Factory reset can delete the
+ * current identity. The value survives browser-state clearing so delayed tabs
+ * and response-lost reloads converge on the same backend user.
+ */
+export async function stageFactoryRecoveryFingerprint(forceRotate = false): Promise<string> {
+  const staged = localStorage.getItem(FACTORY_RECOVERY_FINGERPRINT_KEY)
+  const current = localStorage.getItem(FINGERPRINT_KEY)
+  if (staged && (!forceRotate || !current)) return staged
+
+  let seed = current
+  if (!seed) {
+    const stored = normalizeSettings(readStoredObject(localStorage.getItem(STORAGE_KEY)))
+    seed = stored.accessToken
+  }
+  const fingerprint = seed ? await derivedFactoryFingerprint(seed) : crypto.randomUUID()
+  localStorage.setItem(FACTORY_RECOVERY_FINGERPRINT_KEY, fingerprint)
+  return fingerprint
+}
+
 /** Establish a fresh local identity after factory browser clear. */
-export async function provisionFactoryIdentity(): Promise<string> {
+export async function provisionFactoryIdentity(
+  fingerprint: string = crypto.randomUUID(),
+): Promise<string> {
   invalidateAnonymousProvisioning()
   const generation = _identityGeneration
-  const fingerprint = crypto.randomUUID()
   localStorage.setItem(FINGERPRINT_KEY, fingerprint)
   const capturedFingerprint = fingerprint
   const { access_token, tier } = await requestAnonymousToken(fingerprint)
@@ -144,9 +174,9 @@ export async function provisionFactoryIdentity(): Promise<string> {
 }
 
 export function authHeaders(): Record<string, string> {
-  // Synchronous fallback: return bearer header if we have it in storage.
-  // For first-ever call, the fetch will still work because backend
-  // falls back to "default-user" when no token is present.
+  // Synchronous helper for callers that already persist a token. Learning
+  // routes require a signed bearer whose user row still exists; they do not
+  // fall back to a guest/default identity when this returns {}.
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {

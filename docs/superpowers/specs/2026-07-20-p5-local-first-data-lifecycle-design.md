@@ -101,12 +101,13 @@ The current browser-owned keys include:
 - `study-coach:settings`
 - `study-coach:tool-capable:<model>`
 - `study-coach:current-chat-session-id`
+- `study-coach:factory-recovery-fingerprint` (internal staged replacement identity)
 
 P5 adds one tab-scoped key:
 
 - `study-coach:startup-choice-made` in `sessionStorage`
 
-Clear-learning removes the current chat session key but preserves identity, settings, and tool-capability keys. Factory reset removes every `study-coach:*` key from both `localStorage` and `sessionStorage` after the backend confirms success.
+Clear-learning removes the current chat session key but preserves identity, settings, and tool-capability keys. Before Factory reset, the frontend deterministically stages one replacement fingerprint while retaining the old bearer needed for the destructive request and retry. After backend success it removes every other `study-coach:*` key from `localStorage` plus all app-owned `sessionStorage` keys, provisions against the staged target, and reloads. The staged key remains until the next Factory reset rotates it so delayed tabs use the same replacement identity.
 
 ---
 
@@ -124,12 +125,15 @@ Authentication:
 
 For P5, "strict" means a valid signed bearer token is mandatory; it does not require the referenced user row to still exist. This matters when a factory reset completed but its HTTP response was lost: the old, still-valid signed token must be able to retry the same idempotent local reset.
 
+Learning-data routes (Chat, upload, Library, Plan, Quiz, mistakes, mastery, stats) use a separate **`require_existing_user`** dependency: valid signed bearer **and** an existing `users` row. That prevents post-factory tokens from recreating orphan learning data through the legacy `"default-user"` fallback.
+
 Proposed response:
 
 ```json
 {
   "reset_enabled": true,
   "has_learning_data": true,
+  "current_user_exists": true,
   "documents": 2,
   "source_chunks": 110,
   "vectors": 297,
@@ -143,7 +147,7 @@ Proposed response:
 
 `source_chunks` is the sum recorded by current SQL document rows. `vectors` is the actual Chroma collection count. They may differ because the present collection contains legacy or orphaned embeddings; the API must not hide this difference.
 
-All counts are instance-wide, matching the global Chroma reset boundary. `has_learning_data` is true when any learning table contains rows **or** Chroma still contains vectors; a stale vector-only corpus must still trigger the startup choice.
+All counts are instance-wide, matching the global Chroma reset boundary. `has_learning_data` is true when any learning table contains rows **or** Chroma still contains vectors; a stale vector-only corpus must still trigger the startup choice. `current_user_exists` is scoped only to the calling signed bearer (boolean; no user id) so a Factory-reset response-lost reload can re-provision before unlocking the workspace, without treating arbitrary learning-route 401s as identity loss.
 
 `reset_enabled` is the frontend capability contract. Summary remains readable when reset is disabled, but Start fresh and Danger Zone actions are not rendered.
 
@@ -231,7 +235,7 @@ An anonymous token is not a meaningful authorization boundary for a global destr
 - when local-first mode is disabled, `/api/data/reset` returns `403` and the frontend hides Danger Zone reset actions;
 - a future public deployment must not reuse this global endpoint as a substitute for ownership-aware deletion.
 
-FastAPI dependencies remain the route-level enforcement point, matching the project's existing dependency injection pattern.
+> **Superseded (final implementation):** The draft below said "FastAPI dependencies remain the route-level enforcement point." **Shipped code uses pure ASGI middleware (`DataLifecycleLeaseMiddleware`) for the shared lifecycle lease** because FastAPI/Starlette parse multipart `UploadFile` bodies before request-scoped dependencies run; a Depends-based lease is too late for uploads. FastAPI dependencies remain the enforcement point for **auth** (`require_signed_user`, `require_existing_user`) and reset coordination, not for acquiring the shared lease.
 
 ---
 
@@ -265,7 +269,7 @@ SQLite rows are deleted child-first because the current schema does not provide 
 5. `documents`
 6. `users` for factory scope only
 
-The exact repository calls should follow model foreign keys rather than relying on this list blindly; the implementation plan must verify the current schema before writing the first deletion test.
+The exact repository calls should follow model foreign keys rather than relying on this list blindly; the implementation plan must verify the current schema before writing the first deletion test. Application SQLite connections enable **`PRAGMA foreign_keys=ON`**; child-first order is locked by integration tests.
 
 ### 7.2 Cross-store failure semantics
 
@@ -284,7 +288,7 @@ The frontend does not unlock the startup gate or clear browser identity until th
 While reset is running:
 
 - a second reset receives `409 reset_in_progress`;
-- all routes that read or write learning data, including streaming Chat, upload, Library, Plan, Quiz, mistakes, mastery, and stats, participate in one lifecycle gate;
+- all routes that read or write learning data, including streaming Chat, upload, Library, Plan, Quiz, mistakes, mastery, and stats, participate in one lifecycle gate via **pure ASGI middleware** that acquires the shared lease before any request body is read and holds it until the response completes (including SSE/`StreamingResponse`);
 - identity-mutating auth POST routes (`anonymous`, frozen `google`, and `upgrade`) use the same shared lease so reset cannot race with user-row creation or mutation; read-only auth config remains available;
 - an already-active data operation makes reset return `409 data_operation_in_progress` instead of terminating the operation mid-stream;
 - after reset begins, new data operations receive `409 reset_in_progress` until the reset completes;
@@ -365,11 +369,12 @@ Settings adds a dedicated Danger Zone below normal model settings.
 
 - explains that learning data, model configuration, interface settings, local identity, and backend user rows are deleted;
 - requires the user to type `RESET`;
-- calls the backend factory reset first;
-- after success, removes every `study-coach:*` browser key and reloads;
-- provisions a new anonymous identity on the next startup.
+- stages one deterministic replacement fingerprint without clearing the current bearer;
+- calls the backend factory reset;
+- after success, removes old browser identity/settings keys while preserving the staged target;
+- provisions the replacement anonymous identity, then reloads.
 
-Factory reset must not clear browser state first. Doing so would discard the token needed to finish or retry the backend operation.
+Factory reset must not clear browser state first. Doing so would discard the token needed to finish or retry the backend operation. Staging the replacement fingerprint is non-destructive and must happen before the request so a lost success response can still converge after reload.
 
 ---
 
@@ -424,6 +429,8 @@ Future multi-user work must start with an ownership design. The current global r
 
 The upload path currently creates `/tmp/sc_<hash>.pdf` and does not guarantee cleanup after ingestion. A hash-derived name is also unsafe for concurrent uploads of the same PDF. P5 creates a unique file per request with `tempfile.NamedTemporaryFile` or `mkstemp`, wraps its use in `try/finally`, and unlinks only the exact file created by that request whether processing succeeds or fails.
 
+P5 also enforces upload boundaries before ingestion: PDF file limit **25 MiB** (`MAX_UPLOAD_BYTES`, chunked read as second-layer defense) plus a whole-multipart request cap `MAX_UPLOAD_REQUEST_BYTES` (= file limit + 64 KiB overhead) enforced by pure ASGI middleware **before** Starlette multipart spool; **`.pdf` extension whitelist**; **`%PDF` magic-byte** validation; and stable **`4xx`** client errors (`415` / `400` / `413`) for wrong extension/MIME, invalid PDF, or oversize — not opaque **`500`** responses. Temp cleanup must also cover `asyncio.CancelledError` during streamed reads.
+
 This cleanup is separate from reset semantics: reset does not scan `/tmp` using broad globs or remove files it cannot prove belong to the current operation.
 
 ---
@@ -455,6 +462,7 @@ Implementation follows TDD, with a red-green-refactor loop for each vertical sli
 - summary distinguishes empty and populated stores;
 - summary exposes SQL chunk count and actual Chroma vector count separately;
 - strict destructive dependencies reject missing/invalid identity and never use `default-user`;
+- learning routes require an existing user row (`require_existing_user`);
 - local-mode-disabled reset returns `403`;
 - local mode is disabled by default and summary exposes the capability;
 - learning reset deletes all learning rows and preserves users;
@@ -465,9 +473,10 @@ Implementation follows TDD, with a red-green-refactor loop for each vertical sli
 - Chroma failure leaves SQL untouched;
 - SQLite failure after Chroma deletion is retryable;
 - concurrent reset returns `409`;
-- active Chat/upload prevents reset, and reset prevents new data operations;
+- active Chat/upload prevents reset, and reset prevents new data operations (pure ASGI middleware lease, pre-body);
 - factory reset remains idempotently retryable after users are deleted and the first response is lost;
-- temporary upload files are removed on both success and failure.
+- temporary upload files are removed on both success and failure;
+- injected Chroma/SQLite stage failures, lock conflicts, and idempotent retry are proven by automated tests — no production failure-injection controls.
 
 ### 14.2 Frontend automated tests
 
@@ -510,7 +519,7 @@ pnpm build
 6. Confirm Library, Chat, Plan, Quiz, mistakes, mastery, Chroma, and checkpoint state are empty.
 7. Confirm Ollama/model/language settings remain.
 8. Re-import data, run Factory reset, and confirm first-run identity/settings state.
-9. Inject a Chroma or SQLite failure and confirm the gate remains, the failed stage is visible, and retry completes.
+9. *(Automated tests only)* Injected Chroma/SQLite stage failures, lock conflicts, stale responses, and idempotent retry semantics — manual failure reproduction is optional and must not rely on production failure-injection switches.
 10. Confirm refresh in one already-decided tab does not reopen the gate.
 
 ---
@@ -593,4 +602,4 @@ P5.0 must update README product claims in the same cut that hides Google OAuth, 
 - [MDN: `<dialog>` element](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/dialog)
 - [Vitest: Getting Started](https://vitest.dev/guide/)
 
-These references support the chosen collection reset, dependency-enforced route boundary, top-level modal rendering, native dialog behavior, and Vite-native test runner. Project-specific behavior remains governed by this spec and the existing Study Coach architecture.
+These references support the chosen collection reset, ASGI-middleware lifecycle boundary, top-level modal rendering, native dialog behavior, and Vite-native test runner. Project-specific behavior remains governed by this spec and the existing Study Coach architecture.

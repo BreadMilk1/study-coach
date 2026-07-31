@@ -25,6 +25,8 @@ services:
       VITE_API_PROXY_TARGET: http://backend:8000
     depends_on: [backend]
 
+  # Stop host `ollama serve` before `docker compose up` — both bind 127.0.0.1:11434.
+  # Models live in ollama_data; host-downloaded models are not visible here.
   ollama:
     image: ollama/ollama:latest
     ports: ["127.0.0.1:11434:11434"]

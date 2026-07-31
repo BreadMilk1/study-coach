@@ -1,6 +1,6 @@
 # P5 Local-first Data Lifecycle Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: EXECUTED — historical execution plan.** P5 shipped from this document. Checkbox steps (`- [ ]`) preserve the original task structure only; they are **not** a current todo checklist and do not reflect live completion status. For the as-built contract see `docs/ARCHITECTURE.md` and `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md` (including superseded notes where the final implementation diverged).
 
 **Goal:** Ship an honest local-first Study Coach experience in which each tab must explicitly continue or clear existing learning data, and local users can safely retry either a learning-data reset or a full factory reset.
 
@@ -18,8 +18,11 @@ These decisions are fixed for P5 implementation:
 2. The destructive API is protected by layered deployment defaults: `STUDY_COACH_LOCAL_MODE` defaults to `0`, Docker Compose explicitly enables it and binds the host port to `127.0.0.1`, and `fly.toml` explicitly keeps it disabled. P5 does not promise request-IP enforcement.
 3. SQLite deletion order is derived from the current foreign keys and locked by a test with `PRAGMA foreign_keys=ON`. In particular, `plan_events` and `plan_milestones` are deleted before `topics` because milestones reference topics.
 4. Summary and success payloads report every deleted table plus SQL source chunks and Chroma vectors. No deleted table is silently omitted from counts.
-5. Chroma and SQLite failure injection is an automated-test requirement. Manual acceptance covers stable success paths and one real retry only when it can be reproduced without test hooks.
+5. Chroma and SQLite failure injection is an automated-test requirement. Manual acceptance covers stable success paths only; do not add production failure-injection controls.
 6. P5 supports one backend worker. A process-local gate is not presented as a multi-worker safety mechanism.
+7. **Identity boundary:** lifecycle summary/reset use `require_signed_user` (valid signed JWT; user row may be absent so factory-reset retry after a lost response succeeds). Learning-data routes use `require_existing_user` (signed JWT **and** an existing user row) so post-factory tokens cannot create orphan writes via the legacy `"default-user"` path.
+8. **Upload boundary:** 25 MiB max, `.pdf` extension whitelist, `%PDF` magic-byte check, chunked read with stable `4xx` client errors (not opaque `500`s).
+9. **SQLite:** every connection enables `PRAGMA foreign_keys=ON`; child-first delete order is locked by integration tests.
 
 ## File and Responsibility Map
 
@@ -28,11 +31,13 @@ These decisions are fixed for P5 implementation:
 - `backend/app/data_lifecycle.py`: lifecycle counts, shared/exclusive gate, reset coordinator, stable reset exceptions.
 - `backend/app/rag/runtime.py`: own the Chroma client/collection and build or atomically replace the complete dense + BM25 + reranking stack.
 - `backend/app/api/data_routes.py`: strict summary/reset request and response contract; no `default-user` fallback.
-- `backend/app/api/deps.py`: strict signed-token dependency and app-state lifecycle dependencies.
-- `backend/app/api/routes.py`: attach a request-scoped shared lease to all learning-data routes and make upload temp files unique and self-cleaning.
+- `backend/app/api/deps.py`: `require_signed_user` (lifecycle), `require_existing_user` (learning routes), and app-state lifecycle dependencies.
+- `backend/app/api/lifecycle_middleware.py`: **pure ASGI** shared lease acquired before any request body is read; held until the response (including SSE) completes.
+- `backend/app/api/routes.py`: learning-route upload validation (25 MiB, `.pdf`, magic bytes, chunked read) and unique self-cleaning temp files.
 - `backend/app/db/repositories.py`: instance-wide count and child-first bulk-delete repository; no commit inside the repository.
-- `backend/app/main.py`: construct and expose runtime, retriever, lifecycle gate, and checkpointer on `app.state`; the request-scoped coordinator is built with the current SQLAlchemy session.
+- `backend/app/main.py`: construct and expose runtime, retriever, lifecycle gate, and checkpointer on `app.state`; register `DataLifecycleLeaseMiddleware`.
 - `backend/tests/db/test_data_lifecycle_repository.py`: foreign-key-on count/delete integration tests.
+- `backend/tests/db/test_sqlite_foreign_keys.py`: verifies `PRAGMA foreign_keys=ON` on application engine connections.
 - `backend/tests/rag/test_runtime.py`: Chroma collection recreation and complete retriever replacement tests.
 - `backend/tests/test_data_lifecycle.py`: gate, ordering, idempotency, and cross-store retry tests.
 - `backend/tests/api/test_data_routes.py`: auth, capability, response, conflict, and factory-retry API tests.
@@ -781,6 +786,8 @@ def get_retriever_runtime(request: Request):
 
 `require_signed_user` must not call `UserRepository`, because a still-valid token must retry a factory reset after the users table is already empty.
 
+Add `require_existing_user` for learning-data routes: depends on `require_signed_user`, then verifies the user row exists via `UserRepository.get_by_id`. Learning writes must not fall back to `"default-user"` or recreate orphan rows after factory reset.
+
 - [ ] **Step 4: Implement the exact API contract**
 
 Create `data_routes.py` with Pydantic models containing all counts:
@@ -878,9 +885,13 @@ git commit -m "feat: expose strict local data lifecycle API"
 
 ### Task 6: Lease every learning route and clean exact upload temp files
 
+> **Superseded (final implementation):** Steps 3–4 below planned a request-scoped FastAPI `Depends(data_operation_lease, scope="request")` on a `learning_router`. **Shipped code uses `backend/app/api/lifecycle_middleware.py` instead** — pure ASGI middleware that acquires the shared lease **before** Starlette reads the request body. FastAPI resolves `UploadFile` / multipart parsing before request-scoped dependencies run, so a Depends-based lease is too late for slow uploads and cannot block reset during in-flight multipart ingestion. `BaseHTTPMiddleware` was also rejected because it can release before streaming bodies finish.
+
 **Files:**
+- Modify: `backend/app/api/lifecycle_middleware.py` *(final)*
 - Modify: `backend/app/api/deps.py`
 - Modify: `backend/app/api/routes.py`
+- Modify: `backend/app/main.py`
 - Modify: `backend/tests/api/test_routes.py`
 
 - [ ] **Step 1: Write request-lifetime lease tests**
@@ -914,7 +925,7 @@ uv run pytest tests/api/test_routes.py -k "lifecycle or reset" -q
 
 Expected: the routes execute instead of returning 409.
 
-- [ ] **Step 3: Implement a request-scoped shared dependency and learning router**
+- [ ] **Step 3: Implement a request-scoped shared dependency and learning router** *(superseded — see Task 6 superseded note; final: `DataLifecycleLeaseMiddleware` in `lifecycle_middleware.py`)*
 
 Add this generator dependency:
 
@@ -1187,7 +1198,7 @@ describe('resolveStartupDecision', () => {
 })
 ```
 
-Also test that learning clear removes only `study-coach:current-chat-session-id`; factory clear removes every `study-coach:*` key from both storages while preserving unrelated keys.
+Historical instruction superseded by the executed recovery design: learning clear removes only `study-coach:current-chat-session-id`; Factory clear removes old app state but preserves the internal staged replacement fingerprint so response-lost and delayed tabs converge on one backend user.
 
 - [ ] **Step 4: Implement pure storage and startup policy**
 
@@ -2196,7 +2207,7 @@ Expected: no visible Google runtime/product matches; local mode is explicit in a
 
 - [ ] **Step 6: Complete manual acceptance and record evidence**
 
-Run the documented browser path with screenshots and short text evidence. Automated tests are the required proof for injected Chroma failure, SQLite failure, lock conflict, and idempotent retry; manual failure injection is optional.
+Run the documented browser path with screenshots and short text evidence. Automated tests are the required proof for injected Chroma failure, SQLite failure, lock conflict, and idempotent retry; manual failure injection is optional and must not rely on production failure-injection controls.
 
 Mark P5.1 through P5.4 complete only after both automated and manual evidence pass. If manual acceptance exposes a defect, leave the relevant roadmap checkbox open and fix it through a new red-green-refactor step before closure.
 
@@ -2215,6 +2226,7 @@ git commit -m "docs: close p5 local-first data lifecycle"
 
 The implementation review added these release requirements without changing the approved product direction:
 
+- **Pure ASGI lifecycle lease (2026-07-31):** Replaced the planned request-scoped FastAPI dependency lease with `DataLifecycleLeaseMiddleware` because FastAPI/Starlette parse multipart `UploadFile` bodies before request-scoped dependencies execute. A Depends-based lease therefore missed slow uploads and could not return `409 reset_in_progress` until after body ingestion began. Pure ASGI middleware acquires the shared lease before `receive()` reads the body and holds it until the response (including `StreamingResponse`) completes; `CORSMiddleware` stays outermost so middleware-generated `409` JSON still receives CORS headers without re-opening the multipart race.
 - Do not mount `RouterView` until the startup decision unlocks the workspace; a modal overlay alone does not prevent child lifecycle side effects.
 - Anonymous token provisioning must clear its cached promise after rejection, and delayed provisioning must not be overwritten by a Settings store created from stale storage.
 - Identity-mutating auth POST routes share the data-operation lease; `/api/auth/config` remains readable during reset.
@@ -2234,9 +2246,9 @@ Before pushing or merging, verify all of the following:
 - Identity-mutating auth routes cannot create or mutate user rows during reset.
 - Chroma is cleared before SQLite, complete retriever/checkpointer references are replaced, and retry finishes partial reset.
 - Partial reset failure blocks shared work and wrong-scope reset until the required scope succeeds, including after a frontend reload.
-- Start fresh always uses learning scope; factory browser keys survive backend failure and clear only after success.
+- Start fresh always uses learning scope; Factory reset stages one replacement fingerprint before the request, while old identity/settings keys survive backend failure and clear only after success.
 - Every other tab is invalidated; remote learning reset requires acknowledgement and remote factory reset reloads.
 - The startup dialog cannot be bypassed with Esc or backdrop and has keyboard-reachable choices.
 - Google OAuth remains frozen in backend code but absent from the shipped frontend product surface.
 - Upload cleanup removes only the exact per-request temp file on success and failure.
-- Full Pytest, Vitest, frontend build, Compose render, browser acceptance, and `git diff --check` pass.
+- Full Pytest, Vitest, frontend build, Compose render, and `git diff --check` pass on the remediation HEAD. The separate current-head Chrome gate completed on 2026-07-31; see `docs/DEMO.md` for the recorded evidence.

@@ -16,21 +16,6 @@ from app.db.session import get_session
 from app.llm.provider import LLMConfig, parse_llm_config
 
 
-async def get_current_user(
-    authorization: str | None = Header(None),
-) -> str:
-    if not authorization:
-        return "default-user"
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, detail="invalid authorization header")
-    token = authorization[len("Bearer "):]
-    try:
-        claims = decode_token(token)
-        return claims.user_id
-    except ValueError as e:
-        raise HTTPException(401, detail=str(e))
-
-
 async def require_signed_user(
     authorization: str | None = Header(None),
 ) -> str:
@@ -42,6 +27,21 @@ async def require_signed_user(
         raise HTTPException(401, detail="signed bearer token required") from None
     if not isinstance(user_id, str) or not user_id.strip():
         raise HTTPException(401, detail="signed bearer token required") from None
+    return user_id
+
+
+async def require_existing_user(
+    user_id: Annotated[str, Depends(require_signed_user)],
+    session: Annotated[Session, Depends(get_session)],
+) -> str:
+    """Learning routes: signed bearer whose user row still exists.
+
+    Lifecycle summary/reset keep `require_signed_user` (row-less) so a
+    factory-reset success response can be retried with the same JWT after the
+    user row is gone. Ordinary learning writes must not recreate orphan data.
+    """
+    if UserRepository(session).get_by_id(user_id) is None:
+        raise HTTPException(401, detail="user no longer exists") from None
     return user_id
 
 

@@ -62,6 +62,7 @@ onBeforeUnmount(() => {
       class="fixed inset-0 m-auto w-[min(32rem,calc(100%-2rem))] rounded-xl border border-border-strong bg-surface-2 p-0 text-fg shadow-2xl"
       aria-labelledby="startup-data-title"
       @cancel="preventCancel"
+      @keydown.esc.prevent.stop="preventCancel"
       @click.self.prevent
     >
       <section class="p-6 sm:p-7">

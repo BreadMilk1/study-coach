@@ -1,9 +1,9 @@
 # Study Coach — ROADMAP
 
-> Phase history + priority backlog. Current state: P4.5 product closure verified; P5 local-first data lifecycle complete.
+> Phase history + priority backlog. Current state: P4.5 product closure verified; P5 local-first data lifecycle automated remediation and current-head Chrome acceptance complete (2026-07-31).
 > Lives in repo (vs. plan in `~/.claude/plans/`) so it survives across Claude sessions.
 
-## Current Snapshot (2026-07-28)
+## Current Snapshot (2026-07-31)
 
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
 - **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + signed JWT local anonymous identity. Google OAuth remains frozen in backend code and is not surfaced by the frontend.
@@ -11,9 +11,10 @@
 - **Frontend**: Vue 3 + Pinia + Tailwind 4 + vue-i18n (en/zh-CN). 8 views: Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings / Onboarding. Mobile responsive (Chat/Quiz/Plan).
 - **Eval evidence**: P2.0 retrieval eval; primary agent-loop matrices P2.2 Plan (396 runs) + P2.3 Quiz (396 runs) = 792; P2.3 no-retriever pilot adds 396, for 1,188 raw runs total.
 - **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 6 ADRs + deployment topology + security model).
-- **Deploy**: verified host-run and Docker Compose paths with local Ollama. Cloud deployment is deferred; the retained Fly files are an unverified scaffold.
-- **Verification baseline**: 376 backend tests passing; 109 frontend tests across 12 Vitest files passing (485 total); frontend production build and `docker compose config` passing. Clean Compose runtime smoke passed for frontend HTML plus direct/proxied health. Host-run Ollama connection, embedding, upload, learning reset, re-upload, and Factory reset now pass; the existing Vite >500 kB chunk warning remains accepted.
-- **Recent (2026-07-28)**: PR review hardening prevents route side effects before the startup choice, makes anonymous provisioning retryable without stale Pinia overwrite, leases identity-mutating auth during reset, preserves a same-scope recovery latch after partial reset, cleans partial temp uploads, and adds Settings save confirmation. Manual lifecycle validation previously verified Save → refresh → `Connected`, upload → learning reset → re-upload at 49 chunks, then Factory reset → default Settings, empty Library/counts, second-tab reload, and exactly one new anonymous user.
+- **Deploy**: host-run is the canonical reviewer path; Docker Compose is an alternative mutually exclusive Ollama path (stop host Ollama first — both bind `127.0.0.1:11434`). Cloud deployment is deferred; the retained Fly files are an unverified scaffold.
+- **Verification baseline**: 411 backend tests passing; 130 frontend tests across 14 Vitest files passing (541 total); frontend production build and `docker compose config` passing. Existing Vite >500 kB chunk warning remains accepted. Automated remediation and current-head Chrome acceptance completed on 2026-07-31.
+- **Recent (2026-07-31)**: Final PR remediation and Chrome acceptance: learning routes require an existing user row (Factory reset old JWT cannot recreate orphan learning data; same JWT may still idempotently retry Factory reset); summary exposes `current_user_exists`; a deterministic staged recovery fingerprint makes response-lost and delayed tabs converge on one replacement user before unlock; pre-multipart ASGI upload request cap; CancelledError temp cleanup; dialect-based SQLite FK; native lifecycle dialogs explicitly intercept Esc keydown so store state and modal visibility cannot diverge. Path A Chrome verified real Ollama, 49/61-chunk PDFs, Chat/Quiz/Plan/mistake/mastery state, learning reset preservation, re-upload, cross-tab acknowledgement, Factory defaults/reload, old-JWT refusal/retry, and three-tab convergence to one user.
+- **Recent (2026-07-28)**: PR review hardening prevents route side effects before the startup choice, makes anonymous provisioning retryable without stale Pinia overwrite, leases identity-mutating auth during reset, preserves a same-scope recovery latch after partial reset, cleans partial temp uploads, and adds Settings save confirmation. Manual lifecycle validation on that date verified Save → refresh → `Connected`, upload → learning reset → re-upload at 49 chunks, then Factory reset → default Settings, empty Library/counts, second-tab reload, and exactly one new anonymous user — historical evidence only until current-head browser recheck.
 - **Next**: choose the next portfolio slice; multi-user auth remains deliberately deferred to a separate worktree.
 - **Recent (2026-07-20)**: P4.5 manual browser demo passed with user-owned PDFs — grounded Chat answer, agent-loop Quiz generation, deterministic grading, and refresh restore all verified. Follow-up hardening prevents answer/explanation disclosure during GENERATE and strips trailing retrieval metadata before explanation persistence.
 - **Recent (2026-07-02)**: P4.5 automated Product Closure implemented — Chat quiz MCQs are persisted before display, failed quiz persistence degrades safely, `persist_quiz_question` tolerates narrow local-model formatting near-misses, route tests no longer depend on live Ollama, and `docs/DEMO.md` documents the reviewer path. The final manual public-review gate was completed on 2026-07-20.
@@ -339,9 +340,9 @@ Shipped:
 - Full Chroma corpus isolation: add `user_id` / `document_id` metadata to chunks and pass filters through dense, BM25, reranking, deterministic nodes, and agent-tool retrieval. Current P4d guard only refuses retrieval when the current user has no Library document rows.
 - shadcn-vue migration
 
-## P5 — Done (2026-07-28)
+## P5 — Done (2026-07-31)
 
-Design approved 2026-07-20; implementation, automated verification, and complete destructive browser acceptance finished by 2026-07-28. P5 deliberately treats Study Coach as a local-first, single-user portfolio product; multi-user auth and Chroma ownership move to a later isolated worktree.
+Design approved 2026-07-20; implementation, automated verification, and destructive current-head Chrome acceptance are complete. P5 deliberately treats Study Coach as a local-first, single-user portfolio product; multi-user auth and Chroma ownership move to a later isolated worktree.
 
 - [x] Product direction, data scopes, failure semantics, startup gate, Danger Zone, and notification design approved.
 - [x] Design spec: `docs/superpowers/specs/2026-07-20-p5-local-first-data-lifecycle-design.md`.
@@ -349,8 +350,8 @@ Design approved 2026-07-20; implementation, automated verification, and complete
 - [x] P5.1: backend summary and idempotent two-scope reset across Chroma, graph state, retriever caches, SQLite, local-mode/loopback deployment guard, Docker Chroma path fix, and unique temporary-upload cleanup.
 - [x] P5.2: Vitest foundation and capability-aware, required once-per-tab startup gate (Continue plus Start fresh when local reset is enabled).
 - [x] P5.3: Settings Danger Zone, confirmation flows, global notifications, accessibility, cross-tab lifecycle handling, and stale-request-safe client refresh.
-- [x] P5.4 automated verification and architecture/product documentation sync: full backend 376/376; frontend 109/109 across 12 files; production build and Compose render passed. Compose routes backend embeddings through `http://ollama:11434`, binds Ollama to loopback, and pre-pulls `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`. Clean image build reduced backend/frontend contexts to 47.96 kB / 4.77 kB, and runtime HTML/direct-health/proxied-health smoke returned HTTP 200; the existing Vite chunk warning is accepted.
-- [x] P5.4 destructive browser acceptance: startup choice, learning reset, cross-tab acknowledgement, Settings preservation, 49-chunk re-import, Factory reset, second-tab reload, Settings removal, empty learning state, and convergence on exactly one new anonymous user passed in Chrome on 2026-07-28.
+- [x] P5.4 automated verification and architecture/product documentation sync (re-verified 2026-07-31 remediation HEAD): full backend 411/411; frontend 130/130 across 14 files; production build and Compose render passed. Host-run is the canonical reviewer path; Compose is an alternative mutually exclusive Ollama path. Compose routes backend embeddings through `http://ollama:11434`, binds Ollama to loopback, and pre-pulls `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`. Clean image build previously reduced backend/frontend contexts to 47.96 kB / 4.77 kB with runtime HTML/direct-health/proxied-health smoke HTTP 200; the existing Vite chunk warning is accepted.
+- [x] P5.4 final current-head Chrome acceptance: startup choice and Esc/backdrop blocking, Continue + same-tab refresh, real Ollama Chat/Quiz/Plan, learning reset with cross-tab acknowledgement and Settings preservation, 49-chunk re-import, Factory reset default restoration and peer-tab reload, old-JWT write refusal/idempotent retry, and concurrent three-tab recovery to exactly one new anonymous user.
 
 **Deferred after P5:** a separate `feature/multi-user-auth` worktree for guest upgrade, Google OAuth, SQL/Chroma ownership, legacy migration, and data-continuity tests.
 

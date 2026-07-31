@@ -1,6 +1,6 @@
 # Study Coach Demo Guide
 
-> P4.5 reviewer path verified. P5 local-first data lifecycle automated and browser acceptance are complete.
+> P4.5 reviewer path verified. P5 local-first data lifecycle automated remediation and current-head Chrome acceptance completed on 2026-07-31.
 > Use a PDF you own. Do not copy private course PDFs into this repository.
 
 ---
@@ -20,17 +20,10 @@ P4.5 made this path stable before larger harness, durable memory, or multi-agent
 
 ## Verified Commands
 
-Verified on 2026-07-28:
+Automated remediation re-verified on 2026-07-31 (current HEAD):
 
 ```bash
 cd backend
-uv run pytest tests/db/test_data_lifecycle_repository.py -q
-uv run pytest tests/rag/test_runtime.py -q
-uv run pytest tests/test_data_lifecycle.py -q
-uv run pytest tests/api/test_data_routes.py -q
-uv run pytest tests/api/test_routes.py -q
-uv run pytest tests/api/test_auth_routes.py -q
-uv run pytest tests/test_deployment_config.py -q
 uv run pytest -q
 
 cd ../frontend
@@ -38,22 +31,18 @@ pnpm test --run
 pnpm build
 
 cd ..
-docker compose config
+docker compose config --quiet
+git diff --check
 ```
 
 Result:
 
-- Focused backend lifecycle suites: 2 + 12 + 31 + 33 + 25 + 10 tests passed.
-- Focused deployment configuration suite: 12 tests passed, including build-context/order safeguards, frontend container listening, all three loopback bindings, the environment-aware Vite proxy, backend `OLLAMA_HOST=http://ollama:11434`, and all three model pre-pulls.
-- Full backend: 376 tests passed.
-- Frontend: 109 Vitest tests across 12 files passed; production build passed. Total automated tests: 485.
-- Compose render passed with backend/frontend/Ollama host bindings `127.0.0.1:8000`, `127.0.0.1:5173`, and `127.0.0.1:11434`; backend `STUDY_COACH_LOCAL_MODE=1`, `CHROMA_PATH=/app/data/chroma`, and `OLLAMA_HOST=http://ollama:11434`; frontend proxy target `http://backend:8000`; and pre-pulls for `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b`.
-- A clean no-cache build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke passed for frontend `/`, direct backend `/api/health`, and frontend-proxied `/api/health` with HTTP 200.
-- The first backend cold start downloads about 1.1 GB of FastEmbed model data and may temporarily return `502` through the frontend proxy; wait until `/api/health` becomes ready before continuing.
-- Host-run Ollama verification passed with `gemma4:e4b` and `nomic-embed-text`: Settings connection returned Connected, embedding produced vectors, and the user-owned Topic 1 PDF indexed 49 chunks before and after a learning reset. This is host-run evidence, not a Compose model-runtime claim.
+- Full backend: 411 tests passed.
+- Frontend: 130 Vitest tests across 14 files passed; production build passed. Total automated tests: 541.
+- Compose render (`docker compose config --quiet`) passed.
+- Existing Vite warning for chunks larger than 500 kB is accepted for this stage.
+- Current-head Chrome acceptance passed on Path A with `gemma4:e4b`, `qwen2.5:7b` judge, and `nomic-embed-text`; this is not a Compose model-runtime claim.
 - The retained Fly scaffold keeps `STUDY_COACH_LOCAL_MODE=0`, but cloud deployment is deferred and was not runtime-verified.
-- Static Google frontend runtime/UI search returned no matches; environment/config searches matched the intended local-mode and Chroma settings.
-- The existing Vite warning for chunks larger than 500 kB is accepted for this stage.
 
 ---
 
@@ -61,36 +50,35 @@ Result:
 
 - Python / `uv` environment for the backend.
 - Node / `pnpm` environment for the frontend.
-- Ollama running locally if using `x-provider: ollama`.
 - A user-owned PDF available outside the repo.
 
-Recommended local model for Chat-first demo:
+This guide has two **mutually exclusive** local paths. Pick one; do not run host Ollama and Compose Ollama together — both bind `127.0.0.1:11434`.
+
+### Path A — host-run (canonical reviewer path)
+
+- Host Ollama on `127.0.0.1:11434`.
+- Host backend and frontend (commands below).
+- Pull chat + embedding models on the host:
 
 ```bash
-ollama pull gemma4:e4b
+ollama pull gemma4:e4b          # verified tool-calling model for agent-loop demo
+ollama pull nomic-embed-text    # required for PDF indexing
+ollama serve
 ```
 
-If using another model, confirm tool-calling support in Settings or via `/api/models/tool-check`.
+If using another chat model, confirm tool-calling support in Settings or via `/api/models/tool-check`.
+
+### Path B — Docker Compose (alternative)
+
+- **Stop host `ollama serve` first** — port `11434` conflicts with the Compose `ollama` service.
+- Models live in the isolated `ollama_data` volume; host-downloaded models do **not** appear in the container.
+- Compose pre-pulls `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b` only. Use those in Settings unless you pull more inside the container.
 
 ---
 
 ## Start Services
 
-For the P5 local-data-lifecycle acceptance path, prefer Docker Compose. It enables reset only for the local deployment and publishes the backend on loopback:
-
-```bash
-docker compose up
-```
-
-Before uploading a PDF or starting Chat, verify the Compose Ollama service has finished all model pulls:
-
-```bash
-docker compose exec ollama ollama list
-```
-
-Continue only after `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b` appear. A successful backend `/api/health` response confirms the backend is ready, not that these Ollama models are ready.
-
-If running the services directly, enable the same local-only boundary explicitly.
+### Path A — host-run (canonical reviewer path)
 
 Terminal 1:
 
@@ -115,16 +103,49 @@ Open:
 http://localhost:5173/
 ```
 
+### Path B — Docker Compose (alternative)
+
+```bash
+docker compose up
+```
+
+Before uploading a PDF or starting Chat, verify the Compose Ollama service has finished all model pulls:
+
+```bash
+docker compose exec ollama ollama list
+```
+
+Continue only after `nomic-embed-text`, `gemma3:4b`, and `qwen2.5:7b` appear. A successful backend `/api/health` response confirms the backend is ready, not that these Ollama models are ready.
+
+For agent-loop demo with `gemma4:e4b` on Compose (not pre-pulled):
+
+```bash
+docker compose exec ollama ollama pull gemma4:e4b
+```
+
 ---
 
 ## Configure Settings
 
+### Path A — host-run
+
 In the frontend Settings view:
 
 - Provider: `ollama`
-- Model: `gemma4:e4b` or another known tool-capable model
+- Base URL: leave empty, or set `http://127.0.0.1:11434`
+- Model: `gemma4:e4b`
+- Planner / Quiz mode: `agent_loop`
 - Debug Mode: enabled
-- Quiz mode: `agent_loop` for the main demo path
+- Save Settings, then run **Test Connection** and **Test Tool Call**
+
+### Path B — Docker Compose
+
+- Stop host Ollama first if it still occupies `127.0.0.1:11434`, then follow the Compose start steps above.
+- If the browser previously saved a host-run Base URL, **clear Base URL and Save Settings** so the backend container uses Compose `OLLAMA_HOST=http://ollama:11434`. Do not leave Base URL as `http://127.0.0.1:11434` inside the backend container — that points at the container itself, not the Compose Ollama service.
+- Provider: `ollama`
+- Model for `agent_loop`: `qwen2.5:7b` (pre-pulled), or `gemma4:e4b` after `docker compose exec ollama ollama pull gemma4:e4b`
+- `gemma3:4b` is only for `deterministic` mode on Compose
+- Save Settings, then run **Test Connection** and **Test Tool Call**
 
 Use `deterministic` only as a faster fallback check.
 
@@ -198,6 +219,8 @@ Expected:
 ---
 
 ## CLI Verification
+
+The examples below assume **Path A (host-run)** with `gemma4:e4b`. On Compose, substitute a pre-pulled model (`gemma3:4b` or `qwen2.5:7b`) or pull `gemma4:e4b` inside the container first.
 
 ### Anonymous token
 
@@ -278,9 +301,9 @@ Before treating this as the public reviewer demo path, verify:
 
 ## P5 Local Data Lifecycle Acceptance — Complete
 
-**Status (2026-07-28): passed end to end.** Learning reset, post-reset re-upload, Factory reset, cross-tab reload, Settings removal, and the single new anonymous first-run identity were verified in Chrome.
+**Status (2026-07-31): Automated remediation and current-head Chrome acceptance complete.** The run used Path A with a disposable SQLite/Chroma workspace and user-owned Topic 1 / Topic 4 PDFs. The acceptance run also exposed and fixed an Esc bypass in the native lifecycle dialogs before the checklist was repeated successfully.
 
-1. [x] Start Ollama, backend, and frontend through the supported local configuration.
+1. [x] Start Ollama, backend, and frontend through the supported local configuration (Path A host-run or Path B Compose — mutually exclusive).
 2. [x] Import two user-owned PDFs and create Chat, Quiz, Plan, mistake, and mastery state.
 3. [x] Open a new tab; verify startup blocks every other interaction.
 4. [x] Choose Continue; verify all existing data remains.
@@ -288,8 +311,8 @@ Before treating this as the public reviewer demo path, verify:
 6. [x] Open another new tab; choose Start fresh and confirm learning reset.
 7. [x] Verify Library, Chat, Quiz, Plan, milestones/events, mistakes, mastery, Chroma vectors, retriever cache, and checkpoint state are empty.
 8. [x] Verify provider, model, Base URL, API key, language, and debug settings remain.
-9. [x] Re-import passed with `Topic 1 - Introduction to Prompt Engineering.pdf` (49 chunks). Factory reset then restored default Settings, emptied Library and all learning counts, reloaded the second tab, and converged on one new anonymous user rather than creating one user per tab.
-10. [x] No natural transient failure occurred. Injected failure and idempotent retry behavior remain covered by automated tests; no production failure-injection control was added.
+9. [x] Re-import a user-owned PDF and confirm chunk indexing. Factory reset restores default Settings, empty Library/learning counts, reloads peer tabs, and converges on one new anonymous user. A dedicated runtime old JWT returned 200 for Factory reset and its idempotent retry, but 401 for an ordinary learning write.
+10. [x] No production failure-injection control. Injected failure and idempotent retry behavior remain covered by automated tests.
 
 During steps 3–9, explicitly check native-modal behavior: initial focus, keyboard reachability, Esc and backdrop blocking where required, and an inert background. With two tabs open, verify a learning reset requires acknowledgement in the other tab and a factory reset reloads the other tab.
 

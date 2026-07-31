@@ -13,7 +13,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-485%20passed-10b981)]()
+[![Tests](https://img.shields.io/badge/Tests-541%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -110,14 +110,14 @@ brew install uv
 # Frontend
 brew install pnpm node
 
-# LLM (default local)
+# LLM — host-run Ollama (canonical local path; see Docker alternative below)
 brew install ollama
-ollama pull gemma3:4b
-ollama pull nomic-embed-text
-ollama serve   # leave running
+ollama pull gemma4:e4b          # verified tool-calling chat model for agent-loop demo
+ollama pull nomic-embed-text    # required for embeddings / PDF indexing
+ollama serve                    # leave running on 127.0.0.1:11434
 ```
 
-### Run
+### Run (host-run — canonical reviewer path)
 
 ```bash
 # Terminal 1 — backend (port 8000)
@@ -133,25 +133,28 @@ pnpm dev
 
 Visit <http://localhost:5173>. Library → upload a PDF → Chat / Plan / Quiz.
 
-For a stable reviewer walkthrough, follow `docs/DEMO.md`.
+For a stable reviewer walkthrough, follow `docs/DEMO.md` (host-run path).
 
-### Docker
+### Docker (alternative — stop host Ollama first)
+
+Host Ollama and the Compose `ollama` service both bind `127.0.0.1:11434`; stop host `ollama serve` before starting Compose. Container models live in the isolated `ollama_data` volume — host-downloaded models are not visible inside the container.
 
 ```bash
 docker compose up
 # configured host ports: backend 127.0.0.1:8000, frontend 127.0.0.1:5173, ollama 127.0.0.1:11434
-# Compose pre-pulls nomic-embed-text, gemma3:4b, and qwen2.5:7b
+# Compose pre-pulls nomic-embed-text, gemma3:4b, and qwen2.5:7b into the container volume only
 # first backend cold start downloads the ~1.1 GB FastEmbed model; wait for /api/health
+# for agent-loop demo with gemma4:e4b on Compose: docker compose exec ollama ollama pull gemma4:e4b
 ```
 
 ### Tests
 
 ```bash
 cd backend
-uv run pytest -q        # 376 tests, no live Ollama required
+uv run pytest -q        # 411 tests, no live Ollama required
 
 cd ../frontend
-pnpm test --run         # 109 tests across 12 Vitest files
+pnpm test --run         # 129 tests across 14 Vitest files
 pnpm build              # typecheck + production build
 ```
 
@@ -170,7 +173,7 @@ Cloud BYOK (OpenAI / Anthropic / Gemini) is configured **per-request** via the f
 
 Study Coach is local-first and requires no registration. Its learning data belongs to the current Study Coach instance. When learning data exists, each tab's startup gate requires a deliberate Continue or Start fresh choice before the rest of the app becomes interactive, while Settings exposes learning and factory reset scopes in its Danger Zone. When `reset_enabled=false`, the frontend skips the gate and hides the Danger Zone.
 
-Learning reset clears documents, source chunks, vectors, Chat/Plan/Quiz/Mistake/Mastery data, retriever state, and checkpoints while preserving local model/provider/API/language/interface settings. Factory reset includes that learning scope, deletes backend user rows, clears the browser keys owned by Study Coach, and reloads into a new anonymous first-run state. Reset is disabled by default; supported local configurations must bind the backend to loopback, and the shipped Compose configuration enforces this boundary.
+Learning reset clears documents, source chunks, vectors, Chat/Plan/Quiz/Mistake/Mastery data, retriever state, and checkpoints while preserving local model/provider/API/language/interface settings. Factory reset includes that learning scope, deletes backend user rows, clears user-facing browser state, and reloads into a new anonymous first-run state. Before the destructive request it stages one internal replacement fingerprint so response-lost and delayed tabs converge on the same new user. Reset is disabled by default; supported local configurations must bind the backend to loopback, and the shipped Compose configuration enforces this boundary.
 
 ### Deferred authentication work
 
@@ -194,7 +197,7 @@ See `docs/ARCHITECTURE.md` v2 for:
 - **Mermaid ER diagram** — 13 tables, 15 relationships
 - **6 Architecture Decision Records** — LangGraph vs chain-of-prompts, SM-2 vs Leitner, deterministic vs agent loop, SQLite-only, BYOK header pattern, single-user local-first instance lifecycle
 - **Security model** — JWT auth, API key handling, CORS, XSS prevention
-- **Deployment topology** — Verified host-run and Docker Compose local paths; cloud deployment is deferred
+- **Deployment topology** — Host-run has historical Ollama runtime verification; Compose config/render/HTTP smoke verified; Compose Ollama generation/embedding runtime still pending; cloud deployment is deferred
 
 ## API Reference
 
@@ -208,27 +211,27 @@ See `docs/ARCHITECTURE.md` v2 for:
 | `POST` | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | `POST` | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | `POST` | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
-| `POST` | `/api/chat` | JWT/guest | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"done"}` |
-| `GET` | `/api/chat/sessions/current` | JWT/guest | `{session_id, started_at, summary}` |
-| `GET` | `/api/chat/sessions/{id}/messages` | JWT/guest | `{session_id, messages:[{role, content, citations[], agent_run?}]}` |
-| `POST` | `/api/documents` | JWT/guest | `{document_id, filename, chunks_count}` |
-| `GET` | `/api/documents` | JWT/guest | `[{id, filename, chunks_count}]` |
-| `POST` | `/api/goals` | JWT/guest | `{goal_id, title}` |
-| `GET` | `/api/plans/current` | JWT/guest | `{plan_id, goal_id, milestones[], updated_at}` |
-| `PATCH` | `/api/plans/{id}/milestones/{mid}` | JWT/guest | `{plan, event, validation_hint}` |
-| `PATCH` | `/api/plans/{id}/milestones/reorder` | JWT/guest | current plan with reordered milestones |
-| `GET` | `/api/plans/{id}/events` | JWT/guest | plan event history |
-| `GET` | `/api/mistakes/due` | JWT/guest | `[{mistake_id, question, due_at, srs_*, topic_name}]` |
-| `POST` | `/api/mistakes/{id}/review` | JWT/guest | `{correct, correct_answer, explanation, new_interval_days}` |
-| `POST` | `/api/mistakes/{id}/mark-understood` | JWT/guest | `{mastery_score, next_due_at}` |
-| `GET` | `/api/mastery` | JWT/guest | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
-| `GET` | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
+| `POST` | `/api/chat` | signed JWT + user row | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"done"}` |
+| `GET` | `/api/chat/sessions/current` | signed JWT + user row | `{session_id, started_at, summary}` |
+| `GET` | `/api/chat/sessions/{id}/messages` | signed JWT + user row | `{session_id, messages:[{role, content, citations[], agent_run?}]}` |
+| `POST` | `/api/documents` | signed JWT + user row | `{document_id, filename, chunks_count}` |
+| `GET` | `/api/documents` | signed JWT + user row | `[{id, filename, chunks_count}]` |
+| `POST` | `/api/goals` | signed JWT + user row | `{goal_id, title}` |
+| `GET` | `/api/plans/current` | signed JWT + user row | `{plan_id, goal_id, milestones[], updated_at}` |
+| `PATCH` | `/api/plans/{id}/milestones/{mid}` | signed JWT + user row | `{plan, event, validation_hint}` |
+| `PATCH` | `/api/plans/{id}/milestones/reorder` | signed JWT + user row | current plan with reordered milestones |
+| `GET` | `/api/plans/{id}/events` | signed JWT + user row | plan event history |
+| `GET` | `/api/mistakes/due` | signed JWT + user row | `[{mistake_id, question, due_at, srs_*, topic_name}]` |
+| `POST` | `/api/mistakes/{id}/review` | signed JWT + user row | `{correct, correct_answer, explanation, new_interval_days}` |
+| `POST` | `/api/mistakes/{id}/mark-understood` | signed JWT + user row | `{mastery_score, next_due_at}` |
+| `GET` | `/api/mastery` | signed JWT + user row | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
+| `GET` | `/api/users/me/stats` | signed JWT + user row | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
 | `GET` | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
 | `GET` | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
-| `GET` | `/api/data/summary` | signed bearer | `{reset_enabled, has_learning_data, ...15 count fields}` |
+| `GET` | `/api/data/summary` | signed bearer (row optional) | `{reset_enabled, has_learning_data, current_user_exists, ...15 count fields}` |
 | `POST` | `/api/data/reset` | signed bearer + reset enabled | `{scope, status:"completed", deleted:{...15 count fields}}` |
 
-All AI-bearing routes read **BYOK headers** per request. Normal learning routes retain JWT Bearer guest fallback. The data summary/reset routes require a valid signed bearer token and never use the legacy `default-user` fallback. `/api/chat` only enters retrieval when the authenticated user has at least one Library document; otherwise it streams an upload prompt and records the turn in the current session.
+All AI-bearing routes read **BYOK headers** per request. Learning routes require a signed bearer whose user row still exists; they do not fall back to a guest/`default-user` identity. Lifecycle `GET /api/data/summary` and `POST /api/data/reset` accept a row-less signed bearer only so Factory reset can be retried idempotently after the user row is deleted. `/api/chat` only enters retrieval when the authenticated user has at least one Library document; otherwise it streams an upload prompt and records the turn in the current session.
 
 The Google auth endpoints above are frozen backend-only interfaces; the shipped frontend has no Google login or upgrade surface.
 
@@ -255,7 +258,7 @@ study-coach/
 │   │   ├── db/{models,repositories,session}.py # SQLAlchemy + Alembic
 │   │   ├── eval/                           # P2.2 / P2.3 ablation harnesses
 │   │   └── srs/sm2.py                      # SM-2 spaced repetition scheduler
-│   └── tests/                              # 376 backend tests
+│   └── tests/                              # 411 backend tests
 ├── frontend/
 │   └── src/
 │       ├── views/                          # 8 views: Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding
@@ -296,7 +299,7 @@ study-coach/
 - **Agent loop treated empirically**: 792 runs across the two primary matrices, plus a 396-run P2.3 no-retriever pilot (1,188 raw runs total) — not assumed, measured
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace / Agent Run, and EmptyCorpusBanner
-- **Portfolio-grade engineering**: 485 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
+- **Portfolio-grade engineering**: 541 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
 
 ## Origin
 

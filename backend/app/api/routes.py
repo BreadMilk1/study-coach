@@ -38,8 +38,9 @@ from .deps import (
     get_quiz_master_agent,
     get_quiz_mode,
     get_retriever,
-    get_current_user,
+    require_existing_user,
 )
+from .upload_limits import MAX_UPLOAD_BYTES
 
 router = APIRouter(prefix="/api")
 # Shared lease is acquired by DataLifecycleLeaseMiddleware before body read.
@@ -348,17 +349,42 @@ async def ping_model(
         )
 
 
-@learning_router.post("/documents")
-async def upload_document(
-    file: Annotated[UploadFile, File()],
-    user_id: Annotated[str, Depends(get_current_user)],
-    session: Annotated[Session, Depends(get_session)],
-    document_processor: Annotated[object, Depends(get_document_processor)],
-    retriever: Annotated[object, Depends(get_retriever)],
-):
-    content = await file.read()
-    file_hash = hashlib.sha256(content).hexdigest()
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+_PDF_MAGIC = b"%PDF"
+
+
+def _upload_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
+
+def _validate_pdf_upload_headers(filename: str | None, content_type: str | None) -> None:
+    name = filename or ""
+    if not name.lower().endswith(".pdf"):
+        raise _upload_error(
+            415,
+            "unsupported_media_type",
+            "Only PDF uploads are supported.",
+        )
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if media_type in {"", "application/pdf", "application/octet-stream"}:
+        return
+    raise _upload_error(
+        415,
+        "unsupported_media_type",
+        "Only PDF uploads are supported.",
+    )
+
+
+async def _read_pdf_upload_to_temp(file: UploadFile) -> tuple[Path, str]:
+    """Stream the upload to a unique temp PDF while hashing and enforcing size."""
+    digest = hashlib.sha256()
+    total = 0
     tmp_path: Path | None = None
+    saw_magic = False
+    completed = False
     try:
         with tempfile.NamedTemporaryFile(
             prefix="sc_",
@@ -366,8 +392,56 @@ async def upload_document(
             delete=False,
         ) as tmp:
             tmp_path = Path(tmp.name)
-            tmp.write(content)
-        chunks = document_processor.process_pdf(tmp_path)
+            while True:
+                chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if total == 0:
+                    saw_magic = chunk.startswith(_PDF_MAGIC)
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise _upload_error(
+                        413,
+                        "payload_too_large",
+                        f"PDF uploads must be at most {MAX_UPLOAD_BYTES} bytes.",
+                    )
+                digest.update(chunk)
+                tmp.write(chunk)
+        if total == 0 or not saw_magic:
+            raise _upload_error(
+                400,
+                "invalid_pdf",
+                "Uploaded file is not a valid PDF.",
+            )
+        completed = True
+        return tmp_path, digest.hexdigest()
+    finally:
+        # CancelledError is a BaseException on 3.11+; cleanup must not rely on
+        # `except Exception`, and must not swallow cancellation.
+        if not completed and tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+@learning_router.post("/documents")
+async def upload_document(
+    file: Annotated[UploadFile, File()],
+    user_id: Annotated[str, Depends(require_existing_user)],
+    session: Annotated[Session, Depends(get_session)],
+    document_processor: Annotated[object, Depends(get_document_processor)],
+    retriever: Annotated[object, Depends(get_retriever)],
+):
+    _validate_pdf_upload_headers(file.filename, file.content_type)
+    tmp_path: Path | None = None
+    try:
+        tmp_path, file_hash = await _read_pdf_upload_to_temp(file)
+        try:
+            chunks = document_processor.process_pdf(tmp_path)
+        except Exception:
+            raise _upload_error(
+                400,
+                "invalid_pdf",
+                "Uploaded file is not a valid PDF.",
+            ) from None
         docs = DocumentRepository(session)
         existing = docs.get_by_user_and_hash(user_id=user_id, hash_=file_hash)
         # SQL row wins when present; otherwise the request filename is the
@@ -478,7 +552,7 @@ def _persist_citations(
 @learning_router.post("/chat")
 async def chat(
     body: ChatRequest,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     graph: Annotated[object, Depends(get_graph)],
     judge: Annotated[dict, Depends(get_judge_dependencies)],
@@ -585,7 +659,7 @@ async def chat(
 
 @learning_router.get("/chat/sessions/current", response_model=ChatSessionOut)
 def get_current_chat_session(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     chat_session = ChatSessionRepository(session).latest_for_user(user_id)
@@ -601,7 +675,7 @@ def get_current_chat_session(
 @learning_router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessagesOut)
 def get_chat_session_messages(
     session_id: str,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     chat_session = ChatSessionRepository(session).get_for_user(
@@ -654,7 +728,7 @@ def get_chat_session_messages(
 @learning_router.post("/goals", response_model=GoalCreateOut)
 def create_goal(
     body: GoalCreateIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime
@@ -665,7 +739,7 @@ def create_goal(
 
 @learning_router.get("/plans/current", response_model=PlanCurrentOut)
 def get_plans_current(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goals = GoalRepository(session).list_active_for_user(user_id)
@@ -683,7 +757,7 @@ def patch_plan_milestone(
     plan_id: str,
     milestone_id: str,
     body: MilestonePatchIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
@@ -726,7 +800,7 @@ def patch_plan_milestone(
 @learning_router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
 def get_plan_events(
     plan_id: str,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     limit: int = 20,
 ):
@@ -755,7 +829,7 @@ class ReorderIn(BaseModel):
 def reorder_plan_milestones(
     plan_id: str,
     body: ReorderIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
@@ -766,7 +840,7 @@ def reorder_plan_milestones(
 
 @learning_router.get("/documents", response_model=list[DocumentOut])
 def get_documents(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     docs = DocumentRepository(session).list_for_user(user_id)
@@ -778,7 +852,7 @@ def get_documents(
 
 @learning_router.get("/mistakes/due", response_model=list[MistakeDueOut])
 def get_mistakes_due(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     limit: int = 20,
     include_future: bool = False,
@@ -825,7 +899,7 @@ class MistakeReviewOut(BaseModel):
 def review_mistake(
     mistake_id: str,
     body: MistakeReviewIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from app.db.repositories import MasteryRepository, MistakeRepository, QuestionRepository
@@ -879,7 +953,7 @@ class MarkUnderstoodOut(BaseModel):
 @learning_router.post("/mistakes/{mistake_id}/mark-understood", response_model=MarkUnderstoodOut)
 def mark_mistake_understood(
     mistake_id: str,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime, timedelta
@@ -916,7 +990,7 @@ def mark_mistake_understood(
 
 @learning_router.get("/mastery", response_model=MasteryOut)
 def get_mastery(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime
@@ -970,7 +1044,7 @@ def get_mastery(
 
 @learning_router.get("/users/me/stats", response_model=UserStatsOut)
 def get_user_stats(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from app.db.repositories import ChatSessionRepository

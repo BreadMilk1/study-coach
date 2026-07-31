@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 376 backend tests and 109 frontend tests (485 total); production build passing.
+> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 411 backend tests and 130 frontend tests (541 total); production build passing. Automated remediation and current-head Chrome acceptance verified 2026-07-31.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (2026-07-28):** 376 backend tests and 109 frontend tests passing (485 total); frontend production build passing. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
+**Current baseline (2026-07-31):** 411 backend tests and 130 frontend tests across 14 Vitest files passing (541 total); frontend production build passing (existing >500 kB chunk warning accepted). Automated PR remediation and current-head Chrome acceptance are complete. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
 
 ---
 
@@ -151,10 +151,11 @@ erDiagram
 **Decision:** P5 treats one running Study Coach deployment as a **single-user, local-first instance**.
 
 - `GET /api/data/summary` and `POST /api/data/reset` require a valid signed bearer token through `require_signed_user`; these lifecycle routes never use the legacy `"default-user"` fallback.
+- Learning-data routes require `require_existing_user` (valid signed bearer **and** an existing user row) so post-factory tokens cannot create orphan learning writes.
 - Reset is disabled by default (`STUDY_COACH_LOCAL_MODE=0`). The shipped Docker Compose configuration enables it and binds backend host traffic to `127.0.0.1:8000`; the deferred Fly scaffold keeps local mode off but is not a supported deployment. P5 does not enforce request source IP, so the environment flag and deployment binding are the security boundary.
 - P5 supports one backend worker. The in-process lifecycle gate and object replacement are not a multi-worker coordination protocol.
 - Learning operations and identity-mutating auth POST routes use a shared lease acquired by pure ASGI middleware **before** any request body is read, and held until the response (including SSE/StreamingResponse) completes. This closes the FastAPI multipart race where `UploadFile` parsing previously ran before request-scoped dependencies. `CORSMiddleware` is outermost so middleware-generated `409` conflict JSON still receives `Access-Control-*` headers; CORS does not read the request body, so this order does not reopen the multipart race. Read-only `/api/auth/config` remains available. Reset takes an exclusive lease and is excluded from the shared middleware path; conflicts return stable `409` codes (`reset_in_progress` or `data_operation_in_progress`). Disabled reset returns `403 reset_disabled`; stage failure returns retryable `500 reset_failed` with `failed_stage`. Once the destructive stage starts, failure leaves a scope-specific recovery latch: shared work and the other reset scope receive `409 reset_recovery_required`, while retrying the required scope is allowed. Frontend catch paths honor backend `required_scope` when latching Retry, so a factory request that receives `required_scope=learning` (or the reverse) switches pending/recovery scope instead of looping the wrong reset. Pre-destructive safe refusals (`data_operation_in_progress`, `reset_in_progress`, `reset_disabled`, `invalid_confirmation`, and auth/validation 401/422) do **not** latch recovery and remain cancelable. Mismatched confirmation text returns `422 invalid_confirmation`; an unsupported scope is rejected separately by ordinary Pydantic validation with `422`.
-- Factory reset clears browser keys only after backend success, provisions one replacement anonymous identity with factory-default preferences, then broadcasts; peers invalidate in-flight provisioning continuations and reload. Ordinary anonymous provisioning captures the shared fingerprint at request start; writing the auth response requires both the tab-local generation and the shared fingerprint to still match, so a stale tab cannot resurrect a deleted token after another tab factory-resets.
+- Factory reset deterministically stages one replacement fingerprint **before** the destructive request, while retaining the old bearer needed for reset/retry. After backend success it clears user-facing browser keys but preserves that internal staged target, provisions factory-default settings against it, then broadcasts and reloads. Response-lost reloads and delayed tabs reuse the same target, so concurrent `/api/auth/anonymous` calls converge through the backend fingerprint uniqueness constraint instead of leaving orphan users. Ordinary anonymous provisioning still requires both tab-local generation and shared fingerprint to match before persisting a response.
 - Duplicate PDF uploads for the same user + content hash keep one canonical filename: the existing SQL document filename when present, otherwise the current request filename. That chosen source is written authoritatively into Chroma and BM25 (including updates to already-indexed chunk IDs without growing counts). After `DocumentRepository.create()` returns, if a concurrent first-upload race made SQL keep a different winning filename, the route reconciles Chroma/BM25 to `doc.filename` before responding. `create()` recovers `IntegrityError` on `(user_id, hash)` the same way anonymous user provisioning recovers fingerprint races. `BM25Index.add_chunks` / `search` hold an `RLock` across snapshot→update/append→rebuild so concurrent identical adds cannot duplicate chunks or let search observe mismatched `_bm25` / `_chunks` lengths.
 - Reset order is fixed: clear Chroma, rebuild and republish the **complete** retriever and replace the `InMemorySaver` checkpointer references, then execute one child-first SQLite transaction (`citations → messages → sessions`, `plan_events → plan_milestones → plans`, `mistakes/mastery/questions → topics → goals → documents`, then users for factory scope).
 - This order provides idempotent recovery, not a cross-store transaction. If Chroma replacement or SQLite deletion fails after the destructive stage begins, the in-process recovery latch remains until the same scope completes. A retry observes any already-empty store and safely finishes the remaining deletion. The latch is intentionally single-process and is lost on backend restart, matching the one-worker P5 boundary.
@@ -163,9 +164,9 @@ erDiagram
 Two scopes share that backend ordering:
 
 - `learning`: deletes all learning records, source chunks, vectors, retriever caches, and checkpoint state while preserving the local user row and browser model/provider/API/language/interface settings.
-- `factory`: deletes the learning scope plus backend user rows; after backend success, the initiating tab clears shared browser identity/settings keys before broadcasting completion. Receiving tabs clear only their own session state and reload, so a delayed tab cannot delete the new shared identity. On the successful path, all tabs then reload into one anonymous first-run state. If initiating browser cleanup fails after backend completion, broadcast is still attempted and the initiating tab remains in the retryable error state rather than claiming completion.
+- `factory`: deletes the learning scope plus backend user rows; the initiating tab stages the shared replacement fingerprint before reset, then clears old browser identity/settings keys only after backend success. Receiving tabs clear only their own session state and reload. The staged target survives local clearing and is reused by response-lost or delayed tabs, so all tabs converge on one anonymous first-run user. If initiating browser cleanup fails after backend completion, broadcast is still attempted and the initiating tab remains in the retryable error state rather than claiming completion.
 
-Summary and reset responses expose the same 15 count fields: `users`, `documents`, `source_chunks`, `vectors`, `chat_sessions`, `messages`, `citations`, `goals`, `topics`, `plans`, `plan_milestones`, `plan_events`, `questions`, `mastery`, and `mistakes`. `source_chunks` is the sum of SQL `documents.chunks_count`; `vectors` is the live Chroma count, so interrupted operations and legacy/orphaned embeddings can make them differ. `has_learning_data` ignores a user row by itself but is true for any other learning row or vector.
+Summary and reset responses expose the same 15 count fields: `users`, `documents`, `source_chunks`, `vectors`, `chat_sessions`, `messages`, `citations`, `goals`, `topics`, `plans`, `plan_milestones`, `plan_events`, `questions`, `mastery`, and `mistakes`. `source_chunks` is the sum of SQL `documents.chunks_count`; `vectors` is the live Chroma count, so interrupted operations and legacy/orphaned embeddings can make them differ. `has_learning_data` ignores a user row by itself but is true for any other learning row or vector. Summary also includes `current_user_exists` (boolean for the calling signed bearer only — no user id is returned) so the frontend can detect a stale Factory-reset identity before unlocking the workspace.
 
 **Consequences:** The startup gate, Settings Danger Zone, two-scope confirmations, cross-tab invalidation, and retry behavior can describe exactly what the current storage model does. The routed page is not mounted until the startup decision unlocks the workspace, so child lifecycle hooks cannot perform requests behind the gate. A reload during recovery reopens the blocking reset error with only the required-scope Retry action. Summary remains readable when reset is disabled, but `reset_enabled=false` makes the frontend skip the startup gate and hide the Danger Zone. A future per-user Chroma design must add ownership metadata and filtered retrieval throughout dense/BM25/reranking/tool paths **and replace this global-reset contract**; it cannot layer per-user deletion on the P5 coordinator unchanged.
 
@@ -262,27 +263,27 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | POST | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | POST | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | POST | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
-| POST | `/api/chat` | JWT/guest | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"done"}` |
-| GET | `/api/chat/sessions/current` | JWT/guest | `{session_id, started_at, summary}` |
-| GET | `/api/chat/sessions/{id}/messages` | JWT/guest | `{session_id, messages:[{role, content, citations[], agent_run?}]}` |
-| POST | `/api/documents` | JWT/guest | `{document_id, filename, chunks_count}` |
-| GET | `/api/documents` | JWT/guest | `[{id, filename, chunks_count}]` |
-| POST | `/api/goals` | JWT/guest | `{goal_id, title}` |
-| GET | `/api/plans/current` | JWT/guest | `{plan_id, goal_id, milestones[], updated_at}` |
-| PATCH | `/api/plans/{id}/milestones/{mid}` | JWT/guest | `{plan, event, validation_hint}` |
-| PATCH | `/api/plans/{id}/milestones/reorder` | JWT/guest | `PlanCurrentOut` |
-| GET | `/api/plans/{id}/events` | JWT/guest | `[PlanEventOut]` |
-| GET | `/api/mistakes/due` | JWT/guest | `[{mistake_id, question, due_at, srs_*, topic_name}]` |
-| POST | `/api/mistakes/{id}/review` | JWT/guest | `{correct, correct_answer, explanation, new_interval_days}` |
-| POST | `/api/mistakes/{id}/mark-understood` | JWT/guest | `{mastery_score, next_due_at}` |
-| GET | `/api/mastery` | JWT/guest | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
-| GET | `/api/users/me/stats` | JWT/guest | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
-| GET | `/api/data/summary` | strict signed bearer | `{reset_enabled, has_learning_data, ...15 counts}` |
+| POST | `/api/chat` | signed JWT + user row | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"done"}` |
+| GET | `/api/chat/sessions/current` | signed JWT + user row | `{session_id, started_at, summary}` |
+| GET | `/api/chat/sessions/{id}/messages` | signed JWT + user row | `{session_id, messages:[{role, content, citations[], agent_run?}]}` |
+| POST | `/api/documents` | signed JWT + user row | `{document_id, filename, chunks_count}` |
+| GET | `/api/documents` | signed JWT + user row | `[{id, filename, chunks_count}]` |
+| POST | `/api/goals` | signed JWT + user row | `{goal_id, title}` |
+| GET | `/api/plans/current` | signed JWT + user row | `{plan_id, goal_id, milestones[], updated_at}` |
+| PATCH | `/api/plans/{id}/milestones/{mid}` | signed JWT + user row | `{plan, event, validation_hint}` |
+| PATCH | `/api/plans/{id}/milestones/reorder` | signed JWT + user row | `PlanCurrentOut` |
+| GET | `/api/plans/{id}/events` | signed JWT + user row | `[PlanEventOut]` |
+| GET | `/api/mistakes/due` | signed JWT + user row | `[{mistake_id, question, due_at, srs_*, topic_name}]` |
+| POST | `/api/mistakes/{id}/review` | signed JWT + user row | `{correct, correct_answer, explanation, new_interval_days}` |
+| POST | `/api/mistakes/{id}/mark-understood` | signed JWT + user row | `{mastery_score, next_due_at}` |
+| GET | `/api/mastery` | signed JWT + user row | `{scores[], weak_topics[], overdue_count, streak_days, coverage}` |
+| GET | `/api/users/me/stats` | signed JWT + user row | `{streak_days, coverage, total_sessions, last_active_date, activity_daily[]}` |
+| GET | `/api/data/summary` | strict signed bearer | `{reset_enabled, has_learning_data, current_user_exists, ...15 counts}` |
 | POST | `/api/data/reset` | strict signed bearer + local mode | `{scope, status:"completed", deleted:{...15 counts}}` |
 | GET | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
 | GET | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
 
-All AI-bearing routes read **BYOK headers** (see §8) per request. Existing application routes use JWT Bearer through `get_current_user`, which retains a legacy `"default-user"` fallback for backward compatibility. Data summary/reset deliberately use `require_signed_user` and never fall back.
+All AI-bearing routes read **BYOK headers** (see §8) per request. Learning-data routes authenticate with JWT Bearer through `require_existing_user` (valid signed token **and** an existing user row; no `"default-user"` fallback). Data summary/reset use `require_signed_user` (valid signed token; user row may be absent for factory-reset retry) and never fall back to `"default-user"`.
 
 ---
 
@@ -339,15 +340,26 @@ Responsive: `<768px` — sidebar replaced by MobileNav bottom tab bar, Chat/Quiz
 
 ## 10. Deployment Topology
 
+Two **mutually exclusive** local paths. Both bind Ollama on `127.0.0.1:11434` when the Ollama service is active — do not run host Ollama and Compose Ollama together.
+
 ```
-Primary (local demo):
+Primary (canonical reviewer path — host-run):
+  host Ollama  127.0.0.1:11434
+  ├── gemma4:e4b + nomic-embed-text (host pulls; verified agent-loop demo)
+  ├── backend  127.0.0.1:8000 (STUDY_COACH_LOCAL_MODE=1, CHROMA_PATH=./chroma_data)
+  └── frontend 127.0.0.1:5173 (pnpm dev)
+
+Alternative (Docker Compose — stop host Ollama first):
   Docker Compose
   ├── backend  127.0.0.1:8000 (FastAPI + LangGraph + Chroma + SQLite)
   │   ├── STUDY_COACH_LOCAL_MODE=1
   │   ├── CHROMA_PATH=/app/data/chroma
   │   └── OLLAMA_HOST=http://ollama:11434
   ├── frontend 127.0.0.1:5173 (Vite dev server; proxy target http://backend:8000)
-  └── ollama   127.0.0.1:11434 (nomic-embed-text + gemma3:4b + qwen2.5:7b pre-pulled)
+  └── ollama   127.0.0.1:11434
+      ├── isolated ollama_data volume (host models not visible)
+      └── pre-pulled: nomic-embed-text, gemma3:4b, qwen2.5:7b
+          (gemma4:e4b: docker compose exec ollama ollama pull gemma4:e4b)
 
 Deferred cloud scaffold:
   fly.toml + Dockerfile.fly
@@ -358,7 +370,7 @@ Deferred cloud scaffold:
       └── retrieval still requires an embedding-provider design
 ```
 
-The clean no-cache Compose build reduced backend/frontend contexts from 384.90 MB / 263.59 MB to 47.96 kB / 4.77 kB. Runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200. It did not verify Ollama embedding or generation. On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
+Current-head Path A Chrome verification (2026-07-31): `gemma4:e4b` + `qwen2.5:7b` judge + `nomic-embed-text` — Settings Connected and tool calling supported; 49/61-chunk indexing; grounded Chat; Quiz/mistake/mastery; Plan/milestones/events; learning reset, re-upload, cross-tab acknowledgement; Factory defaults/reload; old-JWT refusal/retry; and concurrent three-tab recovery to one user. Historical Compose runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200; it did not verify Ollama embedding or generation inside the container. Automated remediation re-verified on 2026-07-31 (411/130/541, build, `docker compose config`). On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
 
 ---
 
@@ -371,7 +383,7 @@ The clean no-cache Compose build reduced backend/frontend contexts from 384.90 M
 | API key storage | `x-api-key` never logged or persisted server-side; frontend `localStorage` (demo scope) |
 | CORS | FastAPI `CORSMiddleware` — frontend origin only |
 | SQL injection | SQLAlchemy ORM (parameterized queries) |
-| Document upload | file size limit + `.pdf` extension whitelist |
+| Document upload | PDF file limit 25 MiB (`MAX_UPLOAD_BYTES`); whole multipart request cap `MAX_UPLOAD_REQUEST_BYTES` (= file limit + 64 KiB overhead) enforced by pure ASGI middleware **before** multipart spool; `.pdf` extension whitelist; `%PDF` magic-byte check; chunked read; stable `4xx` (`415`/`400`/`413`); per-request temp file cleaned on failure and cancellation |
 | XSS | Vue 3 template escaping by default; no `v-html` on user content |
 
 ---

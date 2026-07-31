@@ -28,6 +28,7 @@ import { useQuiz } from './stores/quiz'
 import {
   invalidateAnonymousProvisioning,
   provisionFactoryIdentity,
+  stageFactoryRecoveryFingerprint,
 } from './stores/settings'
 import { useMediaQuery } from './composables/useMediaQuery'
 import MobileNav from './components/MobileNav.vue'
@@ -69,6 +70,7 @@ lifecycle.initialize({
   clearChoice: () => clearStartupChoice(sessionStorage),
   clearFactory: () => clearFactoryBrowserState(localStorage, sessionStorage),
   clearFactorySession: () => clearFactorySessionState(sessionStorage),
+  stageFactoryIdentity: stageFactoryRecoveryFingerprint,
   provisionFactoryIdentity,
   invalidateProvisioning: invalidateAnonymousProvisioning,
   broadcast: scope => lifecycleChannel.publish(scope),

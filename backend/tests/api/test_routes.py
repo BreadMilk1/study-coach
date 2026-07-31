@@ -1,5 +1,6 @@
 import asyncio
 import json
+import tempfile
 import threading
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from app.api.deps import get_graph, get_session
 from app.auth import issue_token
 from app.main import create_app
+from tests.helpers import ensure_user
 
 
 class StubRetriever:
@@ -151,6 +153,7 @@ def app(tmp_path, stub_retriever, stub_llm, stub_document_processor, monkeypatch
     from app.db.repositories import DocumentRepository
     from app.db.session import session_scope
     with session_scope() as session:
+        ensure_user(session, "default-user")
         DocumentRepository(session).create(
             user_id="default-user",
             filename="fixture.pdf",
@@ -162,7 +165,10 @@ def app(tmp_path, stub_retriever, stub_llm, stub_document_processor, monkeypatch
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    return TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    )
 
 
 def test_health_endpoint(client):
@@ -212,6 +218,306 @@ def test_upload_document_calls_processor_and_indexes_chunks(client, stub_retriev
     # filename propagated as source
     assert all(c["source"] == "lec.pdf" for c in stub_retriever.added)
     assert not stub_document_processor.paths[0].exists()
+
+
+def test_upload_rejects_non_pdf_extension(client, stub_document_processor):
+    response = client.post(
+        "/api/documents",
+        files={"file": ("notes.txt", b"%PDF-1.4 pretend", "text/plain")},
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"]["code"] == "unsupported_media_type"
+    assert stub_document_processor.calls == 0
+
+
+def test_upload_rejects_disallowed_mime_type(client, stub_document_processor):
+    response = client.post(
+        "/api/documents",
+        files={"file": ("notes.pdf", b"%PDF-1.4 pretend", "text/html")},
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"]["code"] == "unsupported_media_type"
+    assert stub_document_processor.calls == 0
+
+
+def test_upload_rejects_non_pdf_magic_bytes(client, stub_document_processor):
+    response = client.post(
+        "/api/documents",
+        files={"file": ("broken.pdf", b"not-a-pdf-at-all", "application/pdf")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_pdf"
+    assert stub_document_processor.calls == 0
+
+
+def test_upload_rejects_parser_failure_without_500(client, monkeypatch):
+    def boom(self, _path):
+        raise RuntimeError("secret parser path /tmp/inner.pdf")
+
+    monkeypatch.setattr(type(client.app.state.document_processor), "process_pdf", boom)
+
+    response = client.post(
+        "/api/documents",
+        files={"file": ("broken.pdf", b"%PDF-1.4 corrupt-body", "application/pdf")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_pdf"
+    detail = response.json()["detail"]
+    assert "secret parser" not in str(detail)
+    assert "/tmp/inner" not in str(detail)
+
+
+def test_upload_rejects_oversize_payload(client, monkeypatch, stub_document_processor):
+    import app.api.routes as routes_mod
+
+    monkeypatch.setattr(routes_mod, "MAX_UPLOAD_BYTES", 64)
+    response = client.post(
+        "/api/documents",
+        files={"file": ("big.pdf", b"%PDF-1.4 " + b"x" * 64, "application/pdf")},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "payload_too_large"
+    assert stub_document_processor.calls == 0
+
+
+def test_upload_accepts_exact_size_limit_boundary(client, monkeypatch, stub_document_processor):
+    import app.api.routes as routes_mod
+
+    monkeypatch.setattr(routes_mod, "MAX_UPLOAD_BYTES", 32)
+    payload = b"%PDF-1.4 " + b"y" * (32 - len(b"%PDF-1.4 "))
+    assert len(payload) == 32
+    response = client.post(
+        "/api/documents",
+        files={"file": ("edge.pdf", payload, "application/pdf")},
+    )
+    assert response.status_code == 200
+    assert stub_document_processor.calls == 1
+    assert not stub_document_processor.paths[0].exists()
+
+
+def test_upload_cleans_temp_file_on_rejection(client, monkeypatch, stub_document_processor):
+    import app.api.routes as routes_mod
+
+    monkeypatch.setattr(routes_mod, "MAX_UPLOAD_BYTES", 16)
+    before = set(Path(tempfile.gettempdir()).glob("sc_*.pdf"))
+    response = client.post(
+        "/api/documents",
+        files={"file": ("big.pdf", b"%PDF-1.4 " + b"z" * 32, "application/pdf")},
+    )
+    assert response.status_code == 413
+    after = set(Path(tempfile.gettempdir()).glob("sc_*.pdf"))
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_upload_cancelled_read_cleans_temp_and_propagates(monkeypatch):
+    import app.api.routes as routes_mod
+
+    created: list[Path] = []
+    real_named = tempfile.NamedTemporaryFile
+
+    def tracking_named_temporary_file(**kwargs):
+        handle = real_named(**kwargs)
+        created.append(Path(handle.name))
+        return handle
+
+    monkeypatch.setattr(routes_mod.tempfile, "NamedTemporaryFile", tracking_named_temporary_file)
+
+    class CancellingUpload:
+        filename = "cancel.pdf"
+        content_type = "application/pdf"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def read(self, _size: int = -1) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return b"%PDF-1.4 partial-chunk"
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await routes_mod._read_pdf_upload_to_temp(CancellingUpload())
+
+    assert len(created) == 1
+    assert not created[0].exists()
+
+
+def _asgi_upload_scope(app, *, body: bytes, content_length: bytes | None, token: str):
+    boundary = "----LimitUploadBoundary"
+    headers = [
+        (b"host", b"testserver"),
+        (b"content-type", f"multipart/form-data; boundary={boundary}".encode()),
+        (b"authorization", f"Bearer {token}".encode()),
+        (b"origin", b"http://localhost:5173"),
+    ]
+    if content_length is not None:
+        headers.append((b"content-length", content_length))
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/documents",
+        "raw_path": b"/api/documents",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+        "app": app,
+        "state": {},
+    }, boundary
+
+
+def test_upload_rejects_oversized_content_length_before_body(app, client, monkeypatch):
+    import app.api.upload_limits as limits
+
+    monkeypatch.setattr(limits, "MAX_UPLOAD_REQUEST_BYTES", 32)
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "upload-user")
+    token = issue_token("upload-user", "guest")
+    scope, _boundary = _asgi_upload_scope(
+        app,
+        body=b"",
+        content_length=b"999999",
+        token=token,
+    )
+    response_messages: list[dict] = []
+    receive_calls = {"n": 0}
+
+    async def receive():
+        receive_calls["n"] += 1
+        return {"type": "http.request", "body": b"should-not-be-needed", "more_body": False}
+
+    async def send(message):
+        response_messages.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    starts = [m for m in response_messages if m.get("type") == "http.response.start"]
+    assert starts and starts[0]["status"] == 413
+    header_map = {
+        k.decode().lower(): v.decode() for k, v in starts[0].get("headers", [])
+    }
+    assert header_map.get("access-control-allow-origin") == "http://localhost:5173"
+    assert app.state.data_lifecycle_gate._active_operations == 0
+    # Body receive must not be required for Content-Length rejection.
+    assert receive_calls["n"] == 0
+
+
+def test_slow_multipart_returns_413_before_remaining_body(
+    app,
+    client,
+    monkeypatch,
+):
+    """Request-body cap must fire before multipart finishes spooling."""
+    import app.api.upload_limits as limits
+
+    monkeypatch.setattr(limits, "MAX_UPLOAD_REQUEST_BYTES", 40)
+    monkeypatch.setenv("STUDY_COACH_LOCAL_MODE", "1")
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "upload-user")
+    token = issue_token("upload-user", "guest")
+
+    boundary = "----SlowOversizeBoundary"
+    pdf_bytes = b"%PDF-1.4 " + (b"x" * 80)
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="big.pdf"\r\n'
+        f"Content-Type: application/pdf\r\n\r\n"
+    ).encode() + pdf_bytes + f"\r\n--{boundary}--\r\n".encode()
+    first = body[:60]
+    rest = body[60:]
+    assert len(first) > 40
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/documents",
+        "raw_path": b"/api/documents",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (
+                b"content-type",
+                f"multipart/form-data; boundary={boundary}".encode(),
+            ),
+            # Spoofed short Content-Length; stream still exceeds the request cap.
+            (b"content-length", b"10"),
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"origin", b"http://localhost:5173"),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+        "app": app,
+        "state": {},
+    }
+
+    body_blocked = threading.Event()
+    release_body = threading.Event()
+    response_started = threading.Event()
+    upload_result: dict[str, object] = {}
+    response_messages: list[dict] = []
+    phase = {"n": 0}
+
+    async def receive():
+        if phase["n"] == 0:
+            phase["n"] = 1
+            return {"type": "http.request", "body": first, "more_body": True}
+        if phase["n"] == 1:
+            phase["n"] = 2
+            body_blocked.set()
+            await asyncio.to_thread(release_body.wait)
+            return {"type": "http.request", "body": rest, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        response_messages.append(message)
+        if message.get("type") == "http.response.start":
+            response_started.set()
+
+    def run_upload() -> None:
+        try:
+            asyncio.run(app(scope, receive, send))
+            upload_result["ok"] = True
+        except BaseException as exc:  # pragma: no cover
+            upload_result["error"] = exc
+
+    thread = threading.Thread(target=run_upload)
+    thread.start()
+    try:
+        assert response_started.wait(timeout=5), "413 did not arrive before remaining body"
+        assert not body_blocked.is_set(), "server waited on remaining body before 413"
+        assert app.state.data_lifecycle_gate._active_operations == 0
+        # Lease must be free so a concurrent reset is not blocked by the refusal.
+        reset = client.post(
+            "/api/data/reset",
+            headers={"Authorization": f"Bearer {issue_token('reset-user', 'member')}"},
+            json={
+                "scope": "learning",
+                "confirmation": "CLEAR_LEARNING_DATA",
+            },
+        )
+        assert reset.status_code == 200
+    finally:
+        release_body.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert "error" not in upload_result
+    starts = [m for m in response_messages if m.get("type") == "http.response.start"]
+    assert starts and starts[0]["status"] == 413
+    header_map = {
+        k.decode().lower(): v.decode() for k, v in starts[0].get("headers", [])
+    }
+    assert header_map.get("access-control-allow-origin") == "http://localhost:5173"
 
 
 def test_same_pdf_uploads_use_distinct_temporary_paths(
@@ -417,6 +723,10 @@ def test_concurrent_first_uploads_converge_on_winning_sql_filename(
     )
     app.state.retriever = hybrid
     payload = b"%PDF-1.4 concurrent-canonical-source"
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "same-user")
     lookup_lock = threading.Lock()
     lookup_count = {"n": 0}
     create_barrier = threading.Barrier(2)
@@ -518,12 +828,13 @@ def test_upload_removes_exact_temporary_path_when_processing_fails(
 
     monkeypatch.setattr(stub_document_processor, "process_pdf", fail)
 
-    with pytest.raises(RuntimeError, match="parse failed"):
-        client.post(
-            "/api/documents",
-            files={"file": ("broken.pdf", b"not a PDF", "application/pdf")},
-        )
+    response = client.post(
+        "/api/documents",
+        files={"file": ("broken.pdf", b"%PDF-1.4 still broken", "application/pdf")},
+    )
 
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_pdf"
     assert len(captured) == 1
     assert not captured[0].exists()
 
@@ -580,6 +891,11 @@ def test_reset_is_rejected_until_streaming_chat_response_finishes(
                 chat_result["response"] = stream_client.post(
                     "/api/chat",
                     json={"message": "hold this stream open"},
+                    headers={
+                        "Authorization": (
+                            f"Bearer {issue_token('default-user', 'guest')}"
+                        )
+                    },
                 )
         except BaseException as exc:  # pragma: no cover - reported by main thread
             chat_result["error"] = exc
@@ -629,6 +945,10 @@ def test_reset_is_rejected_while_multipart_upload_body_is_pending(
         f"Content-Type: application/pdf\r\n\r\n"
     ).encode() + pdf_bytes + f"\r\n--{boundary}--\r\n".encode()
     first, rest = body[:48], body[48:]
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "upload-user")
     token = issue_token("upload-user", "guest")
 
     scope = {

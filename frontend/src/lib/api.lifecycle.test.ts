@@ -41,6 +41,7 @@ const EMPTY_COUNTS: DataCounts = {
 const EMPTY_SUMMARY: DataSummaryDto = {
   reset_enabled: false,
   has_learning_data: false,
+  current_user_exists: true,
   ...EMPTY_COUNTS,
 }
 

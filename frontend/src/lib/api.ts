@@ -427,6 +427,8 @@ export interface DataCounts {
 export interface DataSummaryDto extends DataCounts {
   reset_enabled: boolean
   has_learning_data: boolean
+  /** False when the signed bearer no longer maps to a user row (e.g. after factory reset). */
+  current_user_exists: boolean
 }
 
 export interface ResetResultDto {
