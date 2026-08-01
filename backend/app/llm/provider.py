@@ -48,6 +48,8 @@ def get_chat_model(config: LLMConfig, **kwargs):
         extras["api_key"] = config.api_key
     if config.base_url:
         extras["base_url"] = config.base_url
+    if lc_provider == "ollama":
+        extras["client_kwargs"] = {"trust_env": False}
     return init_chat_model(
         model=config.model,
         model_provider=lc_provider,

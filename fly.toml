@@ -7,6 +7,7 @@ primary_region = "hkg"
 [env]
   OLLAMA_ENABLED = "false"
   DATABASE_URL = "sqlite:///data/study_coach.db"
+  STUDY_COACH_LOCAL_MODE = "0"
 
 [mounts]
   source = "study_coach_data"

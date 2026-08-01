@@ -15,7 +15,9 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
 from app.api import deps
+from app.auth import issue_token
 from app.main import create_app
+from tests.helpers import ensure_user
 
 
 def _msg(content="", tool_calls=None, input_tokens=10, output_tokens=5):
@@ -118,6 +120,7 @@ def client(monkeypatch, tmp_path):
     from app.db.repositories import DocumentRepository
     from app.db.session import session_scope
     with session_scope() as session:
+        ensure_user(session, "default-user")
         DocumentRepository(session).create(
             user_id="default-user",
             filename="fixture.pdf",
@@ -125,7 +128,10 @@ def client(monkeypatch, tmp_path):
             chunks_count=1,
         )
 
-    with TestClient(app) as c:
+    with TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    ) as c:
         yield c
 
 

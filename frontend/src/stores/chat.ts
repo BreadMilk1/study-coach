@@ -5,6 +5,11 @@ import {
   getStoredChatSessionId,
   setStoredChatSessionId,
 } from '../lib/api'
+import {
+  captureLearningStateEpoch,
+  invalidateLearningState,
+  isLearningStateEpochCurrent,
+} from '../lib/dataLifecycle'
 import { extractMermaid, looksLikeEmptyCorpusRefusal } from '../lib/parse'
 import { usePlan } from './plan'
 import { useQuiz } from './quiz'
@@ -98,17 +103,28 @@ export const useChat = defineStore('chat', {
         useQuiz().setNeedsUpload(looksLikeEmptyCorpusRefusal(last.content))
       }
     },
+    resetAfterDataClear() {
+      invalidateLearningState()
+      this.messages = []
+      this.streaming = false
+      this.trace = []
+      this.sessionId = ''
+      this.restoring = false
+    },
     async restoreCurrentSession() {
       if (this.streaming || this.restoring || this.messages.length > 0) return
+      const epoch = captureLearningStateEpoch()
       this.restoring = true
       try {
         let sessionId = this.sessionId || getStoredChatSessionId()
         if (!sessionId) {
           const current = await getCurrentChatSession()
+          if (!isLearningStateEpochCurrent(epoch)) return
           sessionId = current.session_id
         }
         if (!sessionId) return
         const history = await getChatSessionMessages(sessionId)
+        if (!isLearningStateEpochCurrent(epoch)) return
         this.setSessionId(history.session_id)
         this.messages = history.messages.map((m) => ({
           id: m.id,
@@ -124,7 +140,7 @@ export const useChat = defineStore('chat', {
       } catch {
         // No prior session yet, or it belongs to a different user/token.
       } finally {
-        this.restoring = false
+        if (isLearningStateEpochCurrent(epoch)) this.restoring = false
       }
     },
   },

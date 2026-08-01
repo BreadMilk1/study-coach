@@ -1,11 +1,12 @@
 import hashlib
 import os
 
+# Ensure test collection never imports app.main in production mode, even when
+# the outer environment explicitly sets STUDY_COACH_TEST_MODE=0.
+os.environ["STUDY_COACH_TEST_MODE"] = "1"
+
 import chromadb
 import pytest
-
-# Ensure tests never spin up the real retriever (Chroma + Ollama)
-os.environ.setdefault("STUDY_COACH_TEST_MODE", "1")
 
 
 class WordBagEmbedder:

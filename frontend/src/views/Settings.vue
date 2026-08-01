@@ -1,18 +1,50 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useSettings, googleLogin, getAccessToken } from '../stores/settings'
-import { checkToolCapable, pingModel } from '../lib/api'
+import { ref, watch } from 'vue'
+import { AlertTriangle } from 'lucide-vue-next'
+
+import { useSettings } from '../stores/settings'
+import { useDataLifecycle } from '../stores/dataLifecycle'
+import { useNotifications } from '../stores/notifications'
+import { checkToolCapable, pingModel, type DataCounts } from '../lib/api'
 import { useI18n } from 'vue-i18n'
 
-const { locale } = useI18n()
+const { locale, t } = useI18n()
+const lifecycle = useDataLifecycle()
+const notifications = useNotifications()
 const s = useSettings()
 const toolTesting = ref(false)
 const toolNote = ref('')
 const pingTesting = ref(false)
 const pingResult = ref<{ ok: boolean; note: string; latency_ms: number } | null>(null)
 
+const countKeys: (keyof DataCounts)[] = [
+  'documents',
+  'source_chunks',
+  'vectors',
+  'chat_sessions',
+  'messages',
+  'citations',
+  'goals',
+  'topics',
+  'questions',
+  'mistakes',
+  'mastery',
+  'plans',
+  'plan_milestones',
+  'plan_events',
+  'users',
+]
+
+watch(() => lifecycle.phase, (phase) => {
+  if (phase === 'ready') void lifecycle.refreshSummary()
+}, { immediate: true, flush: 'post' })
+
 function save() {
   s.persist()
+  notifications.push({
+    kind: 'success',
+    message: t('settings.saved'),
+  })
 }
 
 function onLanguageChange() {
@@ -31,62 +63,6 @@ async function runPing() {
   } finally {
     pingTesting.value = false
   }
-}
-
-// Google Identity Services
-const googleClientId = ref('')
-const googleReady = ref(false)
-
-onMounted(async () => {
-  try {
-    const resp = await fetch('/api/auth/config')
-    const { google_client_id } = await resp.json()
-    googleClientId.value = google_client_id
-    if (google_client_id) {
-      // Poll for GIS script (loaded async defer in index.html)
-      await new Promise<void>(resolve => {
-        const check = () => {
-          if (typeof (window as any).google?.accounts?.id !== 'undefined') {
-            resolve()
-          } else {
-            setTimeout(check, 300)
-          }
-        }
-        check()
-      })
-      ;(window as any).google.accounts.id.initialize({
-        client_id: google_client_id,
-        callback: handleCredentialResponse,
-        auto_select: false,
-      })
-      googleReady.value = true
-    }
-  } catch { /* not configured */ }
-})
-
-function triggerGoogleLogin() {
-  ;(window as any).google?.accounts?.id?.prompt()
-}
-
-async function handleCredentialResponse(response: any) {
-  try {
-    await googleLogin(response.credential)
-    s.tier = 'member'
-    s.persist()
-    location.reload()
-  } catch (e: any) {
-    alert(`Google sign-in failed: ${e.message}`)
-  }
-}
-
-function signOut() {
-  if (typeof (window as any).google !== 'undefined') {
-    ;(window as any).google.accounts.id.disableAutoSelect()
-  }
-  s.accessToken = ''
-  s.tier = 'guest'
-  s.persist()
-  getAccessToken().then(() => location.reload())
 }
 
 async function runToolCheck() {
@@ -110,6 +86,7 @@ async function runToolCheck() {
     <p class="text-white/60 text-sm mb-6">
       Bring-your-own-key. API key is stored in your browser localStorage; the server never sees nor persists it.
     </p>
+    <p class="text-white/60 text-sm mb-6">{{ $t('settings.localFirst') }}</p>
     <div class="space-y-4">
       <label class="block">
         <span class="text-sm text-white/70">Provider</span>
@@ -198,31 +175,6 @@ async function runToolCheck() {
           <span class="text-sm text-white/70">{{ $t('settings.debugMode') }}</span>
         </label>
 
-        <div class="mt-4 pt-3 border-t border-white/10">
-          <span class="text-sm text-white/70">Account</span>
-          <p class="text-xs text-white/40 mt-1">
-            Tier: <span class="font-mono" :class="s.tier === 'member' ? 'text-green-400' : 'text-white/50'">{{ s.tier }}</span>
-          </p>
-
-          <div v-if="s.tier !== 'member'" class="mt-2 space-y-2">
-            <button v-if="googleReady"
-                    @click="triggerGoogleLogin"
-                    class="px-4 py-2 rounded-lg bg-white text-gray-900 text-sm font-medium hover:bg-gray-100 transition-colors flex items-center gap-2">
-              <svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-              Sign in with Google
-            </button>
-            <p v-if="googleClientId && !googleReady" class="text-xs text-white/40">Loading Google Sign-In...</p>
-            <p v-if="!googleClientId" class="text-xs text-amber-400">
-              Google OAuth not configured. Set GOOGLE_CLIENT_ID on the server.
-            </p>
-          </div>
-
-          <button v-if="s.tier === 'member'"
-                  @click="signOut"
-                  class="mt-2 px-3 py-1.5 rounded-md border border-white/10 text-xs text-white/50 hover:text-white/80 transition-colors">
-            Sign out
-          </button>
-        </div>
       </fieldset>
 
       <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
@@ -253,6 +205,109 @@ async function runToolCheck() {
               class="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-sm">
         {{ $t('settings.save') }}
       </button>
+
+      <section
+        v-if="lifecycle.summary?.reset_enabled"
+        class="mt-10 border-t border-danger/30 pt-8"
+        aria-labelledby="danger-zone-title"
+      >
+        <p class="font-mono text-xs uppercase tracking-[0.16em] text-danger">
+          {{ $t('settings.dangerZone.eyebrow') }}
+        </p>
+        <div class="mt-2 flex items-start gap-3">
+          <AlertTriangle class="mt-0.5 h-5 w-5 shrink-0 text-danger" aria-hidden="true" />
+          <div>
+            <h3 id="danger-zone-title" class="text-lg font-semibold text-fg">
+              {{ $t('settings.dangerZone.title') }}
+            </h3>
+            <p class="mt-1 max-w-3xl text-sm leading-6 text-fg-muted">
+              {{ $t('settings.dangerZone.description') }}
+            </p>
+          </div>
+        </div>
+
+        <p class="mt-6 text-sm font-medium text-fg">
+          {{ $t('settings.dangerZone.countsTitle') }}
+        </p>
+        <p
+          v-if="lifecycle.summaryRefreshing"
+          class="mt-2 text-sm text-primary-2"
+          role="status"
+          aria-live="polite"
+        >
+          {{ $t('settings.dangerZone.refreshingCounts') }}
+        </p>
+        <div
+          v-else-if="lifecycle.phase === 'ready' && lifecycle.error"
+          class="mt-3 flex flex-col gap-3 rounded-md bg-danger-bg px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+          role="alert"
+        >
+          <p class="text-sm text-danger">
+            {{ $t('settings.dangerZone.refreshError', { message: lifecycle.error.message }) }}
+          </p>
+          <button
+            type="button"
+            class="shrink-0 rounded-md border border-danger/50 px-3 py-1.5 text-sm font-medium text-danger transition-colors hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50"
+            @click="lifecycle.refreshSummary()"
+          >
+            {{ $t('settings.dangerZone.retryCounts') }}
+          </button>
+        </div>
+        <dl class="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-4">
+          <div
+            v-for="key in countKeys"
+            :key="key"
+            class="border-b border-border pb-2"
+          >
+            <dt class="text-xs leading-5 text-fg-muted">
+              {{ $t(`settings.dangerZone.counts.${key}`) }}
+            </dt>
+            <dd class="mt-1 font-mono text-base text-fg">
+              {{ lifecycle.summary[key] }}
+            </dd>
+          </div>
+        </dl>
+
+        <div class="mt-8 divide-y divide-border-strong border-y border-border-strong">
+          <div class="grid gap-4 py-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div>
+              <h4 class="text-sm font-semibold text-fg">
+                {{ $t('settings.dangerZone.learningTitle') }}
+              </h4>
+              <p class="mt-1 max-w-3xl text-sm leading-6 text-fg-muted">
+                {{ $t('settings.dangerZone.learningBody') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md border border-danger/50 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="lifecycle.phase !== 'ready' || lifecycle.summaryRefreshing"
+              @click="lifecycle.requestLearningReset()"
+            >
+              {{ $t('dataLifecycle.actions.clearLearning') }}
+            </button>
+          </div>
+
+          <div class="grid gap-4 py-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div>
+              <h4 class="text-sm font-semibold text-fg">
+                {{ $t('settings.dangerZone.factoryTitle') }}
+              </h4>
+              <p class="mt-1 max-w-3xl text-sm leading-6 text-fg-muted">
+                {{ $t('settings.dangerZone.factoryBody') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md bg-danger px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-danger/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="lifecycle.phase !== 'ready' || lifecycle.summaryRefreshing"
+              @click="lifecycle.requestFactoryReset()"
+            >
+              {{ $t('dataLifecycle.actions.factoryReset') }}
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </template>

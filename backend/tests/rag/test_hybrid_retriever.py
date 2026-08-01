@@ -59,6 +59,145 @@ def test_bm25_index_returns_empty_when_no_match():
     assert results == []
 
 
+def test_bm25_index_add_chunks_updates_source_without_growing():
+    bm25 = BM25Index()
+    chunk = {
+        "chunk_id": "hash:1:0",
+        "content": "HyDE rewrites queries before embedding",
+        "source": "a.pdf",
+        "page": 1,
+    }
+    other = {
+        "chunk_id": "other:1:0",
+        "content": "Unrelated spaced repetition schedule",
+        "source": "c.pdf",
+        "page": 1,
+    }
+    bm25.add_chunks([chunk, other])
+    bm25.add_chunks([{**chunk, "source": "b.pdf"}])
+
+    assert [c["chunk_id"] for c in bm25._chunks] == ["hash:1:0", "other:1:0"]
+    assert bm25._chunks[0]["source"] == "b.pdf"
+    assert bm25._chunks[1]["source"] == "c.pdf"
+
+
+def test_bm25_concurrent_add_chunks_does_not_duplicate_under_lock():
+    """ControllableLock proves writer/writer and writer/search serialize on real RLock."""
+    import threading
+    import time
+
+    class ControllableLock:
+        """Test-only wrapper: real RLock with deterministic hold/blocked signals."""
+
+        def __init__(self) -> None:
+            self._lock = threading.RLock()
+            self.hold_after_acquire = False
+            self.acquired = threading.Event()
+            self.allow_continue = threading.Event()
+            self.blocked = threading.Event()
+
+        def __enter__(self):
+            if not self._lock.acquire(blocking=False):
+                self.blocked.set()
+                self._lock.acquire(blocking=True)
+            if self.hold_after_acquire:
+                self.hold_after_acquire = False
+                self.acquired.set()
+                assert self.allow_continue.wait(timeout=5)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self._lock.release()
+            return False
+
+    chunks = [
+        {
+            "chunk_id": f"id-{i}",
+            "content": f"unique keyword{i} retrieval content",
+            "source": "a.pdf",
+            "page": i,
+        }
+        for i in range(20)
+    ]
+
+    bm25 = BM25Index()
+    lock = ControllableLock()
+    bm25._lock = lock
+
+    lock.hold_after_acquire = True
+    lock.allow_continue.clear()
+    lock.acquired.clear()
+    lock.blocked.clear()
+
+    writer_a_done = threading.Event()
+    writer_b_done = threading.Event()
+
+    def writer_a() -> None:
+        bm25.add_chunks(chunks)
+        writer_a_done.set()
+
+    def writer_b() -> None:
+        assert lock.acquired.wait(timeout=5)
+        bm25.add_chunks(chunks)
+        writer_b_done.set()
+
+    thread_a = threading.Thread(target=writer_a)
+    thread_b = threading.Thread(target=writer_b)
+    thread_a.start()
+    assert lock.acquired.wait(timeout=5)
+    thread_b.start()
+    assert lock.blocked.wait(timeout=5)
+    time.sleep(0.05)
+    assert not writer_b_done.is_set()
+    lock.allow_continue.set()
+    thread_a.join(timeout=5)
+    thread_b.join(timeout=5)
+    assert writer_a_done.is_set() and writer_b_done.is_set()
+    assert len(bm25._chunks) == 20
+    assert len(bm25._tokenized) == 20
+    assert len({c["chunk_id"] for c in bm25._chunks}) == 20
+
+    # Writer holds the lock while search contends and must wait.
+    gate = BM25Index()
+    gate_lock = ControllableLock()
+    gate._lock = gate_lock
+    gate.add_chunks(chunks[:10])
+
+    gate_lock.hold_after_acquire = True
+    gate_lock.allow_continue.clear()
+    gate_lock.acquired.clear()
+    gate_lock.blocked.clear()
+    search_done = threading.Event()
+
+    def writer() -> None:
+        gate.add_chunks([chunks[10]])
+
+    def reader() -> None:
+        assert gate_lock.acquired.wait(timeout=5)
+        gate.search("keyword0")
+        search_done.set()
+
+    writer_thread = threading.Thread(target=writer)
+    reader_thread = threading.Thread(target=reader)
+    writer_thread.start()
+    assert gate_lock.acquired.wait(timeout=5)
+    reader_thread.start()
+    assert gate_lock.blocked.wait(timeout=5)
+    time.sleep(0.05)
+    assert not search_done.is_set()
+    gate_lock.allow_continue.set()
+    writer_thread.join(timeout=5)
+    reader_thread.join(timeout=5)
+    assert search_done.is_set()
+    assert len(gate._chunks) == 11
+    assert len(gate._tokenized) == 11
+    assert len({c["chunk_id"] for c in gate._chunks}) == 11
+    hit = gate.search("keyword0", top_k=5)
+    assert hit and hit[0]["chunk_id"] == "id-0"
+    assert gate._bm25 is not None
+    assert len(gate._bm25.get_scores(["keyword0"])) == len(gate._chunks)
+
+
 def test_reciprocal_rank_fusion_weights_chunks_in_multiple_lists_higher():
     fused = reciprocal_rank_fusion([
         ["a", "b"],

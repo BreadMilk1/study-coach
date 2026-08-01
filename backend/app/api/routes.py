@@ -38,10 +38,13 @@ from .deps import (
     get_quiz_master_agent,
     get_quiz_mode,
     get_retriever,
-    get_current_user,
+    require_existing_user,
 )
+from .upload_limits import MAX_UPLOAD_BYTES
 
 router = APIRouter(prefix="/api")
+# Shared lease is acquired by DataLifecycleLeaseMiddleware before body read.
+learning_router = APIRouter()
 
 _SAME_MODEL_WARNING = (
     "⚠️ Self-check note: the judge is using the same model as the generator — "
@@ -346,36 +349,132 @@ async def ping_model(
         )
 
 
-@router.post("/documents")
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+_PDF_MAGIC = b"%PDF"
+
+
+def _upload_error(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
+
+def _validate_pdf_upload_headers(filename: str | None, content_type: str | None) -> None:
+    name = filename or ""
+    if not name.lower().endswith(".pdf"):
+        raise _upload_error(
+            415,
+            "unsupported_media_type",
+            "Only PDF uploads are supported.",
+        )
+    media_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if media_type in {"", "application/pdf", "application/octet-stream"}:
+        return
+    raise _upload_error(
+        415,
+        "unsupported_media_type",
+        "Only PDF uploads are supported.",
+    )
+
+
+async def _read_pdf_upload_to_temp(file: UploadFile) -> tuple[Path, str]:
+    """Stream the upload to a unique temp PDF while hashing and enforcing size."""
+    digest = hashlib.sha256()
+    total = 0
+    tmp_path: Path | None = None
+    saw_magic = False
+    completed = False
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="sc_",
+            suffix=".pdf",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            while True:
+                chunk = await file.read(_UPLOAD_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if total == 0:
+                    saw_magic = chunk.startswith(_PDF_MAGIC)
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise _upload_error(
+                        413,
+                        "payload_too_large",
+                        f"PDF uploads must be at most {MAX_UPLOAD_BYTES} bytes.",
+                    )
+                digest.update(chunk)
+                tmp.write(chunk)
+        if total == 0 or not saw_magic:
+            raise _upload_error(
+                400,
+                "invalid_pdf",
+                "Uploaded file is not a valid PDF.",
+            )
+        completed = True
+        return tmp_path, digest.hexdigest()
+    finally:
+        # CancelledError is a BaseException on 3.11+; cleanup must not rely on
+        # `except Exception`, and must not swallow cancellation.
+        if not completed and tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+@learning_router.post("/documents")
 async def upload_document(
     file: Annotated[UploadFile, File()],
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     document_processor: Annotated[object, Depends(get_document_processor)],
     retriever: Annotated[object, Depends(get_retriever)],
 ):
-    content = await file.read()
-    file_hash = hashlib.sha256(content).hexdigest()
-    tmp_path = Path(tempfile.gettempdir()) / f"sc_{file_hash}.pdf"
-    tmp_path.write_bytes(content)
+    _validate_pdf_upload_headers(file.filename, file.content_type)
+    tmp_path: Path | None = None
+    try:
+        tmp_path, file_hash = await _read_pdf_upload_to_temp(file)
+        try:
+            chunks = document_processor.process_pdf(tmp_path)
+        except Exception:
+            raise _upload_error(
+                400,
+                "invalid_pdf",
+                "Uploaded file is not a valid PDF.",
+            ) from None
+        docs = DocumentRepository(session)
+        existing = docs.get_by_user_and_hash(user_id=user_id, hash_=file_hash)
+        # SQL row wins when present; otherwise the request filename is the
+        # authoritative source written to Chroma/BM25 and (on success) SQL.
+        canonical_filename = existing.filename if existing else (file.filename or "uploaded.pdf")
+        for index, chunk in enumerate(chunks):
+            chunk["source"] = canonical_filename
+            # Content-hash IDs stay stable across temp paths and filenames so
+            # duplicate uploads / partial retries upsert instead of accumulating.
+            chunk["chunk_id"] = f"{file_hash}:{chunk.get('page', -1)}:{index}"
+        if chunks:
+            retriever.add_chunks(chunks)
 
-    chunks = document_processor.process_pdf(tmp_path)
-    for c in chunks:
-        c["source"] = file.filename or c.get("source", "uploaded.pdf")
-    if chunks:
-        retriever.add_chunks(chunks)
-
-    doc = DocumentRepository(session).create(
-        user_id=user_id,
-        filename=file.filename or "uploaded.pdf",
-        hash_=file_hash,
-        chunks_count=len(chunks),
-    )
-    return {
-        "document_id": doc.id,
-        "filename": doc.filename,
-        "chunks_count": doc.chunks_count,
-    }
+        doc = docs.create(
+            user_id=user_id,
+            filename=canonical_filename,
+            hash_=file_hash,
+            chunks_count=len(chunks),
+        )
+        # A concurrent first upload may have won SQL with a different filename.
+        # Reconcile index metadata to the returned document before responding.
+        if chunks and doc.filename != canonical_filename:
+            for chunk in chunks:
+                chunk["source"] = doc.filename
+            retriever.add_chunks(chunks)
+        return {
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "chunks_count": doc.chunks_count,
+        }
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _sse(payload: dict) -> str:
@@ -450,10 +549,10 @@ def _persist_citations(
         )
 
 
-@router.post("/chat")
+@learning_router.post("/chat")
 async def chat(
     body: ChatRequest,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     graph: Annotated[object, Depends(get_graph)],
     judge: Annotated[dict, Depends(get_judge_dependencies)],
@@ -558,9 +657,9 @@ async def chat(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@router.get("/chat/sessions/current", response_model=ChatSessionOut)
+@learning_router.get("/chat/sessions/current", response_model=ChatSessionOut)
 def get_current_chat_session(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     chat_session = ChatSessionRepository(session).latest_for_user(user_id)
@@ -573,10 +672,10 @@ def get_current_chat_session(
     )
 
 
-@router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessagesOut)
+@learning_router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessagesOut)
 def get_chat_session_messages(
     session_id: str,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     chat_session = ChatSessionRepository(session).get_for_user(
@@ -626,10 +725,10 @@ def get_chat_session_messages(
     )
 
 
-@router.post("/goals", response_model=GoalCreateOut)
+@learning_router.post("/goals", response_model=GoalCreateOut)
 def create_goal(
     body: GoalCreateIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime
@@ -638,9 +737,9 @@ def create_goal(
     return GoalCreateOut(goal_id=goal.id, title=goal.title)
 
 
-@router.get("/plans/current", response_model=PlanCurrentOut)
+@learning_router.get("/plans/current", response_model=PlanCurrentOut)
 def get_plans_current(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goals = GoalRepository(session).list_active_for_user(user_id)
@@ -653,12 +752,12 @@ def get_plans_current(
     return _plan_current_out(session, user_id=user_id, goal=goal, plan=plan)
 
 
-@router.patch("/plans/{plan_id}/milestones/{milestone_id}", response_model=MilestonePatchOut)
+@learning_router.patch("/plans/{plan_id}/milestones/{milestone_id}", response_model=MilestonePatchOut)
 def patch_plan_milestone(
     plan_id: str,
     milestone_id: str,
     body: MilestonePatchIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
@@ -698,10 +797,10 @@ def patch_plan_milestone(
     )
 
 
-@router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
+@learning_router.get("/plans/{plan_id}/events", response_model=list[PlanEventOut])
 def get_plan_events(
     plan_id: str,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     limit: int = 20,
 ):
@@ -726,11 +825,11 @@ class ReorderIn(BaseModel):
     milestone_ids: list[str]
 
 
-@router.patch("/plans/{plan_id}/milestones/reorder", response_model=PlanCurrentOut)
+@learning_router.patch("/plans/{plan_id}/milestones/reorder", response_model=PlanCurrentOut)
 def reorder_plan_milestones(
     plan_id: str,
     body: ReorderIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     goal, plan = _plan_belongs_to_user(session, user_id=user_id, plan_id=plan_id)
@@ -739,9 +838,9 @@ def reorder_plan_milestones(
     return _plan_current_out(session, user_id=user_id, goal=goal, plan=refreshed)
 
 
-@router.get("/documents", response_model=list[DocumentOut])
+@learning_router.get("/documents", response_model=list[DocumentOut])
 def get_documents(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     docs = DocumentRepository(session).list_for_user(user_id)
@@ -751,9 +850,9 @@ def get_documents(
     ]
 
 
-@router.get("/mistakes/due", response_model=list[MistakeDueOut])
+@learning_router.get("/mistakes/due", response_model=list[MistakeDueOut])
 def get_mistakes_due(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
     limit: int = 20,
     include_future: bool = False,
@@ -796,11 +895,11 @@ class MistakeReviewOut(BaseModel):
     next_due_at: str
 
 
-@router.post("/mistakes/{mistake_id}/review", response_model=MistakeReviewOut)
+@learning_router.post("/mistakes/{mistake_id}/review", response_model=MistakeReviewOut)
 def review_mistake(
     mistake_id: str,
     body: MistakeReviewIn,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from app.db.repositories import MasteryRepository, MistakeRepository, QuestionRepository
@@ -851,10 +950,10 @@ class MarkUnderstoodOut(BaseModel):
     next_due_at: str | None
 
 
-@router.post("/mistakes/{mistake_id}/mark-understood", response_model=MarkUnderstoodOut)
+@learning_router.post("/mistakes/{mistake_id}/mark-understood", response_model=MarkUnderstoodOut)
 def mark_mistake_understood(
     mistake_id: str,
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime, timedelta
@@ -889,9 +988,9 @@ def mark_mistake_understood(
     )
 
 
-@router.get("/mastery", response_model=MasteryOut)
+@learning_router.get("/mastery", response_model=MasteryOut)
 def get_mastery(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from datetime import datetime
@@ -943,9 +1042,9 @@ def get_mastery(
     )
 
 
-@router.get("/users/me/stats", response_model=UserStatsOut)
+@learning_router.get("/users/me/stats", response_model=UserStatsOut)
 def get_user_stats(
-    user_id: Annotated[str, Depends(get_current_user)],
+    user_id: Annotated[str, Depends(require_existing_user)],
     session: Annotated[Session, Depends(get_session)],
 ):
     from app.db.repositories import ChatSessionRepository
@@ -973,3 +1072,6 @@ def get_user_stats(
         last_active_date=last_row.isoformat() if last_row else None,
         activity_daily=activity,
     )
+
+
+router.include_router(learning_router)

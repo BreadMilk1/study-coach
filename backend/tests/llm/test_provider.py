@@ -1,6 +1,6 @@
 import pytest
 
-from app.llm.provider import LLMConfig, parse_llm_config
+from app.llm.provider import LLMConfig, get_chat_model, parse_llm_config
 
 
 def test_parse_llm_config_uses_defaults_when_all_headers_missing():
@@ -38,3 +38,51 @@ def test_judge_model_uses_override_when_set():
         x_judge_model="llama3.1:8b",
     )
     assert cfg.effective_judge_model() == "llama3.1:8b"
+
+
+def test_ollama_chat_model_ignores_process_proxy_settings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_init_chat_model(**kwargs):
+        captured.update(kwargs)
+        return "chat-model"
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
+    config = LLMConfig(
+        provider="ollama",
+        model="gemma4:e4b",
+        base_url="http://127.0.0.1:11434",
+    )
+
+    assert get_chat_model(config) == "chat-model"
+    assert captured == {
+        "model": "gemma4:e4b",
+        "model_provider": "ollama",
+        "base_url": "http://127.0.0.1:11434",
+        "client_kwargs": {"trust_env": False},
+    }
+
+
+def test_cloud_chat_model_kwargs_are_unchanged(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_init_chat_model(**kwargs):
+        captured.update(kwargs)
+        return "chat-model"
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
+    config = LLMConfig(
+        provider="openai",
+        model="gpt-4o-mini",
+        api_key="sk-test",
+        base_url="https://api.openai.test/v1",
+    )
+
+    assert get_chat_model(config, temperature=0.2) == "chat-model"
+    assert captured == {
+        "model": "gpt-4o-mini",
+        "model_provider": "openai",
+        "api_key": "sk-test",
+        "base_url": "https://api.openai.test/v1",
+        "temperature": 0.2,
+    }

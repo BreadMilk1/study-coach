@@ -2,6 +2,7 @@ FROM python:3.11-slim
 WORKDIR /app
 RUN pip install uv
 COPY backend/pyproject.toml backend/uv.lock ./
+COPY backend/README.md ./README.md
 RUN uv sync --frozen --no-dev
 COPY backend/ ./
 EXPOSE 8000

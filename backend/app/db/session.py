@@ -2,7 +2,8 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -12,10 +13,21 @@ def get_database_url() -> str:
     return os.environ.get("DATABASE_URL", "sqlite:///./study_coach.db")
 
 
+def _is_sqlite_url(url: str) -> bool:
+    return make_url(url).get_backend_name() == "sqlite"
+
+
 def make_engine(url: str | None = None):
     url = url or get_database_url()
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, echo=False)
+    connect_args = {"check_same_thread": False} if _is_sqlite_url(url) else {}
+    engine = create_engine(url, connect_args=connect_args, echo=False)
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def set_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    return engine
 
 
 _engine = None

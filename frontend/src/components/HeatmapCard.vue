@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { getUserStats, type ActivityDayDto } from '../lib/api'
+import { onMounted } from 'vue'
 
-const days = ref<ActivityDayDto[]>([])
+import { useActivity } from '../stores/activity'
 
-onMounted(async () => {
-  try { const stats = await getUserStats(); days.value = stats.activity_daily }
-  catch { /* no stats yet */ }
+const activity = useActivity()
+
+onMounted(() => {
+  void activity.fetch()
 })
 
 function color(count: number): string {
@@ -21,7 +21,7 @@ function color(count: number): string {
   <div class="rounded-lg border border-border bg-surface p-4">
     <h3 class="text-sm font-medium text-fg-muted mb-3">{{ $t('overview.activity') }}</h3>
     <div class="flex gap-1 flex-wrap">
-      <div v-for="d in days" :key="d.date"
+      <div v-for="d in activity.days" :key="d.date"
            class="w-3 h-3 rounded-sm"
            :style="{ background: color(d.count) }"
            :title="`${d.date}: ${d.count}`" />

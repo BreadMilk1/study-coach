@@ -17,7 +17,9 @@ from app.api.deps import (
     get_quiz_master,
     get_quiz_master_agent,
 )
+from app.auth import issue_token
 from app.main import create_app
+from tests.helpers import ensure_user
 
 
 class StubRetriever:
@@ -108,6 +110,7 @@ def client_with_stubs(tmp_path, monkeypatch):
     from app.db.repositories import DocumentRepository
     from app.db.session import session_scope
     with session_scope() as session:
+        ensure_user(session, "default-user")
         DocumentRepository(session).create(
             user_id="default-user",
             filename="fixture.pdf",
@@ -115,7 +118,10 @@ def client_with_stubs(tmp_path, monkeypatch):
             chunks_count=1,
         )
 
-    with TestClient(app) as c:
+    with TestClient(
+        app,
+        headers={"Authorization": f"Bearer {issue_token('default-user', 'guest')}"},
+    ) as c:
         yield c
 
 

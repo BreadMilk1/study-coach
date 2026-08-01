@@ -1,4 +1,9 @@
 import { defineStore } from 'pinia'
+import { reviewMistake } from '../lib/api'
+import {
+  captureLearningStateEpoch,
+  isLearningStateEpochCurrent,
+} from '../lib/dataLifecycle'
 import { looksLikeEmptyCorpusRefusal } from '../lib/parse'
 import { parseQuizAssistantText } from '../lib/quiz'
 
@@ -71,6 +76,26 @@ export const useQuiz = defineStore('quiz', {
       // kind === 'none' — may be a backend error surfaced via SSE token
       if (ERROR_DETECT_RE.test(this.raw)) {
         this.errorMsg = this.raw.trim()
+      }
+    },
+    async reviewCurrentMistake(choice: string): Promise<boolean> {
+      if (!this.currentMistakeId) return false
+      const epoch = captureLearningStateEpoch()
+      const mistakeId = this.currentMistakeId
+      try {
+        const result = await reviewMistake(mistakeId, choice)
+        if (!isLearningStateEpochCurrent(epoch)) return false
+        this.lastGrade = {
+          correct: result.correct,
+          correctAnswer: result.correct_answer,
+          explanation: result.explanation,
+        }
+        this.currentMCQ = null
+        this.currentMistakeId = null
+        return true
+      } catch (error) {
+        if (!isLearningStateEpochCurrent(epoch)) return false
+        throw error
       }
     },
   },

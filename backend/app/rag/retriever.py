@@ -10,7 +10,9 @@ class Retriever:
         if not chunks:
             return
         embeddings = self.embedder.embed([c["content"] for c in chunks])
-        self.collection.add(
+        # Caller-supplied source is authoritative so a renamed partial retry after
+        # index-before-SQL failure can realign Chroma with the new SQL filename.
+        self.collection.upsert(
             ids=[c["chunk_id"] for c in chunks],
             documents=[c["content"] for c in chunks],
             metadatas=[{"source": c["source"], "page": c["page"]} for c in chunks],

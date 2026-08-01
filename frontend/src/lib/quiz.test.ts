@@ -1,5 +1,4 @@
-import test from 'node:test'
-import assert from 'node:assert/strict'
+import { expect, test } from 'vitest'
 
 import { parseQuizAssistantText } from './quiz.ts'
 
@@ -19,7 +18,7 @@ test('parses deterministic quiz question into MCQ state', () => {
     ].join('\n'),
   )
 
-  assert.deepEqual(parsed, {
+  expect(parsed).toEqual({
     kind: 'mcq',
     currentMCQ: {
       prompt: 'What does HyDE rewrite?',
@@ -48,7 +47,7 @@ test('parses agent-loop markdown quiz without misclassifying it as grade', () =>
     ].join('\n'),
   )
 
-  assert.deepEqual(parsed, {
+  expect(parsed).toEqual({
     kind: 'mcq',
     currentMCQ: {
       prompt: 'What is the core mechanism and primary advantage of using Reciprocal Rank Fusion (RRF) in information retrieval?',
@@ -67,7 +66,7 @@ test('parses incorrect grade feedback into grade state', () => {
     '✗ Incorrect. Correct answer: A. Because A.',
   )
 
-  assert.deepEqual(parsed, {
+  expect(parsed).toEqual({
     kind: 'grade',
     lastGrade: {
       correct: false,

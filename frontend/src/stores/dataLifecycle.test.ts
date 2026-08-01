@@ -1,0 +1,1106 @@
+import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { memoryStorage } from '../test/memoryStorage'
+import { useDataLifecycle, type LifecycleDependencies } from './dataLifecycle'
+
+function summary(overrides: Partial<Awaited<ReturnType<LifecycleDependencies['summary']>>> = {}) {
+  return {
+    reset_enabled: true,
+    has_learning_data: true,
+    current_user_exists: true,
+    users: 1,
+    documents: 1,
+    source_chunks: 3,
+    vectors: 3,
+    chat_sessions: 0,
+    messages: 0,
+    citations: 0,
+    goals: 0,
+    topics: 0,
+    plans: 0,
+    plan_milestones: 0,
+    plan_events: 0,
+    questions: 0,
+    mastery: 0,
+    mistakes: 0,
+    ...overrides,
+  }
+}
+
+function dependencies(overrides: Partial<LifecycleDependencies> = {}): LifecycleDependencies {
+  return {
+    summary: async () => summary(),
+    reset: async scope => ({ scope, status: 'completed', deleted: summary() }),
+    resetClient: async () => undefined,
+    markChoice: () => undefined,
+    clearChoice: () => undefined,
+    clearFactory: () => undefined,
+    clearFactorySession: () => undefined,
+    stageFactoryIdentity: async () => 'factory-recovery-fingerprint',
+    provisionFactoryIdentity: async () => 'factory-token',
+    invalidateProvisioning: () => undefined,
+    broadcast: () => undefined,
+    reload: () => undefined,
+    pause: async () => undefined,
+    ...overrides,
+  }
+}
+
+beforeEach(() => {
+  setActivePinia(createPinia())
+  vi.stubGlobal('sessionStorage', memoryStorage())
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('startup inspection', () => {
+  it('requires an explicit choice when reset is enabled and learning data exists', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies())
+
+    await store.inspect()
+
+    expect(store.phase).toBe('choice_required')
+    expect(store.workspaceUnlocked).toBe(false)
+    expect(store.canStartFresh).toBe(true)
+  })
+
+  it('keeps inspection failure blocking until explicitly continued without clearing', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => { throw new Error('offline') },
+      markChoice: () => calls.push('choice'),
+    }))
+
+    await store.inspect()
+
+    expect(store.phase).toBe('inspection_error')
+    expect(store.workspaceUnlocked).toBe(false)
+    expect(store.canContinueWithoutClearing).toBe(true)
+    expect(store.canStartFresh).toBe(false)
+    store.continueWithoutClearing()
+    expect(calls).toEqual(['choice'])
+    expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
+  })
+
+  it('requires the interrupted reset scope to be retried after a reload', async () => {
+    const recoveryError = Object.assign(new Error('Retry the incomplete reset.'), {
+      code: 'reset_recovery_required',
+      requiredScope: 'learning',
+    })
+    let summaryAttempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => {
+        summaryAttempts += 1
+        if (summaryAttempts === 1) throw recoveryError
+        return summary({ has_learning_data: false })
+      },
+    }))
+
+    await store.inspect()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    expect(store.workspaceUnlocked).toBe(false)
+    expect(store.canContinueWithoutClearing).toBe(false)
+
+    store.cancelReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    expect(store.workspaceUnlocked).toBe(false)
+
+    await store.retryReset()
+
+    expect(store.phase).toBe('ready')
+    expect(store.pendingScope).toBeNull()
+    expect(store.recoveryScope).toBeNull()
+    expect(store.workspaceUnlocked).toBe(true)
+  })
+
+  it('keeps recovery blocking when the required-scope retry fails again', async () => {
+    const recoveryError = Object.assign(new Error('Retry the incomplete reset.'), {
+      code: 'reset_recovery_required',
+      requiredScope: 'learning',
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => { throw recoveryError },
+      reset: async () => { throw new Error('retry failed') },
+    }))
+    await store.inspect()
+
+    await store.retryReset()
+    store.cancelReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    expect(store.workspaceUnlocked).toBe(false)
+  })
+
+  it.each([
+    { reset_enabled: false, has_learning_data: true },
+    { reset_enabled: true, has_learning_data: false },
+  ])('is ready without a gate for $reset_enabled/$has_learning_data', async overrides => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ summary: async () => summary(overrides) }))
+
+    await store.inspect()
+
+    expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
+    expect(store.canStartFresh).toBe(false)
+  })
+
+  it('provisions a new identity before unlock after factory response-lost reload', async () => {
+    const calls: string[] = []
+    let summaryAttempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => {
+        summaryAttempts += 1
+        if (summaryAttempts === 1) {
+          return summary({
+            users: 0,
+            has_learning_data: false,
+            current_user_exists: false,
+            documents: 0,
+            source_chunks: 0,
+            vectors: 0,
+          })
+        }
+        return summary({
+          users: 1,
+          has_learning_data: false,
+          current_user_exists: true,
+          documents: 0,
+          source_chunks: 0,
+          vectors: 0,
+        })
+      },
+      invalidateProvisioning: () => { calls.push('invalidate') },
+      clearFactory: () => { calls.push('clearFactory') },
+      stageFactoryIdentity: async (forceRotate?: boolean) => {
+        calls.push(`stage:${String(forceRotate)}`)
+        return 'shared-recovery-fingerprint'
+      },
+      provisionFactoryIdentity: async (fingerprint?: string) => {
+        calls.push(`provision:${String(fingerprint)}`)
+        return 'fresh-after-lost-response'
+      },
+    }))
+
+    await store.inspect()
+
+    expect(calls).toEqual([
+      'stage:false',
+      'invalidate',
+      'clearFactory',
+      'provision:shared-recovery-fingerprint',
+    ])
+    expect(summaryAttempts).toBe(2)
+    expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
+    expect(store.summary?.current_user_exists).toBe(true)
+    expect(store.summary?.users).toBe(1)
+  })
+
+  it('keeps workspace locked when stale-identity recovery fails', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => summary({
+        users: 0,
+        has_learning_data: false,
+        current_user_exists: false,
+      }),
+      provisionFactoryIdentity: async () => {
+        throw new Error('anonymous auth failed')
+      },
+    }))
+
+    await store.inspect()
+
+    expect(store.phase).toBe('inspection_error')
+    expect(store.workspaceUnlocked).toBe(false)
+  })
+
+  it('does not clear identity on ordinary inspection network failure', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => { throw new Error('network down') },
+      invalidateProvisioning: () => { calls.push('invalidate') },
+      clearFactory: () => { calls.push('clearFactory') },
+      provisionFactoryIdentity: async () => {
+        calls.push('provision')
+        return 'should-not-run'
+      },
+    }))
+
+    await store.inspect()
+
+    expect(calls).toEqual([])
+    expect(store.phase).toBe('inspection_error')
+    expect(store.workspaceUnlocked).toBe(false)
+  })
+
+  it('records an explicit decision to continue existing learning data', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ markChoice: () => calls.push('choice') }))
+    await store.inspect()
+
+    store.continueExisting()
+
+    expect(calls).toEqual(['choice'])
+    expect(store.phase).toBe('ready')
+    expect(store.workspaceUnlocked).toBe(true)
+  })
+
+  it('does not let a stale inspection overwrite an external reset', async () => {
+    let resolveSummary!: (value: ReturnType<typeof summary>) => void
+    const pendingSummary = new Promise<ReturnType<typeof summary>>(resolve => {
+      resolveSummary = resolve
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ summary: () => pendingSummary }))
+
+    const inspection = store.inspect()
+    await store.handleExternalReset('learning')
+    resolveSummary(summary())
+    await inspection
+
+    expect(store.phase).toBe('external_reset')
+    expect(store.workspaceUnlocked).toBe(false)
+    expect(store.summary).toBeNull()
+  })
+})
+
+describe('ready summary refresh', () => {
+  it('updates counts without leaving ready or reopening the startup gate', async () => {
+    let resolveSummary!: (value: ReturnType<typeof summary>) => void
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: () => new Promise(resolve => { resolveSummary = resolve }),
+    }))
+    store.phase = 'ready'
+    store.summary = summary({ documents: 1, source_chunks: 3, vectors: 3 })
+    store.error = new Error('stale error')
+    const operationGeneration = store.operationGeneration
+
+    const refresh = store.refreshSummary()
+
+    expect(store.summaryRefreshing).toBe(true)
+    resolveSummary(summary({ documents: 4, source_chunks: 12, vectors: 10 }))
+    await refresh
+
+    expect(store.phase).toBe('ready')
+    expect(store.summaryRefreshing).toBe(false)
+    expect(store.operationGeneration).toBe(operationGeneration)
+    expect(store.summary).toMatchObject({ documents: 4, source_chunks: 12, vectors: 10 })
+    expect(store.error).toBeNull()
+  })
+
+  it('does nothing outside the ready phase', async () => {
+    const fetchSummary = vi.fn(async () => summary())
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ summary: fetchSummary }))
+    store.phase = 'checking'
+
+    await store.refreshSummary()
+
+    expect(fetchSummary).not.toHaveBeenCalled()
+    expect(store.phase).toBe('checking')
+    expect(store.summary).toBeNull()
+    expect(store.summaryRefreshing).toBe(false)
+  })
+
+  it('keeps the previous summary on failure and can retry in the same ready phase', async () => {
+    const previous = summary({ documents: 2, vectors: 7 })
+    let attempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('summary unavailable')
+        return summary({ documents: 6, vectors: 9 })
+      },
+    }))
+    store.phase = 'ready'
+    store.summary = previous
+
+    await store.refreshSummary()
+
+    expect(store.phase).toBe('ready')
+    expect(store.summary).toEqual(previous)
+    expect(store.error?.message).toBe('summary unavailable')
+    expect(store.summaryRefreshing).toBe(false)
+
+    await store.refreshSummary()
+
+    expect(store.phase).toBe('ready')
+    expect(store.summary).toMatchObject({ documents: 6, vectors: 9 })
+    expect(store.error).toBeNull()
+    expect(store.summaryRefreshing).toBe(false)
+  })
+
+  it('does not let a stale refresh overwrite an external reset', async () => {
+    let resolveSummary!: (value: ReturnType<typeof summary>) => void
+    const pendingSummary = new Promise<ReturnType<typeof summary>>(resolve => {
+      resolveSummary = resolve
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ summary: () => pendingSummary }))
+    const previous = summary({ documents: 2 })
+    store.phase = 'ready'
+    store.summary = previous
+
+    const refresh = store.refreshSummary()
+    await store.handleExternalReset('learning')
+    resolveSummary(summary({ documents: 99 }))
+    await refresh
+
+    expect(store.phase).toBe('external_reset')
+    expect(store.summary).toEqual(previous)
+    expect(store.summaryRefreshing).toBe(false)
+  })
+
+  it('keeps the newest overlapping refresh pending when an older request settles', async () => {
+    const resolvers: Array<(value: ReturnType<typeof summary>) => void> = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: () => new Promise(resolve => { resolvers.push(resolve) }),
+    }))
+    store.phase = 'ready'
+    store.summary = summary({ documents: 1 })
+
+    const first = store.refreshSummary()
+    const second = store.refreshSummary()
+    resolvers[0](summary({ documents: 5 }))
+    await first
+
+    expect(store.summaryRefreshing).toBe(true)
+    expect(store.summary.documents).toBe(1)
+
+    resolvers[1](summary({ documents: 8 }))
+    await second
+
+    expect(store.phase).toBe('ready')
+    expect(store.summary.documents).toBe(8)
+    expect(store.summaryRefreshing).toBe(false)
+  })
+})
+
+describe('reset confirmation', () => {
+  it('returns learning confirmation to its originating ready or choice phase', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies())
+    await store.inspect()
+
+    store.requestLearningReset()
+    expect(store.phase).toBe('confirming_learning')
+    expect(store.pendingScope).toBe('learning')
+    store.cancelReset()
+    expect(store.phase).toBe('choice_required')
+    expect(store.pendingScope).toBeNull()
+
+    store.continueExisting()
+    store.requestLearningReset()
+    store.cancelReset()
+    expect(store.phase).toBe('ready')
+  })
+
+  it('opens and cancels factory confirmation back to ready', () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies())
+    store.phase = 'ready'
+
+    store.requestFactoryReset()
+    expect(store.phase).toBe('confirming_factory')
+    expect(store.pendingScope).toBe('factory')
+    store.cancelReset()
+    expect(store.phase).toBe('ready')
+    expect(store.pendingScope).toBeNull()
+  })
+
+  it('cannot cancel while reset work is in progress', () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies())
+    store.phase = 'resetting'
+    store.pendingScope = 'learning'
+
+    store.cancelReset()
+
+    expect(store.phase).toBe('resetting')
+    expect(store.pendingScope).toBe('learning')
+  })
+
+  it('ignores lifecycle actions invoked from illegal source phases', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => { calls.push(`reset:${scope}`); return { scope, status: 'completed', deleted: summary() } },
+      resetClient: async () => { calls.push('client') },
+      markChoice: () => calls.push('choice'),
+      clearChoice: () => calls.push('clear-choice'),
+      clearFactory: () => calls.push('clear-factory'),
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      reload: () => calls.push('reload'),
+    }))
+    store.phase = 'checking'
+
+    store.continueExisting()
+    store.continueWithoutClearing()
+    store.requestLearningReset()
+    store.requestFactoryReset()
+    store.cancelReset()
+    await store.confirmLearningReset()
+    await store.confirmFactoryReset()
+    await store.retryReset()
+    await store.acknowledgeExternalReset()
+
+    expect(calls).toEqual([])
+    expect(store.phase).toBe('checking')
+  })
+})
+
+describe('learning reset', () => {
+  it('unlocks only after backend reset, client reset, choice, broadcast, and summary refresh', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      summary: async () => { calls.push('summary'); return summary({ has_learning_data: false }) },
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      resetClient: async () => { calls.push('client') },
+      markChoice: () => calls.push('choice'),
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+    }))
+    await store.inspect()
+    calls.length = 0
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(calls).toEqual([
+      'reset:learning',
+      'client',
+      'choice',
+      'broadcast:learning',
+      'summary',
+    ])
+    expect(store.lastResult?.scope).toBe('learning')
+    expect(store.summary?.has_learning_data).toBe(false)
+    expect(store.pendingScope).toBeNull()
+    expect(store.phase).toBe('ready')
+  })
+
+  it('preserves browser state on backend failure and retries the same scope', async () => {
+    const calls: string[] = []
+    let attempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        attempts += 1
+        if (attempts === 1) throw new Error('backend failed')
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      resetClient: async () => { calls.push('client') },
+      markChoice: () => calls.push('choice'),
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(calls).toEqual(['reset:learning'])
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.error?.message).toBe('backend failed')
+
+    await store.retryReset()
+
+    expect(calls).toEqual([
+      'reset:learning',
+      'reset:learning',
+      'client',
+      'choice',
+      'broadcast:learning',
+    ])
+    expect(store.phase).toBe('ready')
+    expect(store.pendingScope).toBeNull()
+  })
+
+  it('stays in reset_error when client invalidation fails and does not announce completion', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => {
+        calls.push('reset')
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      resetClient: async () => { calls.push('client'); throw new Error('client failed') },
+      markChoice: () => calls.push('choice'),
+      broadcast: () => calls.push('broadcast'),
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(calls).toEqual(['reset', 'client'])
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+  })
+
+  it('does not let a stale local reset unlock after an external reset takes over', async () => {
+    const calls: string[] = []
+    let finishBackend!: (result: Awaited<ReturnType<LifecycleDependencies['reset']>>) => void
+    const backend = new Promise<Awaited<ReturnType<LifecycleDependencies['reset']>>>(resolve => {
+      finishBackend = resolve
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: scope => { calls.push(`reset:${scope}`); return backend },
+      resetClient: async () => { calls.push('client') },
+      clearChoice: () => calls.push('clear-choice'),
+      markChoice: () => calls.push('choice'),
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      summary: async () => { calls.push('summary'); return summary() },
+    }))
+    store.phase = 'choice_required'
+    store.requestLearningReset()
+    const localReset = store.confirmLearningReset()
+    expect(calls).toEqual(['reset:learning'])
+
+    await store.handleExternalReset('learning')
+    finishBackend({ scope: 'learning', status: 'completed', deleted: summary() })
+    await localReset
+
+    expect(calls).toEqual(['reset:learning', 'clear-choice', 'client'])
+    expect(store.phase).toBe('external_reset')
+  })
+
+  it('starts only one backend reset when learning confirmation is submitted twice', async () => {
+    let finishBackend!: (result: Awaited<ReturnType<LifecycleDependencies['reset']>>) => void
+    const backend = new Promise<Awaited<ReturnType<LifecycleDependencies['reset']>>>(resolve => {
+      finishBackend = resolve
+    })
+    const reset = vi.fn(() => backend)
+    const store = useDataLifecycle()
+    store.initialize(dependencies({ reset }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    const first = store.confirmLearningReset()
+    const second = store.confirmLearningReset()
+
+    expect(reset).toHaveBeenCalledOnce()
+    finishBackend({ scope: 'learning', status: 'completed', deleted: summary() })
+    await Promise.all([first, second])
+  })
+})
+
+describe('factory reset', () => {
+  it('clears shared browser data, provisions replacement identity, then broadcasts and reloads', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      stageFactoryIdentity: async (forceRotate?: boolean) => {
+        calls.push(`stage:${String(forceRotate)}`)
+        return 'shared-recovery-fingerprint'
+      },
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      pause: async milliseconds => {
+        calls.push(`pause:${milliseconds}:${store.phase}`)
+        store.cancelReset()
+        calls.push(`after-cancel:${store.phase}`)
+      },
+      clearFactory: () => calls.push('clear-factory'),
+      invalidateProvisioning: () => calls.push('invalidate'),
+      provisionFactoryIdentity: async (fingerprint?: string) => {
+        calls.push(`provision-identity:${String(fingerprint)}`)
+        return 'new-token'
+      },
+      reload: () => calls.push('reload'),
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(calls).toEqual([
+      'stage:true',
+      'reset:factory',
+      'invalidate',
+      'clear-factory',
+      'provision-identity:shared-recovery-fingerprint',
+      'broadcast:factory',
+      'pause:750:factory_restarting',
+      'after-cancel:factory_restarting',
+      'reload',
+    ])
+    expect(store.lastResult?.scope).toBe('factory')
+    expect(store.phase).toBe('factory_restarting')
+  })
+
+  it('does not clear or announce browser state when backend reset fails, then retries factory scope', async () => {
+    const calls: string[] = []
+    let attempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        attempts += 1
+        if (attempts === 1) throw new Error('factory backend failed')
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      pause: async () => { calls.push('pause') },
+      clearFactory: () => calls.push('clear-factory'),
+      invalidateProvisioning: () => calls.push('invalidate'),
+      provisionFactoryIdentity: async () => {
+        calls.push('provision-identity')
+        return 'new-token'
+      },
+      reload: () => calls.push('reload'),
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(calls).toEqual(['reset:factory'])
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('factory')
+    expect(store.recoveryScope).toBe('factory')
+
+    await store.retryReset()
+
+    expect(calls).toEqual([
+      'reset:factory',
+      'reset:factory',
+      'invalidate',
+      'clear-factory',
+      'provision-identity',
+      'broadcast:factory',
+      'pause',
+      'reload',
+    ])
+  })
+
+  it('does not broadcast when initiating browser clear fails, then retries', async () => {
+    const calls: string[] = []
+    let clearAttempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      clearFactory: () => {
+        clearAttempts += 1
+        calls.push(`clear-factory:${clearAttempts}`)
+        if (clearAttempts === 1) throw new Error('storage blocked')
+      },
+      invalidateProvisioning: () => calls.push('invalidate'),
+      provisionFactoryIdentity: async () => {
+        calls.push('provision-identity')
+        return 'new-token'
+      },
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      pause: async () => { calls.push('pause') },
+      reload: () => calls.push('reload'),
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(calls).toEqual([
+      'reset:factory',
+      'invalidate',
+      'clear-factory:1',
+    ])
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('factory')
+    expect(store.recoveryScope).toBe('factory')
+    expect(store.error?.message).toBe('storage blocked')
+
+    await store.retryReset()
+
+    expect(calls).toEqual([
+      'reset:factory',
+      'invalidate',
+      'clear-factory:1',
+      'reset:factory',
+      'invalidate',
+      'clear-factory:2',
+      'provision-identity',
+      'broadcast:factory',
+      'pause',
+      'reload',
+    ])
+    expect(store.phase).toBe('factory_restarting')
+  })
+
+  it('does not let a stale local factory reset continue after an external reset takes over', async () => {
+    const calls: string[] = []
+    let finishStaging!: (fingerprint: string) => void
+    const staging = new Promise<string>(resolve => {
+      finishStaging = resolve
+    })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      stageFactoryIdentity: async () => staging,
+      reset: async scope => {
+        calls.push(`reset:${scope}`)
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      broadcast: scope => calls.push(`broadcast:${scope}`),
+      pause: async () => { calls.push('pause') },
+      clearFactory: () => calls.push('clear-factory'),
+      reload: () => calls.push('reload'),
+      clearChoice: () => calls.push('clear-choice'),
+      resetClient: async () => { calls.push('client') },
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+    const localReset = store.confirmFactoryReset()
+
+    await store.handleExternalReset('learning')
+    finishStaging('staged-but-cancelled')
+    await localReset
+
+    expect(calls).toEqual(['clear-choice', 'client'])
+    expect(store.phase).toBe('external_reset')
+  })
+})
+
+describe('external reset', () => {
+  it('blocks immediately and ignores acknowledgement while external client reset is pending', async () => {
+    const calls: string[] = []
+    let finishClient!: () => void
+    const clientReset = new Promise<void>(resolve => { finishClient = resolve })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      clearChoice: () => calls.push('clear-choice'),
+      resetClient: async () => { calls.push('client'); await clientReset },
+      markChoice: () => calls.push('choice'),
+    }))
+    store.phase = 'ready'
+
+    const handling = store.handleExternalReset('learning')
+    expect(calls).toEqual(['clear-choice', 'client'])
+    expect(store.phase).toBe('external_reset')
+    expect(store.externalClientReady).toBe(false)
+
+    await store.acknowledgeExternalReset()
+    expect(calls).toEqual(['clear-choice', 'client'])
+    expect(store.phase).toBe('external_reset')
+
+    finishClient()
+    await handling
+
+    expect(store.phase).toBe('external_reset')
+    expect(store.externalClientReady).toBe(true)
+    await store.acknowledgeExternalReset()
+    expect(calls).toEqual(['clear-choice', 'client', 'choice'])
+    expect(store.phase).toBe('ready')
+  })
+
+  it('clears only this tab session state and reloads after external factory reset', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      clearFactory: () => calls.push('clear-factory'),
+      clearFactorySession: () => calls.push('clear-factory-session'),
+      invalidateProvisioning: () => calls.push('invalidate'),
+      reload: () => calls.push('reload'),
+    }))
+
+    await store.handleExternalReset('factory')
+
+    expect(calls).toEqual(['invalidate', 'clear-factory-session', 'reload'])
+    expect(store.phase).toBe('factory_restarting')
+  })
+
+  it('still reloads and remains blocked when external factory browser clearing fails', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      clearFactorySession: () => { calls.push('clear-factory-session'); throw new Error('storage blocked') },
+      invalidateProvisioning: () => calls.push('invalidate'),
+      reload: () => calls.push('reload'),
+    }))
+    store.phase = 'ready'
+
+    await store.handleExternalReset('factory')
+
+    expect(calls).toEqual(['invalidate', 'clear-factory-session', 'reload'])
+    expect(store.phase).toBe('factory_restarting')
+    expect(store.error?.message).toBe('storage blocked')
+  })
+
+  it('remains blocked for acknowledgement when external client refresh fails', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      resetClient: async () => { throw new Error('refresh unavailable') },
+    }))
+    store.phase = 'ready'
+
+    await store.handleExternalReset('learning')
+
+    expect(store.phase).toBe('external_reset')
+    expect(store.error?.message).toBe('refresh unavailable')
+    expect(store.externalClientReady).toBe(false)
+  })
+
+  it('retries a failed external client reset on acknowledgement before unlocking', async () => {
+    const calls: string[] = []
+    let attempts = 0
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      resetClient: async () => {
+        attempts += 1
+        calls.push(`client:${attempts}`)
+        if (attempts === 1) throw new Error('refresh unavailable')
+      },
+      markChoice: () => calls.push('choice'),
+    }))
+
+    await store.handleExternalReset('learning')
+    await store.acknowledgeExternalReset()
+
+    expect(calls).toEqual(['client:1', 'client:2', 'choice'])
+    expect(store.externalClientReady).toBe(true)
+    expect(store.phase).toBe('ready')
+  })
+
+  it('does not unlock when acknowledgement retry still cannot reset client state', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      resetClient: async () => { calls.push('client'); throw new Error('still unavailable') },
+      markChoice: () => calls.push('choice'),
+    }))
+
+    await store.handleExternalReset('learning')
+    await store.acknowledgeExternalReset()
+
+    expect(calls).toEqual(['client', 'client'])
+    expect(store.externalClientReady).toBe(false)
+    expect(store.phase).toBe('external_reset')
+    expect(store.error?.message).toBe('still unavailable')
+  })
+
+  it('does not let a stale acknowledgement retry override a newer external factory reset', async () => {
+    const calls: string[] = []
+    let attempts = 0
+    let finishRetry!: () => void
+    const retry = new Promise<void>(resolve => { finishRetry = resolve })
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      resetClient: async () => {
+        attempts += 1
+        calls.push(`client:${attempts}`)
+        if (attempts === 1) throw new Error('first failed')
+        await retry
+      },
+      markChoice: () => calls.push('choice'),
+      clearFactory: () => calls.push('clear-factory'),
+      clearFactorySession: () => calls.push('clear-factory-session'),
+      invalidateProvisioning: () => calls.push('invalidate'),
+      reload: () => calls.push('reload'),
+    }))
+    await store.handleExternalReset('learning')
+
+    const acknowledgement = store.acknowledgeExternalReset()
+    await store.handleExternalReset('factory')
+    finishRetry()
+    await acknowledgement
+
+    expect(calls).toEqual(['client:1', 'client:2', 'invalidate', 'clear-factory-session', 'reload'])
+    expect(store.phase).toBe('factory_restarting')
+  })
+
+  it('still resets client state and blocks when clearing the startup choice fails', async () => {
+    const calls: string[] = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      clearChoice: () => { calls.push('clear-choice'); throw new Error('storage blocked') },
+      resetClient: async () => { calls.push('client') },
+    }))
+    store.phase = 'ready'
+
+    await store.handleExternalReset('learning')
+
+    expect(calls).toEqual(['clear-choice', 'client'])
+    expect(store.phase).toBe('external_reset')
+    expect(store.error?.message).toBe('storage blocked')
+  })
+})
+
+describe('safe reset refusals', () => {
+  function apiError(
+    status: number,
+    code: string,
+    message: string,
+    failedStage: string | null = null,
+  ) {
+    return Object.assign(new Error(message), {
+      name: 'DataLifecycleApiError',
+      status,
+      code,
+      failedStage,
+      retryable: failedStage !== null,
+      requiredScope: null,
+    })
+  }
+
+  it.each([
+    ['data_operation_in_progress', 409],
+    ['reset_in_progress', 409],
+    ['reset_disabled', 403],
+    ['invalid_confirmation', 422],
+  ] as const)('keeps Cancel available for %s without recovery latch', async (code, status) => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async () => {
+        throw apiError(status, code, 'refused')
+      },
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.recoveryScope).toBeNull()
+    store.cancelReset()
+    expect(store.phase).toBe('ready')
+  })
+
+  it('latches recovery for reset_failed and rejects Cancel', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async () => {
+        throw apiError(500, 'reset_failed', 'failed', 'chroma')
+      },
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.recoveryScope).toBe('learning')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+  })
+
+  it('latches recovery for ambiguous network failure', async () => {
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async () => { throw new TypeError('Failed to fetch') },
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(store.recoveryScope).toBe('factory')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+  })
+})
+
+describe('reset_recovery_required scope switching', () => {
+  function recoveryRequired(scope: 'learning' | 'factory') {
+    return Object.assign(new Error('Retry the incomplete reset.'), {
+      name: 'DataLifecycleApiError',
+      status: 409,
+      code: 'reset_recovery_required',
+      failedStage: null,
+      retryable: true,
+      requiredScope: scope,
+    })
+  }
+
+  it('switches factory request to learning retry when required_scope=learning', async () => {
+    const resetCalls: Array<'learning' | 'factory'> = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async (scope) => {
+        resetCalls.push(scope)
+        if (resetCalls.length === 1) throw recoveryRequired('learning')
+        return { scope, status: 'completed', deleted: summary({ has_learning_data: false }) }
+      },
+      summary: async () => summary({ has_learning_data: false }),
+    }))
+    store.phase = 'ready'
+    store.requestFactoryReset()
+
+    await store.confirmFactoryReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('learning')
+    expect(store.recoveryScope).toBe('learning')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+    expect(store.workspaceUnlocked).toBe(false)
+
+    await store.retryReset()
+
+    expect(resetCalls).toEqual(['factory', 'learning'])
+    expect(store.phase).toBe('ready')
+    expect(store.recoveryScope).toBeNull()
+  })
+
+  it('switches learning request to factory retry when required_scope=factory', async () => {
+    const resetCalls: Array<'learning' | 'factory'> = []
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async (scope) => {
+        resetCalls.push(scope)
+        if (resetCalls.length === 1) throw recoveryRequired('factory')
+        return { scope, status: 'completed', deleted: summary() }
+      },
+      clearFactory: () => undefined,
+      provisionFactoryIdentity: async () => 'fresh-token',
+      pause: async () => undefined,
+      reload: () => undefined,
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.phase).toBe('reset_error')
+    expect(store.pendingScope).toBe('factory')
+    expect(store.recoveryScope).toBe('factory')
+    store.cancelReset()
+    expect(store.phase).toBe('reset_error')
+
+    await store.retryReset()
+
+    expect(resetCalls).toEqual(['learning', 'factory'])
+    expect(store.phase).toBe('factory_restarting')
+  })
+})

@@ -9,6 +9,7 @@ semantic / paraphrase queries. RRF with k_smoothing=60 follows Cormack et al.
 from __future__ import annotations
 
 import re
+import threading
 from typing import Protocol
 
 from rank_bm25 import BM25Okapi
@@ -36,30 +37,50 @@ def reciprocal_rank_fusion(
 
 class BM25Index:
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._chunks: list[dict] = []
         self._tokenized: list[list[str]] = []
         self._bm25: BM25Okapi | None = None
 
     def add_chunks(self, chunks: list[dict]) -> None:
-        new_tokens = [_tokenize(c["content"]) for c in chunks]
-        self._chunks.extend(chunks)
-        self._tokenized.extend(new_tokens)
-        if self._tokenized:
-            self._bm25 = BM25Okapi(self._tokenized)
+        with self._lock:
+            by_id = {c["chunk_id"]: i for i, c in enumerate(self._chunks)}
+            fresh: list[dict] = []
+            for chunk in chunks:
+                existing_idx = by_id.get(chunk["chunk_id"])
+                if existing_idx is not None:
+                    # Update citation metadata without growing the index. Content is
+                    # stable for content-hash IDs, so BM25 tokens stay untouched.
+                    current = self._chunks[existing_idx]
+                    self._chunks[existing_idx] = {
+                        **current,
+                        "source": chunk["source"],
+                        "page": chunk.get("page", current.get("page")),
+                    }
+                else:
+                    fresh.append(chunk)
+            if not fresh:
+                return
+            new_tokens = [_tokenize(c["content"]) for c in fresh]
+            self._chunks.extend(fresh)
+            self._tokenized.extend(new_tokens)
+            if self._tokenized:
+                self._bm25 = BM25Okapi(self._tokenized)
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:
-        if self._bm25 is None:
-            return []
-        tokens = _tokenize(query)
-        if not tokens:
-            return []
-        scores = self._bm25.get_scores(tokens)
-        ranked = sorted(
-            ((i, float(s)) for i, s in enumerate(scores) if s > 0),
-            key=lambda x: x[1],
-            reverse=True,
-        )[:top_k]
-        return [{**self._chunks[i], "score": s} for i, s in ranked]
+        with self._lock:
+            if self._bm25 is None:
+                return []
+            tokens = _tokenize(query)
+            if not tokens:
+                return []
+            scores = self._bm25.get_scores(tokens)
+            ranked = sorted(
+                ((i, float(s)) for i, s in enumerate(scores) if s > 0),
+                key=lambda x: x[1],
+                reverse=True,
+            )[:top_k]
+            return [{**self._chunks[i], "score": s} for i, s in ranked]
 
 
 class HybridRetriever:

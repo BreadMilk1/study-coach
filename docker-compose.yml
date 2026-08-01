@@ -3,29 +3,36 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    ports: ["8000:8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
     environment:
-      - DATABASE_URL=sqlite:///data/study_coach.db
-      - CHROMA_PERSIST_DIR=/app/data/chroma
-      - JWT_SECRET=${JWT_SECRET:-dev-secret-change-me}
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
-      - CORS_ORIGINS=http://localhost:5173
+      DATABASE_URL: sqlite:///data/study_coach.db
+      CHROMA_PATH: /app/data/chroma
+      OLLAMA_HOST: http://ollama:11434
+      STUDY_COACH_LOCAL_MODE: "1"
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      CORS_ORIGINS: http://localhost:5173
 
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    ports: ["5173:5173"]
+    ports: ["127.0.0.1:5173:5173"]
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:8000
     depends_on: [backend]
 
+  # Stop host `ollama serve` before `docker compose up` — both bind 127.0.0.1:11434.
+  # Models live in ollama_data; host-downloaded models are not visible here.
   ollama:
     image: ollama/ollama:latest
-    ports: ["11434:11434"]
+    ports: ["127.0.0.1:11434:11434"]
     volumes:
       - ollama_data:/root/.ollama
-    entrypoint: /bin/sh -c "ollama serve & sleep 3 && ollama pull gemma3:4b && ollama pull qwen2.5:7b && wait"
+    entrypoint: /bin/sh -c "ollama serve & sleep 3 && ollama pull nomic-embed-text && ollama pull gemma3:4b && ollama pull qwen2.5:7b && wait"
 
 volumes:
   ollama_data:

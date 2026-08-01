@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { getMistakesDue, type MistakeDueDto } from '../lib/api'
+import { captureLearningStateEpoch, isLearningStateEpochCurrent } from '../lib/dataLifecycle'
 
 interface MistakesState {
   items: MistakeDueDto[]
@@ -17,15 +18,24 @@ export const useMistakes = defineStore('mistakes', {
     due: (s) => s.items.filter(isDue),
   },
   actions: {
+    resetAfterDataClear() {
+      this.items = []
+      this.loading = false
+      this.error = null
+    },
     async fetch(includeFuture = false) {
+      const epoch = captureLearningStateEpoch()
       this.loading = true
       this.error = null
       try {
-        this.items = await getMistakesDue(50, includeFuture)
+        const items = await getMistakesDue(50, includeFuture)
+        if (isLearningStateEpochCurrent(epoch)) this.items = items
+        return true
       } catch (e: any) {
-        this.error = e?.message ?? 'failed'
+        if (isLearningStateEpochCurrent(epoch)) this.error = e?.message ?? 'failed'
+        return false
       } finally {
-        this.loading = false
+        if (isLearningStateEpochCurrent(epoch)) this.loading = false
       }
     },
   },

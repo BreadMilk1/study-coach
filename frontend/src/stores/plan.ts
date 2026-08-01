@@ -7,6 +7,7 @@ import {
   type PlanEventDto,
   type ValidationHintDto,
 } from '../lib/api'
+import { captureLearningStateEpoch, isLearningStateEpochCurrent } from '../lib/dataLifecycle'
 
 interface PlanState {
   plan: PlanCurrentDto | null
@@ -31,46 +32,70 @@ export const usePlan = defineStore('plan', {
     mindmapMermaid: null,
   }),
   actions: {
+    resetAfterDataClear() {
+      this.plan = null
+      this.events = []
+      this.lastValidationHint = null
+      this.loading = false
+      this.updatingMilestoneId = null
+      this.error = null
+      this.noActive = false
+      this.mindmapMermaid = null
+    },
     async fetch() {
+      const epoch = captureLearningStateEpoch()
       this.loading = true
       this.error = null
       this.noActive = false
       try {
-        this.plan = await getCurrentPlan()
-        await this.fetchEvents()
+        const plan = await getCurrentPlan()
+        if (!isLearningStateEpochCurrent(epoch)) return true
+        const events = await getPlanEvents(plan.plan_id)
+        if (!isLearningStateEpochCurrent(epoch)) return true
+        this.plan = plan
+        this.events = events
+        return true
       } catch (e: any) {
         if (e?.status === 404) {
-          this.noActive = true
-          this.plan = null
-          this.events = []
-          this.lastValidationHint = null
+          if (isLearningStateEpochCurrent(epoch)) {
+            this.resetAfterDataClear()
+            this.noActive = true
+          }
+          return true
         } else {
-          this.error = e?.message ?? 'failed'
+          if (isLearningStateEpochCurrent(epoch)) this.error = e?.message ?? 'failed'
+          return false
         }
       } finally {
-        this.loading = false
+        if (isLearningStateEpochCurrent(epoch)) this.loading = false
       }
     },
     async fetchEvents() {
-      if (!this.plan) {
-        this.events = []
+      const epoch = captureLearningStateEpoch()
+      const planId = this.plan?.plan_id
+      if (!planId) {
+        if (isLearningStateEpochCurrent(epoch)) this.events = []
         return
       }
-      this.events = await getPlanEvents(this.plan.plan_id)
+      const events = await getPlanEvents(planId)
+      if (isLearningStateEpochCurrent(epoch)) this.events = events
     },
     async toggleMilestone(milestoneId: string, done: boolean) {
       if (!this.plan) return
+      const epoch = captureLearningStateEpoch()
       this.updatingMilestoneId = milestoneId
       this.error = null
       try {
         const result = await patchMilestoneDone(this.plan.plan_id, milestoneId, done)
+        if (!isLearningStateEpochCurrent(epoch)) return
         this.plan = result.plan
         this.lastValidationHint = result.validation_hint
         this.events = [result.event, ...this.events.filter(e => e.id !== result.event.id)].slice(0, 20)
       } catch (e: any) {
+        if (!isLearningStateEpochCurrent(epoch)) return
         this.error = e?.message ?? 'failed'
       } finally {
-        this.updatingMilestoneId = null
+        if (isLearningStateEpochCurrent(epoch)) this.updatingMilestoneId = null
       }
     },
     setMindmap(mermaid: string) {

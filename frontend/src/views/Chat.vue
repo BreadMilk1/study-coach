@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
+import { ref, onBeforeUnmount, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChat } from '../stores/chat'
 import { useSettings } from '../stores/settings'
@@ -12,9 +12,15 @@ const route = useRoute()
 const router = useRouter()
 const input = ref('')
 const scrollEl = useTemplateRef<HTMLDivElement>('scrollEl')
+let active = true
+
+onBeforeUnmount(() => {
+  active = false
+})
 
 onMounted(async () => {
   await chat.restoreCurrentSession()
+  if (!active) return
   const autoText = route.query.auto as string | undefined
   if (autoText) {
     input.value = autoText

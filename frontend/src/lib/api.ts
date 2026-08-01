@@ -1,4 +1,9 @@
 import { authHeaders, getAccessToken, llmHeaders, type ModeOverrides } from '../stores/settings'
+import {
+  CHAT_SESSION_KEY,
+  captureLearningStateEpoch,
+  isLearningStateEpochCurrent,
+} from './dataLifecycle'
 
 // Auto-provision anonymous token on module load
 getAccessToken()
@@ -13,8 +18,6 @@ interface ChatStreamCallbacks {
   onDone?: () => void
   onError?: (err: unknown) => void
 }
-
-const CHAT_SESSION_KEY = 'study-coach:current-chat-session-id'
 
 export function getStoredChatSessionId(): string {
   try { return localStorage.getItem(CHAT_SESSION_KEY) || '' }
@@ -32,7 +35,14 @@ export async function streamChat(
   cb: ChatStreamCallbacks,
   overrides: ModeOverrides = {},
 ): Promise<void> {
+  const epoch = captureLearningStateEpoch()
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  const cancelReader = async () => {
+    try { await reader?.cancel() }
+    catch { /* reader already closed */ }
+  }
   try {
+    if (!isLearningStateEpochCurrent(epoch)) return
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: {
@@ -45,17 +55,34 @@ export async function streamChat(
         session_id: getStoredChatSessionId() || undefined,
       }),
     })
+    if (!isLearningStateEpochCurrent(epoch)) {
+      if (resp.body) reader = resp.body.getReader()
+      await cancelReader()
+      return
+    }
     if (!resp.ok || !resp.body) throw new Error(`chat failed: ${resp.status}`)
-    const reader = resp.body.getReader()
+    reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     while (true) {
+      if (!isLearningStateEpochCurrent(epoch)) {
+        await cancelReader()
+        return
+      }
       const { value, done } = await reader.read()
+      if (!isLearningStateEpochCurrent(epoch)) {
+        await cancelReader()
+        return
+      }
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
+        if (!isLearningStateEpochCurrent(epoch)) {
+          await cancelReader()
+          return
+        }
         const trimmed = line.trim()
         if (!trimmed.startsWith('data: ')) continue
         const json = trimmed.slice(6)
@@ -73,6 +100,10 @@ export async function streamChat(
       }
     }
   } catch (e) {
+    if (!isLearningStateEpochCurrent(epoch)) {
+      await cancelReader()
+      return
+    }
     cb.onError?.(e)
   }
 }
@@ -371,4 +402,120 @@ export async function markMistakeUnderstood(mistakeId: string): Promise<{
   })
   if (!resp.ok) throw new Error(`mark-understood failed: ${resp.status}`)
   return resp.json()
+}
+
+export type ResetScope = 'learning' | 'factory'
+
+export interface DataCounts {
+  users: number
+  documents: number
+  source_chunks: number
+  vectors: number
+  chat_sessions: number
+  messages: number
+  citations: number
+  goals: number
+  topics: number
+  plans: number
+  plan_milestones: number
+  plan_events: number
+  questions: number
+  mastery: number
+  mistakes: number
+}
+
+export interface DataSummaryDto extends DataCounts {
+  reset_enabled: boolean
+  has_learning_data: boolean
+  /** False when the signed bearer no longer maps to a user row (e.g. after factory reset). */
+  current_user_exists: boolean
+}
+
+export interface ResetResultDto {
+  scope: ResetScope
+  status: 'completed'
+  deleted: DataCounts
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+export class DataLifecycleApiError extends Error {
+  public readonly status: number
+  public readonly code: string
+  public readonly failedStage: string | null
+  public readonly retryable: boolean
+  public readonly requiredScope: ResetScope | null
+
+  constructor(
+    status: number,
+    code: string,
+    failedStage: string | null,
+    retryable: boolean,
+    detail: string,
+    requiredScope: ResetScope | null = null,
+  ) {
+    super(detail)
+    this.name = 'DataLifecycleApiError'
+    this.status = status
+    this.code = code
+    this.failedStage = failedStage
+    this.retryable = retryable
+    this.requiredScope = requiredScope
+  }
+
+  static async fromResponse(response: Response): Promise<DataLifecycleApiError> {
+    const body = await response.json().catch(() => null) as unknown
+    const bodyRecord = recordValue(body)
+    const nestedDetail = bodyRecord ? recordValue(bodyRecord.detail) : null
+    const raw = nestedDetail ?? (bodyRecord && !('detail' in bodyRecord) ? bodyRecord : null)
+    const message = typeof raw?.message === 'string'
+      ? raw.message
+      : typeof raw?.detail === 'string'
+        ? raw.detail
+        : 'Data lifecycle request failed.'
+
+    return new DataLifecycleApiError(
+      response.status,
+      typeof raw?.code === 'string' ? raw.code : 'data_lifecycle_failed',
+      typeof raw?.failed_stage === 'string' ? raw.failed_stage : null,
+      raw?.retryable === true,
+      message,
+      raw?.required_scope === 'learning' || raw?.required_scope === 'factory'
+        ? raw.required_scope
+        : null,
+    )
+  }
+}
+
+async function strictAuthHeaders(): Promise<Record<string, string>> {
+  const token = await getAccessToken()
+  return { Authorization: `Bearer ${token}` }
+}
+
+export async function getDataSummary(): Promise<DataSummaryDto> {
+  const resp = await fetch('/api/data/summary', { headers: await strictAuthHeaders() })
+  if (!resp.ok) throw await DataLifecycleApiError.fromResponse(resp)
+  return resp.json() as Promise<DataSummaryDto>
+}
+
+const RESET_CONFIRMATION: Record<ResetScope, string> = {
+  learning: 'CLEAR_LEARNING_DATA',
+  factory: 'FACTORY_RESET',
+}
+
+export async function resetData(scope: ResetScope): Promise<ResetResultDto> {
+  const resp = await fetch('/api/data/reset', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(await strictAuthHeaders()),
+    },
+    body: JSON.stringify({ scope, confirmation: RESET_CONFIRMATION[scope] }),
+  })
+  if (!resp.ok) throw await DataLifecycleApiError.fromResponse(resp)
+  return resp.json() as Promise<ResetResultDto>
 }

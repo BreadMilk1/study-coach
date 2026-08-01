@@ -11,6 +11,47 @@
     "library": "资料库",
     "settings": "设置"
   },
+  "dataLifecycle": {
+    "startup": {
+      "checkingTitle": "正在检查本地数据",
+      "checkingBody": "正在检查本地数据…",
+      "choiceTitle": "发现已有学习数据",
+      "choiceBody": "请选择继续使用此 Study Coach 实例，或清除其中的学习数据并重新开始。",
+      "counts": "{documents} 个文档 · {chunks} 个来源片段 · {sessions} 个 Chat 会话",
+      "continue": "继续",
+      "startFresh": "重新开始",
+      "inspectionErrorTitle": "无法检查本地数据",
+      "inspectionErrorBody": "你可以重试检查；若了解现有数据可能仍被保留，也可以选择不清除并继续。",
+      "continueWithoutClearing": "不清除并继续",
+      "externalTitle": "另一个标签页更改了学习数据",
+      "externalBody": "另一个标签页已清除此实例的学习数据。请先刷新本地状态再继续。",
+      "refreshing": "正在刷新本地状态…"
+    },
+    "reset": {
+      "learningTitle": "清除学习数据？",
+      "learningBody": "清除学习数据会删除已导入的文档记录和 embeddings、Chat 历史记录、Quiz 和复习数据、目标、计划、里程碑、错题、掌握度，以及当前内存中的学习状态。模型、provider、API、语言和界面设置会保留。",
+      "factoryTitle": "恢复此 Study Coach 实例的出厂设置？",
+      "factoryBody": "恢复出厂设置会删除所有学习数据、本地模型和界面设置、缓存的模型能力、本地身份，以及后端本地用户记录。此操作无法撤销。",
+      "counts": "当前存储：{documents} 个文档、{chunks} 个来源片段和 {vectors} 个 embeddings。",
+      "factoryLabel": "输入 RESET 以确认",
+      "factoryHint": "确认文本区分大小写。",
+      "resettingTitle": "正在重置",
+      "resettingBody": "清除本地数据期间，请保持 Study Coach 打开。",
+      "resettingAction": "正在重置…",
+      "errorTitle": "重置未完成",
+      "failedStage": "失败阶段：{stage}",
+      "restarting": "重置完成，正在重新启动…"
+    },
+    "actions": {
+      "cancel": "取消",
+      "retry": "重试",
+      "clearLearning": "清除学习数据",
+      "factoryReset": "恢复出厂设置"
+    },
+    "toast": {
+      "learningCleared": "学习数据已清除，共删除 {count} 条存储记录和向量。"
+    }
+  },
   "chat": {
     "placeholder": "输入问题...",
     "send": "发送",
@@ -44,9 +85,41 @@
     "uploaded": "已上传！"
   },
   "settings": {
+    "localFirst": "本地优先学习空间，无需注册。",
     "debugMode": "调试模式",
     "language": "语言",
-    "save": "保存设置"
+    "save": "保存设置",
+    "saved": "设置已保存。",
+    "dangerZone": {
+      "eyebrow": "本地实例控制",
+      "title": "危险区域",
+      "description": "这些操作会删除此本地 Study Coach 实例中的数据。继续前请核对各项实际存储数量。",
+      "countsTitle": "此实例中的存储数据",
+      "refreshingCounts": "正在刷新存储数量…",
+      "refreshError": "无法刷新存储数量：{message}",
+      "retryCounts": "重试数量刷新",
+      "counts": {
+        "documents": "文档",
+        "source_chunks": "来源片段（SQL）",
+        "vectors": "向量（实际 embeddings）",
+        "chat_sessions": "Chat 会话",
+        "messages": "消息",
+        "citations": "引用",
+        "goals": "目标",
+        "topics": "主题",
+        "questions": "题目",
+        "mistakes": "错题",
+        "mastery": "掌握度记录",
+        "plans": "计划",
+        "plan_milestones": "计划里程碑",
+        "plan_events": "计划事件",
+        "users": "用户"
+      },
+      "learningTitle": "清除学习数据",
+      "learningBody": "删除已导入的文档和实际向量、Chat 与 Quiz 历史、复习进度、目标、计划、错题及掌握度。模型、provider、API、语言和界面设置会保留。",
+      "factoryTitle": "恢复出厂设置",
+      "factoryBody": "删除所有学习数据、本地模型和界面设置、缓存的模型能力、本地身份，以及后端本地用户记录。此操作无法撤销。"
+    }
   },
   "mistakes": {
     "dueOnly": "仅到期",

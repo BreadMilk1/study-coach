@@ -35,6 +35,7 @@ class AuthOut(BaseModel):
     tier: str
 
 
+# Identity-mutating auth POSTs participate via DataLifecycleLeaseMiddleware.
 @auth_router.post("/google", response_model=AuthOut)
 def login_google(body: GoogleLoginIn, session: Annotated[Session, Depends(get_session)]):
     try:
