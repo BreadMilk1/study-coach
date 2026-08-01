@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onBeforeUnmount, onMounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useQuiz } from '../stores/quiz'
 import { useMistakes } from '../stores/mistakes'
@@ -24,12 +24,18 @@ const mode = ref<Mode>(
   settings.toolCapable === false ? 'deterministic' : settings.defaultQuizMode
 )
 const topicHint = ref('')
+let active = true
 
 const needsUpload = computed(() => docs.isEmpty || quiz.needsUpload)
+
+onBeforeUnmount(() => {
+  active = false
+})
 
 onMounted(async () => {
   quiz.reset()
   await Promise.all([mistakes.fetch(), docs.fetch()])
+  if (!active) return
   if (route.query.topic) {
     topicHint.value = String(route.query.topic)
     generate()

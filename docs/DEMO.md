@@ -1,6 +1,6 @@
 # Study Coach Demo Guide
 
-> P4.5 reviewer path verified. P5 local-first data lifecycle automated remediation and current-head Chrome acceptance completed on 2026-07-31.
+> P4.5 reviewer path verified. P5 local-first data lifecycle automated remediation is current; the latest full Chrome acceptance checkpoint completed on 2026-07-31.
 > Use a PDF you own. Do not copy private course PDFs into this repository.
 
 ---
@@ -38,10 +38,10 @@ git diff --check
 Result:
 
 - Full backend: 411 tests passed.
-- Frontend: 131 Vitest tests across 15 files passed; production build passed. Total automated tests: 542.
+- Frontend: 132 Vitest tests across 16 files passed; production build passed. Total automated tests: 543.
 - Compose render (`docker compose config --quiet`) passed.
 - Existing Vite warning for chunks larger than 500 kB is accepted for this stage.
-- Current-head Chrome acceptance passed on Path A with `gemma4:e4b`, `qwen2.5:7b` judge, and `nomic-embed-text`; this is not a Compose model-runtime claim.
+- Latest full Chrome acceptance passed on Path A on 2026-07-31 with `gemma4:e4b`, `qwen2.5:7b` judge, and `nomic-embed-text`; this is not a Compose model-runtime claim.
 - The retained Fly scaffold keeps `STUDY_COACH_LOCAL_MODE=0`, but cloud deployment is deferred and was not runtime-verified.
 
 ---
@@ -301,7 +301,7 @@ Before treating this as the public reviewer demo path, verify:
 
 ## P5 Local Data Lifecycle Acceptance — Complete
 
-**Status (2026-07-31): Automated remediation and current-head Chrome acceptance complete.** The run used Path A with a disposable SQLite/Chroma workspace and user-owned Topic 1 / Topic 4 PDFs. The acceptance run also exposed and fixed an Esc bypass in the native lifecycle dialogs before the checklist was repeated successfully.
+**Status (2026-07-31): Full Chrome acceptance checkpoint complete.** The run used Path A with a disposable SQLite/Chroma workspace and user-owned Topic 1 / Topic 4 PDFs. The acceptance run also exposed and fixed an Esc bypass in the native lifecycle dialogs before the checklist was repeated successfully.
 
 1. [x] Start Ollama, backend, and frontend through the supported local configuration (Path A host-run or Path B Compose — mutually exclusive).
 2. [x] Import two user-owned PDFs and create Chat, Quiz, Plan, mistake, and mastery state.
