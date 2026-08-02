@@ -56,3 +56,9 @@ docs/screenshots/p3/
 
 # Internal dev prompt
 STARTUP_PROMPT.md
+
+# Local git worktrees
+.worktrees/
+
+# Playwright CLI local capture artifacts
+.playwright-cli/

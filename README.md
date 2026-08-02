@@ -28,11 +28,17 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 
 **Study Coach** is the portfolio-grade refactor that bridges both worlds: the course project's four features (HyDE, CoT plan, MCQ, Judge) fully redesigned as a modern **LangGraph agent** with persistent memory, empirical agent-loop ablation, and a production-quality frontend.
 
-**Study Coach is a local-first AI learning workspace. No registration is required.**
+**Current baseline is P5:** a local-first, single-instance learning workspace. No registration is required. Multi-user auth and cloud continuity remain deferred to a separate `feat/multi-user-auth` worktree.
 
 ## Screenshots
 
-| Overview Dashboard | Chat with Agent Trace |
+Refreshed for P5 / P4.5 product narrative: startup choice, Danger Zone lifecycle controls, grounded Chat with citations, and the Overview shell with the `P5 · local-first` sidebar mark. Plan / Quiz / Library / Mistakes / Onboarding / Mobile still show the earlier product shell (layout unchanged).
+
+| Startup Gate (P5) | Settings · Danger Zone |
+|:---:|:---:|
+| ![Startup Gate](docs/screenshots/startup-gate.png) | ![Settings](docs/screenshots/settings.png) |
+
+| Overview Dashboard | Grounded Chat + Citations |
 |:---:|:---:|
 | ![Overview](docs/screenshots/overview.png) | ![Chat](docs/screenshots/chat.png) |
 
@@ -40,9 +46,9 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 |:---:|:---:|
 | ![Plan](docs/screenshots/plan.png) | ![Quiz](docs/screenshots/quiz.png) |
 
-| Mistake Bank (SM-2 SRS) |
-|:---:|
-| ![Mistakes](docs/screenshots/mistakes.png) |
+| Library | Mistake Bank (SM-2 SRS) |
+|:---:|:---:|
+| ![Library](docs/screenshots/library.png) | ![Mistakes](docs/screenshots/mistakes.png) |
 
 | Goal Setup Wizard | Mobile View |
 |:---:|:---:|
@@ -73,23 +79,24 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 - **Mark as Understood** — One-click permanent dismissal of mastered mistakes
 - **Mastery Radar** — 5-axis profile: Mastery, Plan Progress, Quiz Accuracy, Streak, Coverage
 
-### Local-First Data Lifecycle
+### Local-First Data Lifecycle (P5)
 
-- **No-registration startup** — When learning data exists, each tab must Continue with the instance's data or Start fresh before the rest of the app becomes interactive
-- **Two reset scopes** — Learning reset removes study records and indexed source data while preserving local Settings; factory reset also clears local identity and owned browser settings
+- **No-registration startup** — When learning data exists, each tab must **Continue** with the instance's data or **Start fresh** before the rest of the app becomes interactive (see Startup Gate screenshot)
+- **Two reset scopes** — Learning reset removes study records and indexed source data while preserving local Settings; factory reset also clears local identity and owned browser settings (see Settings · Danger Zone screenshot)
 - **Cross-tab coordination** — Reset invalidates stale views across open tabs and blocks overlapping Chat/upload work for the full operation lifetime
 - **Safe deployment default** — Destructive reset is disabled unless `STUDY_COACH_LOCAL_MODE=1`; Docker Compose enables it with the backend bound to loopback only
 
 ### BYOK Multi-Model
 
 - **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers, never persisted server-side
+- **Reviewer demo pairing** — host-run path uses `gemma4:e4b` for chat (tool-calling) with a distinct Judge such as `qwen2.5:7b` to avoid same-model self-preference warnings
 - **Cross-model Judge** — `x-judge-model` header mitigates self-preference bias (empirical delta: 0.20–0.40)
-- **Tool-call detection** — `GET /api/models/tool-check` probes model capability; agent-loop locked to deterministic when unsupported
+- **Tool-call detection** — Settings Connection / Tool Call checks plus `GET /api/models/tool-check`; agent-loop stays locked to deterministic when unsupported
 - **Supported providers**: Ollama (local), OpenAI, Anthropic, Google Gemini
 
 ### Frontend
 
-- **8 views**: Overview (dashboard + radar + heatmap), Chat (SSE streaming + current session restore + recoverable Agent Trace / Agent Run debug panel), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + local preferences + language + Danger Zone), Onboarding (3-step goal setup wizard)
+- **8 views**: Overview (dashboard + radar + activity heatmap), Chat (SSE streaming, current-session restore after refresh, grounded answers with citation chips; Debug Mode adds recoverable Agent Trace / Agent Run), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + Connection/Tool-check + language + Danger Zone), Onboarding (3-step goal setup wizard)
 - **Dark Cinema design system** — Inter / JetBrains Mono / Noto Sans SC, indigo primary
 - **i18n bilingual** — English / 中文 (zh-CN), switchable in Settings
 - **Mobile responsive** — Bottom tab bar for Chat / Quiz / Plan on <768px viewports
@@ -131,9 +138,9 @@ pnpm install
 pnpm dev
 ```
 
-Visit <http://localhost:5173>. Library → upload a PDF → Chat / Plan / Quiz.
+Visit <http://localhost:5173>. If learning data already exists, choose **Continue** or **Start fresh** at the startup gate, then Library → upload a PDF → Chat / Plan / Quiz.
 
-For a stable reviewer walkthrough, follow `docs/DEMO.md` (host-run path).
+In Settings, set Model to `gemma4:e4b` and Judge Model to `qwen2.5:7b`, then run Connection + Tool Call checks before an agent-loop demo. For a stable reviewer walkthrough, follow `docs/DEMO.md` (host-run path).
 
 ### Docker (alternative — stop host Ollama first)
 
@@ -177,7 +184,7 @@ Learning reset clears documents, source chunks, vectors, Chat/Plan/Quiz/Mistake/
 
 ### Deferred authentication work
 
-The backend Google OAuth API is frozen and deferred. It has no frontend login surface and does not provide delivered cloud continuity; future multi-user work belongs in a separate worktree and requires per-user vector ownership.
+The backend Google OAuth API is frozen and deferred. It has no frontend login surface and does not provide delivered cloud continuity; future multi-user work belongs in a separate `feat/multi-user-auth` worktree and requires per-user vector ownership.
 
 ## Key Empirical Results
 
@@ -274,7 +281,7 @@ study-coach/
 │   ├── agent_loop_vs_deterministic.md      # P2.2 portfolio blog
 │   ├── quiz_ablation_followup.md           # P2.3 portfolio blog
 │   ├── p3_frontend_productize.md           # P3 portfolio blog
-│   └── screenshots/                        # UI screenshots (add before GitHub push)
+│   └── screenshots/                        # Portfolio UI screenshots (P5 startup gate + Danger Zone refreshed)
 ├── design-system/MASTER.md                 # Modern Dark Cinema design tokens
 ├── docker-compose.yml                      # Local 3-service deployment
 ├── fly.toml                                # Deferred cloud-deployment scaffold; not verified
@@ -286,10 +293,10 @@ study-coach/
 | Header | Default | Notes |
 |--------|---------|-------|
 | `x-provider` | `ollama` | `openai` / `anthropic` / `google_genai` |
-| `x-model` | `gemma3:4b` | Provider-specific model ID |
+| `x-model` | `gemma3:4b` | Provider-specific model ID; portfolio / agent-loop demo prefers `gemma4:e4b` |
 | `x-api-key` | — | Required for cloud providers; never persisted server-side |
 | `x-base-url` | — | Custom endpoint / proxy |
-| `x-judge-model` | same as `x-model` | Distinct model for Judge Guard |
+| `x-judge-model` | same as `x-model` | Distinct Judge model; demo prefers `qwen2.5:7b` to avoid same-model bias warnings |
 | `x-planner-mode` | `deterministic` | `deterministic` or `agent_loop` |
 | `x-quiz-mode` | `deterministic` | `deterministic` or `agent_loop` |
 
@@ -298,8 +305,9 @@ study-coach/
 - **From prompt pipeline to agent graph**: Fixed chain-of-prompts → LangGraph with typed state, conditional routing, retry loops, and persistent memory
 - **Agent loop treated empirically**: 792 runs across the two primary matrices, plus a 396-run P2.3 no-retriever pilot (1,188 raw runs total) — not assumed, measured
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
-- **Product around research**: Eval results surface in the UI via ModeChip, Debug Mode Agent Trace / Agent Run, and EmptyCorpusBanner
-- **Portfolio-grade engineering**: 543 automated tests, Alembic migrations, i18n, shipped local-first data controls, Docker Compose, mobile responsive
+- **Product around research**: Eval results surface in the UI via ModeChip, EmptyCorpusBanner, and optional Debug Mode Agent Trace / Agent Run
+- **Local-first product closure (P5)**: Startup gate + two-scope Danger Zone resets, with no Google login surface; multi-user ownership deferred
+- **Portfolio-grade engineering**: 543 automated tests, Alembic migrations, i18n, Docker Compose, mobile responsive
 
 ## Origin
 

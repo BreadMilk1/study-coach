@@ -16,7 +16,7 @@ This guide demonstrates the Chat-first Study Coach loop:
 5. Refresh the frontend.
 6. Confirm chat history and Debug / Agent Run evidence are restored.
 
-P4.5 made this path stable before larger harness, durable memory, or multi-agent orchestration work. P5 adds an explicit single-user local-instance lifecycle around the same learning flow.
+P4.5 made this path stable before larger harness, durable memory, or multi-agent orchestration work. P5 adds an explicit single-user local-instance lifecycle around the same learning flow. Portfolio screenshots for the startup gate, Settings Danger Zone, and grounded Chat live under `docs/screenshots/` (see README gallery).
 
 ## Verified Commands
 
