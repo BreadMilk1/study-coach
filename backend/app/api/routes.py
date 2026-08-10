@@ -120,6 +120,13 @@ class DocumentOut(BaseModel):
     chunks_count: int
 
 
+class ChunkOut(BaseModel):
+    chunk_id: str
+    content: str
+    source: str
+    page: int
+
+
 class MistakeQuestionOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
@@ -217,6 +224,7 @@ class ChatMessageOut(BaseModel):
     created_at: str
     citations: list[ChatCitationOut] = []
     agent_run: AgentRunOut | None = None
+    quiz_question_id: str | None = None
 
 
 class ChatMessagesOut(BaseModel):
@@ -500,12 +508,20 @@ def _get_or_create_chat_session(
 _ASSISTANT_ARTIFACTS_SCHEMA = "assistant_artifacts.v1"
 
 
-def _assistant_artifacts(*, citations: list[dict], agent_run: dict | None) -> dict:
-    return {
+def _assistant_artifacts(
+    *,
+    citations: list[dict],
+    agent_run: dict | None,
+    quiz_question_id: str | None = None,
+) -> dict:
+    payload = {
         "schema": _ASSISTANT_ARTIFACTS_SCHEMA,
         "citations": list(citations or []),
         "agent_run": agent_run,
     }
+    if quiz_question_id is not None:
+        payload["quiz_question_id"] = quiz_question_id
+    return payload
 
 
 def _extract_artifact_citations(raw) -> list[dict]:
@@ -521,6 +537,15 @@ def _extract_artifact_agent_run(raw) -> dict | None:
     if isinstance(raw, dict) and raw.get("schema") == _ASSISTANT_ARTIFACTS_SCHEMA:
         run = raw.get("agent_run")
         return run if isinstance(run, dict) else None
+    return None
+
+
+def _extract_artifact_quiz_question_id(raw) -> str | None:
+    if not isinstance(raw, dict) or raw.get("schema") != _ASSISTANT_ARTIFACTS_SCHEMA:
+        return None
+    value = raw.get("quiz_question_id")
+    if isinstance(value, str) and value:
+        return value
     return None
 
 
@@ -596,6 +621,7 @@ async def chat(
         assistant_parts: list[str] = []
         assistant_citations: list[dict] = []
         assistant_agent_run: dict | None = None
+        assistant_quiz_question_id: str | None = None
         input_state = {
             "messages": [HumanMessage(content=body.message)],
             "user_id": user_id,
@@ -624,6 +650,10 @@ async def chat(
             elif chunk.get("type") == "agent_run":
                 run = chunk.get("run")
                 assistant_agent_run = run if isinstance(run, dict) else None
+            elif chunk.get("type") == "quiz_question":
+                qid = chunk.get("question_id")
+                if isinstance(qid, str) and qid:
+                    assistant_quiz_question_id = qid
             # After the first non-empty citations event (Tutor path only),
             # surface the same-model bias warning once before tokens start.
             if (
@@ -645,6 +675,7 @@ async def chat(
             tool_calls_json=_assistant_artifacts(
                 citations=assistant_citations,
                 agent_run=assistant_agent_run,
+                quiz_question_id=assistant_quiz_question_id,
             ),
         )
         _persist_citations(
@@ -691,6 +722,7 @@ def get_chat_session_messages(
         by_message.setdefault(citation.message_id, []).append(citation)
     source_by_message_chunk: dict[tuple[str, str], str] = {}
     agent_run_by_message: dict[str, dict] = {}
+    quiz_question_id_by_message: dict[str, str] = {}
     for m in messages:
         for raw in _extract_artifact_citations(m.tool_calls_json):
             chunk_id = raw.get("chunk_id")
@@ -700,6 +732,9 @@ def get_chat_session_messages(
         run = _extract_artifact_agent_run(m.tool_calls_json)
         if run:
             agent_run_by_message[m.id] = run
+        qid = _extract_artifact_quiz_question_id(m.tool_calls_json)
+        if qid:
+            quiz_question_id_by_message[m.id] = qid
     return ChatMessagesOut(
         session_id=chat_session.id,
         messages=[
@@ -719,6 +754,7 @@ def get_chat_session_messages(
                     for c in by_message.get(m.id, [])
                 ],
                 agent_run=agent_run_by_message.get(m.id),
+                quiz_question_id=quiz_question_id_by_message.get(m.id),
             )
             for m in messages
         ],
@@ -848,6 +884,32 @@ def get_documents(
         DocumentOut(id=d.id, filename=d.filename, chunks_count=d.chunks_count)
         for d in docs
     ]
+
+
+@learning_router.get("/chunks/{chunk_id:path}", response_model=ChunkOut)
+def get_chunk(
+    chunk_id: str,
+    user_id: Annotated[str, Depends(require_existing_user)],
+    session: Annotated[Session, Depends(get_session)],
+    retriever=Depends(get_retriever),
+):
+    """Look up a owned citation chunk by id for Chat preview."""
+    document_hash, separator, _rest = chunk_id.partition(":")
+    if not separator or DocumentRepository(session).get_by_user_and_hash(
+        user_id=user_id,
+        hash_=document_hash,
+    ) is None:
+        raise HTTPException(404, detail="chunk not found")
+    getter = getattr(retriever, "get_chunk", None)
+    chunk = getter(chunk_id) if callable(getter) else None
+    if chunk is None:
+        raise HTTPException(404, detail="chunk not found")
+    return ChunkOut(
+        chunk_id=chunk["chunk_id"],
+        content=chunk.get("content", ""),
+        source=chunk.get("source", ""),
+        page=int(chunk.get("page", -1)),
+    )
 
 
 @learning_router.get("/mistakes/due", response_model=list[MistakeDueOut])

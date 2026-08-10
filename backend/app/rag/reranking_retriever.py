@@ -33,6 +33,12 @@ class RerankingRetriever:
     def add_chunks(self, chunks: list[dict]) -> None:
         self.base.add_chunks(chunks)
 
+    def get_chunk(self, chunk_id: str) -> dict | None:
+        getter = getattr(self.base, "get_chunk", None)
+        if callable(getter):
+            return getter(chunk_id)
+        return None
+
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         candidates = self.base.search(query, top_k=self.retrieval_depth)
         if not candidates:

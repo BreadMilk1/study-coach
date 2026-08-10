@@ -1,7 +1,7 @@
 # Study Coach — ARCHITECTURE v2
 
 > Portfolio-grade exam coach agent. FastAPI + LangGraph + Vue 3.
-> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 411 backend tests and 132 frontend tests (543 total); production build passing. Automated remediation re-verified 2026-08-01; latest full Chrome acceptance verified 2026-07-31.
+> Dual-track LLM configuration (local Ollama + cloud BYOK chat providers). Current automated baseline — 414 backend tests and 155 frontend tests (569 total); production build passing. Automated verification re-verified 2026-08-10; latest full Chrome acceptance verified 2026-07-31.
 
 ## 1. System Overview
 
@@ -38,7 +38,7 @@ Backend: FastAPI + LangChain + LangGraph + Chroma hybrid retrieval + SQLAlchemy/
 Frontend: Vite + Vue 3 SPA + Pinia + Tailwind 4 + vue-i18n.
 LLM: dual-track — BYOK cloud (OpenAI / Anthropic / Gemini) **or** local Ollama, switched per-request via headers.
 
-**Current baseline (2026-08-01):** 411 backend tests and 132 frontend tests across 16 Vitest files passing (543 total); frontend production build passing (existing >500 kB chunk warning accepted). Automated PR remediation is current; the latest full Chrome acceptance remains the 2026-07-31 checkpoint. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
+**Current baseline (2026-08-10):** 414 backend tests and 155 frontend tests across 30 Vitest files passing (569 total); frontend production build passing (existing >500 kB chunk warning accepted). Automated verification re-verified 2026-08-10; the latest full Chrome acceptance remains the 2026-07-31 checkpoint. The primary agent-loop matrices contain 792 records (P2.2 Plan 396 + P2.3 Quiz 396); the P2.3 no-retriever pilot adds 396, for 1,188 raw records total.
 
 ---
 
@@ -263,11 +263,12 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | POST | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | POST | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | POST | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
-| POST | `/api/chat` | signed JWT + user row | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"done"}` |
+| POST | `/api/chat` | signed JWT + user row | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"quiz_question"\|"done"}`; a non-empty `question_id` means the quiz identity was persisted |
 | GET | `/api/chat/sessions/current` | signed JWT + user row | `{session_id, started_at, summary}` |
-| GET | `/api/chat/sessions/{id}/messages` | signed JWT + user row | `{session_id, messages:[{role, content, citations[], agent_run?}]}` |
+| GET | `/api/chat/sessions/{id}/messages` | signed JWT + user row | `{session_id, messages:[{role, content, citations[], agent_run?, quiz_question_id?}]}`; legacy/missing identity is `null`/absent |
 | POST | `/api/documents` | signed JWT + user row | `{document_id, filename, chunks_count}` |
 | GET | `/api/documents` | signed JWT + user row | `[{id, filename, chunks_count}]` |
+| GET | `/api/chunks/{chunk_id}` | signed JWT + user row; chunk must belong to a document owned by the caller | Success: `{chunk_id, content, source, page}`; missing or non-owned: neutral `404 chunk not found` |
 | POST | `/api/goals` | signed JWT + user row | `{goal_id, title}` |
 | GET | `/api/plans/current` | signed JWT + user row | `{plan_id, goal_id, milestones[], updated_at}` |
 | PATCH | `/api/plans/{id}/milestones/{mid}` | signed JWT + user row | `{plan, event, validation_hint}` |
@@ -371,6 +372,8 @@ Deferred cloud scaffold:
 ```
 
 Latest full Path A Chrome verification (2026-07-31): `gemma4:e4b` + `qwen2.5:7b` judge + `nomic-embed-text` — Settings Connected and tool calling supported; 49/61-chunk indexing; grounded Chat; Quiz/mistake/mastery; Plan/milestones/events; learning reset, re-upload, cross-tab acknowledgement; Factory defaults/reload; old-JWT refusal/retry; and concurrent three-tab recovery to one user. Historical Compose runtime smoke verified frontend HTML, direct backend health, and the frontend-proxied health endpoint with HTTP 200; it did not verify Ollama embedding or generation inside the container. Automated remediation re-verified on 2026-08-01 (411/132/543, build, `docker compose config`). On a cold backend start, FastEmbed downloads about 1.1 GB of model data before health becomes ready.
+
+Focused balanced-backlog Chrome acceptance (2026-08-10) covered only real PDF upload and grounded Chat citation; citation preview heading uses the fetched chunk source, Escape closes the preview when focus is outside the modal, agent-loop quiz generation produces a persisted MCQ, refresh restores it, and submitting an answer removes the old MCQ. Chrome console reported 0 errors/warnings. This was not a full Path A rerun or a complete browser matrix.
 
 ---
 

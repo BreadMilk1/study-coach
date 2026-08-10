@@ -263,6 +263,10 @@ def _format_final_output(
     )
 
     writer({"type": "citations", "citations": []})
+    writer({
+        "type": "quiz_question",
+        "question_id": persisted_question_id,
+    })
     writer({"type": "token", "text": final_text})
     _emit_agent_run(writer, trace)
 

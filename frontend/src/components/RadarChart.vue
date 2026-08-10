@@ -8,41 +8,38 @@ import {
 import { useMastery } from '../stores/mastery'
 import { useMistakes } from '../stores/mistakes'
 import { usePlan } from '../stores/plan'
-import { useDocuments } from '../stores/documents'
+import { computeRadarAxes } from '../lib/radar'
 
 ChartJS.register(RadialLinearScale, PointElement, LineElement, Filler, Tooltip, Legend)
 
 const mastery = useMastery()
 const mistakes = useMistakes()
 const plan = usePlan()
-const docs = useDocuments()
 
-// Simple normalized 0..1 vector across 5 dims.
+// Quiz accuracy: proxy via mastered-mistake ratio.
+// No quiz activity → 0 (no data). Mistakes with interval >= 7 (well-learned)
+// count positively; small intervals drag score down. Floor at 5 for stability.
 const data = computed(() => {
-  const avgMastery = mastery.data.scores.length === 0
-    ? 0
-    : mastery.data.scores.reduce((a, s) => a + s.score, 0) / mastery.data.scores.length
-  const planProgress = !plan.plan || plan.plan.milestones.length === 0
-    ? 0
-    : plan.plan.milestones.filter(m => m.done).length / plan.plan.milestones.length
-  // Streak — P4. Placeholder = 0.5 if any quiz activity, else 0.
   const hasActivity = mastery.data.scores.length > 0 || mistakes.items.length > 0
-  // Quiz accuracy: proxy via mastered-mistake ratio.
-  // No quiz activity → 0 (no data). Mistakes with interval >= 7 (well-learned)
-  // count positively; small intervals drag score down. Floor at 5 for stability.
   const totalTracked = mistakes.items.length
   const quizAccuracy = totalTracked === 0
     ? (hasActivity ? 1 : 0)
     : Math.min(1, mistakes.items.filter(m => m.srs_interval_days >= 7).length / Math.max(totalTracked, 5))
-  const streak = hasActivity ? 0.5 : 0
-  // Coverage = doc count / 5 capped at 1.
-  const coverage = Math.min(docs.docs.length / 5, 1)
+  const milestones = plan.plan?.milestones ?? []
+  const axes = computeRadarAxes({
+    scores: mastery.data.scores,
+    planMilestoneDone: milestones.filter(m => m.done).length,
+    planMilestoneTotal: milestones.length,
+    quizAccuracy,
+    streakDays: mastery.data.streak_days ?? 0,
+    coverage: mastery.data.coverage ?? 0,
+  })
 
   return {
     labels: ['Mastery', 'Plan progress', 'Quiz accuracy', 'Streak', 'Coverage'],
     datasets: [{
       label: 'You',
-      data: [avgMastery, planProgress, quizAccuracy, streak, coverage],
+      data: [axes.mastery, axes.planProgress, axes.quizAccuracy, axes.streak, axes.coverage],
       backgroundColor: 'rgba(99,102,241,0.25)',
       borderColor: '#6366f1',
       borderWidth: 2,

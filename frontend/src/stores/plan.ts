@@ -47,6 +47,7 @@ export const usePlan = defineStore('plan', {
       this.loading = true
       this.error = null
       this.noActive = false
+      this.lastValidationHint = null
       try {
         const plan = await getCurrentPlan()
         if (!isLearningStateEpochCurrent(epoch)) return true
@@ -85,6 +86,7 @@ export const usePlan = defineStore('plan', {
       const epoch = captureLearningStateEpoch()
       this.updatingMilestoneId = milestoneId
       this.error = null
+      this.lastValidationHint = null
       try {
         const result = await patchMilestoneDone(this.plan.plan_id, milestoneId, done)
         if (!isLearningStateEpochCurrent(epoch)) return

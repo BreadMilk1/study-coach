@@ -18,6 +18,8 @@ export interface Citation {
   chunk_id: string
   source: string
   page: number
+  span_start: number
+  span_end: number
 }
 
 export interface AgentRunToolCall {
@@ -48,6 +50,7 @@ export interface Message {
   content: string
   citations?: Citation[]
   agentRun?: AgentRun | null
+  quizQuestionId?: string | null
 }
 
 interface ChatState {
@@ -89,10 +92,19 @@ export const useChat = defineStore('chat', {
       m.content += text
     },
     setCitations(m: Message, cs: Citation[]) {
-      m.citations = cs
+      m.citations = cs.map((c) => ({
+        chunk_id: c.chunk_id,
+        source: c.source || c.chunk_id,
+        page: c.page,
+        span_start: c.span_start ?? 0,
+        span_end: c.span_end ?? 0,
+      }))
     },
     setAgentRun(m: Message, run: AgentRun) {
       m.agentRun = run
+    },
+    setQuizQuestionId(m: Message, questionId: string) {
+      m.quizQuestionId = questionId
     },
     finish() {
       this.streaming = false
@@ -134,8 +146,11 @@ export const useChat = defineStore('chat', {
             chunk_id: c.chunk_id,
             source: c.source || c.chunk_id,
             page: c.page,
+            span_start: c.span_start ?? 0,
+            span_end: c.span_end ?? 0,
           })),
           agentRun: m.agent_run,
+          quizQuestionId: m.quiz_question_id,
         }))
       } catch {
         // No prior session yet, or it belongs to a different user/token.

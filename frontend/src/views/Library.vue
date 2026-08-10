@@ -1,12 +1,35 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { uploadDocument } from '../lib/api'
 import { useDocuments } from '../stores/documents'
 
+const ALLOWED_RETURNS = new Set(['/quiz', '/chat', '/plan', '/'])
+
 const docs = useDocuments()
+const route = useRoute()
+const router = useRouter()
 const status = ref<string>('')
 const uploading = ref(false)
 const lastDoc = ref<{ filename: string; chunks_count: number } | null>(null)
+let active = true
+
+onBeforeUnmount(() => {
+  active = false
+})
+
+const returnPath = computed(() => {
+  const raw = route.query.return
+  const value = Array.isArray(raw) ? raw[0] : raw
+  if (typeof value !== 'string') return null
+  return ALLOWED_RETURNS.has(value) ? value : null
+})
+
+const returnTopic = computed(() => {
+  const raw = route.query.topic
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' && value ? value : null
+})
 
 onMounted(() => {
   docs.fetch()
@@ -19,13 +42,24 @@ async function onFile(e: Event) {
   status.value = `Uploading ${f.name}…`
   try {
     const res = await uploadDocument(f)
+    if (!active) return
     lastDoc.value = { filename: res.filename, chunks_count: res.chunks_count }
     status.value = `Indexed ${res.chunks_count} chunks from ${res.filename}.`
     await docs.fetch()
-  } catch (e) {
-    status.value = `Upload failed: ${e}`
+    if (!active) return
+    if (returnPath.value) {
+      if (returnPath.value === '/quiz' && returnTopic.value) {
+        await router.push({ path: '/quiz', query: { topic: returnTopic.value } })
+      } else {
+        await router.push(returnPath.value)
+      }
+      return
+    }
+  } catch (err) {
+    if (!active) return
+    status.value = `Upload failed: ${err}`
   } finally {
-    uploading.value = false
+    if (active) uploading.value = false
   }
 }
 </script>
@@ -41,6 +75,16 @@ async function onFile(e: Event) {
     </label>
     <div v-if="status" class="mt-6 text-sm text-white/70">{{ status }}</div>
     <div v-if="lastDoc" class="mt-2 text-xs text-white/40">{{ lastDoc.filename }} → {{ lastDoc.chunks_count }} chunks</div>
+    <div v-if="lastDoc && !returnPath" class="mt-4 flex flex-wrap gap-2">
+      <RouterLink
+        to="/chat"
+        class="rounded-md bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-400"
+      >Open Chat</RouterLink>
+      <RouterLink
+        to="/quiz"
+        class="rounded-md border border-indigo-400/40 px-3 py-2 text-sm font-medium text-indigo-200 hover:bg-indigo-400/10"
+      >Start Quiz</RouterLink>
+    </div>
     <div class="mt-8">
       <h3 class="text-sm font-medium text-white/80 mb-3">Indexed PDFs</h3>
       <div v-if="docs.loading" class="text-sm text-white/50">Loading…</div>

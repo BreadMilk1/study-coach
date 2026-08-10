@@ -22,6 +22,17 @@ class StubRetriever:
     def add_chunks(self, chunks):
         self.added.extend(chunks)
 
+    def get_chunk(self, chunk_id: str):
+        for chunk in reversed(self.added):
+            if chunk.get("chunk_id") == chunk_id:
+                return {
+                    "chunk_id": chunk_id,
+                    "content": chunk.get("content", ""),
+                    "source": chunk.get("source", ""),
+                    "page": chunk.get("page", -1),
+                }
+        return None
+
     def search(self, query: str, top_k: int = 5):
         return self.search_returns[:top_k]
 
@@ -218,6 +229,89 @@ def test_upload_document_calls_processor_and_indexes_chunks(client, stub_retriev
     # filename propagated as source
     assert all(c["source"] == "lec.pdf" for c in stub_retriever.added)
     assert not stub_document_processor.paths[0].exists()
+
+
+def test_get_chunk_returns_indexed_content(client, stub_retriever):
+    owned_hash = "b" * 64
+    chunk_id = f"{owned_hash}:1:0"
+    missing_chunk_id = f"{owned_hash}:99:0"
+    stub_retriever.add_chunks([
+        {
+            "chunk_id": chunk_id,
+            "content": "Prompt engineering is the craft of designing prompts.",
+            "source": "lec.pdf",
+            "page": 3,
+        },
+    ])
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "chunk-user")
+        DocumentRepository(session).create(
+            user_id="chunk-user",
+            filename="lec.pdf",
+            hash_=owned_hash,
+            chunks_count=1,
+        )
+    token = issue_token("chunk-user", "guest")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    ok = client.get(f"/api/chunks/{chunk_id}", headers=headers)
+    missing = client.get(f"/api/chunks/{missing_chunk_id}", headers=headers)
+
+    assert ok.status_code == 200
+    assert ok.json() == {
+        "chunk_id": chunk_id,
+        "content": "Prompt engineering is the craft of designing prompts.",
+        "source": "lec.pdf",
+        "page": 3,
+    }
+    assert missing.status_code == 404
+
+
+def test_get_chunk_hides_content_not_owned_by_current_user(client, stub_retriever):
+    """Cross-user: chunk exists for owner, but attacker must get neutral 404."""
+    owner_hash = "a" * 64
+    chunk_id = f"{owner_hash}:1:0"
+    private_content = "PRIVATE_OWNER_ONLY_CHUNK_CONTENT"
+
+    stub_retriever.add_chunks([
+        {
+            "chunk_id": chunk_id,
+            "content": private_content,
+            "source": "private.pdf",
+            "page": 1,
+        },
+    ])
+    assert stub_retriever.get_chunk(chunk_id) is not None
+    assert stub_retriever.get_chunk(chunk_id)["content"] == private_content
+
+    from app.db.repositories import DocumentRepository
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        ensure_user(session, "chunk-owner")
+        ensure_user(session, "chunk-attacker")
+        owner_doc = DocumentRepository(session).create(
+            user_id="chunk-owner",
+            filename="private.pdf",
+            hash_=owner_hash,
+            chunks_count=1,
+        )
+        assert owner_doc.hash == owner_hash
+        assert owner_doc.user_id == "chunk-owner"
+        attacker_docs = DocumentRepository(session).list_for_user("chunk-attacker")
+        assert attacker_docs == []
+
+    token = issue_token("chunk-attacker", "guest")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get(f"/api/chunks/{chunk_id}", headers=headers)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "chunk not found"
+    assert private_content not in response.text
 
 
 def test_upload_rejects_non_pdf_extension(client, stub_document_processor):

@@ -36,3 +36,26 @@ def test_retriever_add_chunks_is_idempotent_for_stable_ids(fake_embedder, chroma
     assert chroma_collection.count() == 1
     stored = chroma_collection.get(ids=["abc123:1:0"])
     assert stored["metadatas"][0]["source"] == "renamed.pdf"
+
+
+def test_retriever_get_chunk_returns_stored_document(fake_embedder, chroma_collection):
+    retriever = Retriever(collection=chroma_collection, embedder=fake_embedder)
+    retriever.add_chunks([
+        {
+            "chunk_id": "abc:1:0",
+            "content": "HyDE rewrites the query into a hypothetical answer.",
+            "source": "notes.pdf",
+            "page": 2,
+        },
+    ])
+
+    found = retriever.get_chunk("abc:1:0")
+    missing = retriever.get_chunk("missing")
+
+    assert found == {
+        "chunk_id": "abc:1:0",
+        "content": "HyDE rewrites the query into a hypothetical answer.",
+        "source": "notes.pdf",
+        "page": 2,
+    }
+    assert missing is None

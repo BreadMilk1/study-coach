@@ -189,6 +189,7 @@ def build_quiz_master(
             + "\n\nReply with A, B, C, or D."
         )
         writer({"type": "citations", "citations": []})
+        writer({"type": "quiz_question", "question_id": q.id})
         writer({"type": "token", "text": text})
         return {
             "messages": [AIMessage(content=text)],

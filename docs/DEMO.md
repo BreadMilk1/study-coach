@@ -10,17 +10,19 @@
 This guide demonstrates the Chat-first Study Coach loop:
 
 1. Upload a PDF.
-2. Ask a grounded question in Chat.
-3. Generate a Chat quiz.
+2. Ask a grounded question in Chat (click citation chips to preview source chunks).
+3. Generate a Chat quiz (rendered as an answerable MCQ card only when content is parseable and the persisted quiz identity signal is present).
 4. Answer the quiz.
 5. Refresh the frontend.
 6. Confirm chat history and Debug / Agent Run evidence are restored.
+
+For the adaptive Quiz → Mistake Bank → Plan → Overview path, see **Appendix: Full coach loop** below.
 
 P4.5 made this path stable before larger harness, durable memory, or multi-agent orchestration work. P5 adds an explicit single-user local-instance lifecycle around the same learning flow. Portfolio screenshots for the startup gate, Settings Danger Zone, and grounded Chat live under `docs/screenshots/` (see README gallery).
 
 ## Verified Commands
 
-Automated remediation re-verified on 2026-07-31 (current HEAD):
+Automated verification re-verified on 2026-08-10:
 
 ```bash
 cd backend
@@ -37,11 +39,12 @@ git diff --check
 
 Result:
 
-- Full backend: 411 tests passed.
-- Frontend: 132 Vitest tests across 16 files passed; production build passed. Total automated tests: 543.
+- Full backend: 414 tests passed.
+- Frontend: 155 Vitest tests across 30 files passed; production build passed. Total automated tests: 569.
 - Compose render (`docker compose config --quiet`) passed.
 - Existing Vite warning for chunks larger than 500 kB is accepted for this stage.
 - Latest full Chrome acceptance passed on Path A on 2026-07-31 with `gemma4:e4b`, `qwen2.5:7b` judge, and `nomic-embed-text`; this is not a Compose model-runtime claim.
+- Focused balanced-backlog Chrome acceptance on 2026-08-10 covered only real PDF upload and grounded Chat citation; citation preview heading used the fetched chunk source, Escape closed it when focus was outside the modal, agent-loop quiz generation produced a persisted MCQ, refresh restored it, submitting an answer removed the old MCQ, and the Chrome console reported 0 errors/warnings. This was not a full Path A rerun or a complete browser matrix.
 - The retained Fly scaffold keeps `STUDY_COACH_LOCAL_MODE=0`, but cloud deployment is deferred and was not runtime-verified.
 
 ---
@@ -215,6 +218,57 @@ Expected:
 - Chat history is restored.
 - Assistant citations are restored.
 - Debug / Agent Run evidence for assistant turns is restored.
+
+---
+
+## Appendix: Full coach loop (optional, ~10 min)
+
+Use this after the Chat-first path when you want to show adaptive learning end-to-end. Same Path A stack and PDF.
+
+### A1. Quiz Adaptive page
+
+Open **Quiz**. Generate a question on a topic from your PDF (or use a Plan milestone **Validate with quiz**).
+
+Expected:
+
+- MCQ card with A/B/C/D options (not a prose blob).
+- Empty corpus still routes through Library with `?return=/quiz` and returns here after upload.
+
+Intentionally answer **wrong** once so a Mistake Bank entry is created.
+
+### A2. Mistake Bank + redo
+
+Open **Mistakes** (desktop sidebar, or mobile **More → Mistakes**).
+
+Expected:
+
+- Due mistake appears with SM-2 scheduling fields.
+- Redo from Mistakes or Quiz; correct answers update interval / mastery.
+- **Mark understood** dismisses a mastered item.
+
+### A3. Plan check-in / validation
+
+Open **Plan**. If you have milestones:
+
+- Toggle a milestone done → a **quick quiz** banner may appear when the backend returns `validation_hint.show_quick_quiz`.
+- Or use **Check-in progress** / **Validate with quiz** to jump to Quiz with a topic.
+
+### A4. Overview radar
+
+Open **Overview**.
+
+Expected:
+
+- 5-axis profile uses live `streak_days` and `coverage` from `/api/mastery` (not placeholders).
+- Heatmap / mastery cards reflect the session activity above.
+
+### A5. Citation preview
+
+Back in **Chat**, click a citation chip on a grounded answer.
+
+Expected:
+
+- Modal loads chunk text from `GET /api/chunks/{chunk_id}` with source and page.
 
 ---
 

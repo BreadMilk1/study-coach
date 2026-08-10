@@ -30,6 +30,21 @@ async function toggleMilestone(milestone: MilestoneDto) {
   await planStore.toggleMilestone(milestone.id, !milestone.done)
 }
 
+function dismissValidationHint() {
+  planStore.lastValidationHint = null
+}
+
+function goQuickQuiz() {
+  const hint = planStore.lastValidationHint
+  const topic = hint?.topic
+  planStore.lastValidationHint = null
+  if (topic) {
+    router.push({ path: '/quiz', query: { topic } })
+  } else {
+    router.push('/quiz')
+  }
+}
+
 function validateMilestone(milestone: MilestoneDto) {
   if (!milestone.topic) return
   router.push({ path: '/quiz', query: { topic: milestone.topic } })
@@ -90,6 +105,33 @@ async function checkIn() {
       </div>
 
       <template v-else-if="planStore.plan">
+        <div
+          v-if="planStore.lastValidationHint?.show_quick_quiz"
+          class="mb-4 rounded-lg border border-indigo-400/30 bg-indigo-500/10 p-4 flex flex-wrap items-start gap-3"
+        >
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-medium text-fg">Validate this milestone with a quick quiz</p>
+            <p class="text-xs text-fg-muted mt-1">
+              {{ planStore.lastValidationHint.reason || 'A short quiz helps lock in what you just marked done.' }}
+              <span v-if="planStore.lastValidationHint.topic" class="font-mono text-fg">
+                · {{ planStore.lastValidationHint.topic }}
+              </span>
+            </p>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              class="rounded-md bg-primary px-3 py-2 text-sm font-medium text-white hover:bg-primary-2"
+              @click="goQuickQuiz"
+            >Start quiz</button>
+            <button
+              type="button"
+              class="text-fg-muted hover:text-fg text-lg leading-none px-1"
+              aria-label="Dismiss"
+              @click="dismissValidationHint"
+            >&times;</button>
+          </div>
+        </div>
         <MilestoneList
           :milestones="planStore.plan.milestones"
           :plan-id="planStore.plan.plan_id"
