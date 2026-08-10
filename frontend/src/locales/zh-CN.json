@@ -9,7 +9,8 @@
     "quiz": "测验",
     "mistakes": "错题",
     "library": "资料库",
-    "settings": "设置"
+    "settings": "设置",
+    "more": "更多"
   },
   "dataLifecycle": {
     "startup": {

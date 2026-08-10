@@ -15,6 +15,7 @@ interface ChatStreamCallbacks {
   onAgentRun?: (run: AgentRun) => void
   onToken?: (text: string) => void
   onTrace?: (step: any) => void
+  onQuizQuestion?: (questionId: string) => void
   onDone?: () => void
   onError?: (err: unknown) => void
 }
@@ -95,6 +96,13 @@ export async function streamChat(
           else if (event.type === 'citations') cb.onCitations?.(event.citations)
           else if (event.type === 'agent_run') cb.onAgentRun?.(event.run)
           else if (event.type === 'trace') cb.onTrace?.(event)
+          else if (
+            event.type === 'quiz_question'
+            && typeof event.question_id === 'string'
+            && event.question_id
+          ) {
+            cb.onQuizQuestion?.(event.question_id)
+          }
           else if (event.type === 'done') cb.onDone?.()
         } catch { /* ignore malformed */ }
       }
@@ -254,10 +262,23 @@ export interface MasteryDto {
   scores: MasteryScoreDto[]
   weak_topics: string[]
   overdue_milestones_count: number
+  streak_days: number
+  coverage: number
 }
 
 export function getMastery(): Promise<MasteryDto> {
   return getJSON<MasteryDto>('/api/mastery')
+}
+
+export interface ChunkDto {
+  chunk_id: string
+  content: string
+  source: string
+  page: number
+}
+
+export function getChunk(chunkId: string): Promise<ChunkDto> {
+  return getJSON<ChunkDto>(`/api/chunks/${encodeURIComponent(chunkId)}`)
 }
 
 export interface ToolCheckDto {
@@ -361,6 +382,7 @@ export interface ChatMessageDto {
   created_at: string
   citations: ChatMessageCitationDto[]
   agent_run: AgentRun | null
+  quiz_question_id: string | null
 }
 
 export interface ChatMessagesDto {

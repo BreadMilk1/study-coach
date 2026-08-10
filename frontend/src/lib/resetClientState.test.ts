@@ -514,6 +514,8 @@ describe('server-backed store data reset', () => {
       }],
       weak_topics: ['stale topic'],
       overdue_milestones_count: 2,
+      streak_days: 4,
+      coverage: 0.5,
     }
     mastery.loading = true
     mastery.error = 'stale error'
@@ -524,6 +526,8 @@ describe('server-backed store data reset', () => {
       scores: [],
       weak_topics: [],
       overdue_milestones_count: 0,
+      streak_days: 0,
+      coverage: 0,
     })
     expect(mastery.loading).toBe(false)
     expect(mastery.error).toBeNull()
@@ -544,6 +548,8 @@ describe('server-backed store data reset', () => {
       scores: [],
       weak_topics: ['new topic'],
       overdue_milestones_count: 1,
+      streak_days: 2,
+      coverage: 0.3,
     }
     mastery.error = 'new refresh pending'
     mastery.loading = true
@@ -554,6 +560,8 @@ describe('server-backed store data reset', () => {
         scores: [],
         weak_topics: ['old topic'],
         overdue_milestones_count: 9,
+        streak_days: 9,
+        coverage: 0.9,
       }),
     } as unknown as Response)
 
@@ -563,6 +571,8 @@ describe('server-backed store data reset', () => {
       scores: [],
       weak_topics: ['new topic'],
       overdue_milestones_count: 1,
+      streak_days: 2,
+      coverage: 0.3,
     })
     expect(mastery.error).toBe('new refresh pending')
     expect(mastery.loading).toBe(true)
@@ -594,7 +604,7 @@ describe('server-backed store data reset', () => {
         : path === '/api/documents' || path.includes('/events') || path.includes('/mistakes/')
           ? []
           : path === '/api/mastery'
-          ? { scores: [], weak_topics: [], overdue_milestones_count: 0 }
+          ? { scores: [], weak_topics: [], overdue_milestones_count: 0, streak_days: 0, coverage: 0 }
           : {
               plan_id: 'plan-1',
               goal_id: 'goal-1',

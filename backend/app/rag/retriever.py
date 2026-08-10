@@ -19,6 +19,21 @@ class Retriever:
             embeddings=embeddings,
         )
 
+    def get_chunk(self, chunk_id: str) -> dict | None:
+        result = self.collection.get(
+            ids=[chunk_id],
+            include=["documents", "metadatas"],
+        )
+        if not result["ids"]:
+            return None
+        meta = result["metadatas"][0] or {}
+        return {
+            "chunk_id": result["ids"][0],
+            "content": result["documents"][0] or "",
+            "source": meta.get("source", ""),
+            "page": meta.get("page", -1),
+        }
+
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         query_emb = self.embedder.embed([query])[0]
         result = self.collection.query(query_embeddings=[query_emb], n_results=top_k)

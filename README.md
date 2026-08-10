@@ -13,7 +13,7 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-543%20passed-10b981)]()
+[![Tests](https://img.shields.io/badge/Tests-569%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -156,12 +156,14 @@ docker compose up
 
 ### Tests
 
+Automated verification (2026-08-10): 414 backend tests and 155 frontend tests across 30 Vitest files passed (569 total); the production build passed.
+
 ```bash
 cd backend
-uv run pytest -q        # 411 tests, no live Ollama required
+uv run pytest -q        # 414 tests, no live Ollama required
 
 cd ../frontend
-pnpm test --run         # 132 tests across 16 Vitest files
+pnpm test --run         # 155 tests across 30 Vitest files
 pnpm build              # typecheck + production build
 ```
 
@@ -218,11 +220,12 @@ See `docs/ARCHITECTURE.md` v2 for:
 | `POST` | `/api/auth/google` | none | `{access_token, user_id, tier:"member"}` |
 | `POST` | `/api/auth/anonymous` | none | `{access_token, user_id, tier:"guest"}` |
 | `POST` | `/api/auth/upgrade` | none | `{access_token, user_id, tier:"member"}` |
-| `POST` | `/api/chat` | signed JWT + user row | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"done"}` |
+| `POST` | `/api/chat` | signed JWT + user row | SSE: `{type:"session"\|"trace"\|"citations"\|"token"\|"agent_run"\|"quiz_question"\|"done"}`; the `quiz_question` event's non-empty `question_id` signals a persisted quiz identity |
 | `GET` | `/api/chat/sessions/current` | signed JWT + user row | `{session_id, started_at, summary}` |
-| `GET` | `/api/chat/sessions/{id}/messages` | signed JWT + user row | `{session_id, messages:[{role, content, citations[], agent_run?}]}` |
+| `GET` | `/api/chat/sessions/{id}/messages` | signed JWT + user row | `{session_id, messages:[{role, content, citations[], agent_run?, quiz_question_id?}]}`; legacy/missing quiz identity is `null`/absent |
 | `POST` | `/api/documents` | signed JWT + user row | `{document_id, filename, chunks_count}` |
 | `GET` | `/api/documents` | signed JWT + user row | `[{id, filename, chunks_count}]` |
+| `GET` | `/api/chunks/{chunk_id}` | signed JWT + user row; chunk must belong to a document owned by the caller | Success: `{chunk_id, content, source, page}`; missing or non-owned: neutral `404 chunk not found` |
 | `POST` | `/api/goals` | signed JWT + user row | `{goal_id, title}` |
 | `GET` | `/api/plans/current` | signed JWT + user row | `{plan_id, goal_id, milestones[], updated_at}` |
 | `PATCH` | `/api/plans/{id}/milestones/{mid}` | signed JWT + user row | `{plan, event, validation_hint}` |
@@ -239,6 +242,8 @@ See `docs/ARCHITECTURE.md` v2 for:
 | `POST` | `/api/data/reset` | signed bearer + reset enabled | `{scope, status:"completed", deleted:{...15 count fields}}` |
 
 All AI-bearing routes read **BYOK headers** per request. Learning routes require a signed bearer whose user row still exists; they do not fall back to a guest/`default-user` identity. Lifecycle `GET /api/data/summary` and `POST /api/data/reset` accept a row-less signed bearer only so Factory reset can be retried idempotently after the user row is deleted. `/api/chat` only enters retrieval when the authenticated user has at least one Library document; otherwise it streams an upload prompt and records the turn in the current session.
+
+The `quiz_question` SSE event and restored `quiz_question_id` field are additive persisted-identity signals. Tutor, grade, and degraded/unpersisted quiz paths do not fabricate them; restored history does not infer an ID from assistant prose. Legacy or missing artifact rows may return `quiz_question_id` as `null` or omit it.
 
 The Google auth endpoints above are frozen backend-only interfaces; the shipped frontend has no Google login or upgrade surface.
 
@@ -265,7 +270,7 @@ study-coach/
 │   │   ├── db/{models,repositories,session}.py # SQLAlchemy + Alembic
 │   │   ├── eval/                           # P2.2 / P2.3 ablation harnesses
 │   │   └── srs/sm2.py                      # SM-2 spaced repetition scheduler
-│   └── tests/                              # 411 backend tests
+│   └── tests/                              # 414 backend tests
 ├── frontend/
 │   └── src/
 │       ├── views/                          # 8 views: Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding
@@ -307,7 +312,7 @@ study-coach/
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, EmptyCorpusBanner, and optional Debug Mode Agent Trace / Agent Run
 - **Local-first product closure (P5)**: Startup gate + two-scope Danger Zone resets, with no Google login surface; multi-user ownership deferred
-- **Portfolio-grade engineering**: 543 automated tests, Alembic migrations, i18n, Docker Compose, mobile responsive
+- **Portfolio-grade engineering**: 569 automated tests, Alembic migrations, i18n, Docker Compose, mobile responsive
 
 ## Origin
 

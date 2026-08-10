@@ -10,13 +10,13 @@ interface MasteryState {
 
 export const useMastery = defineStore('mastery', {
   state: (): MasteryState => ({
-    data: { scores: [], weak_topics: [], overdue_milestones_count: 0 },
+    data: { scores: [], weak_topics: [], overdue_milestones_count: 0, streak_days: 0, coverage: 0 },
     loading: false,
     error: null,
   }),
   actions: {
     resetAfterDataClear() {
-      this.data = { scores: [], weak_topics: [], overdue_milestones_count: 0 }
+      this.data = { scores: [], weak_topics: [], overdue_milestones_count: 0, streak_days: 0, coverage: 0 }
       this.loading = false
       this.error = null
     },

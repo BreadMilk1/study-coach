@@ -421,6 +421,14 @@ def test_chat_quiz_agent_loop_generates_persisted_question_then_grades(client, a
     assert quiz_assistant["agent_run"]["node"] == "quiz"
     assert quiz_assistant["agent_run"]["tool_call_breakdown"]["persist_quiz_question"] == 1
 
+    # Public additive contract: live SSE must surface the persisted question id,
+    # and restored history must carry the same id on that assistant message.
+    quiz_question_events = [e for e in turn1 if e.get("type") == "quiz_question"]
+    assert len(quiz_question_events) == 1
+    quiz_event = quiz_question_events[0]
+    assert isinstance(quiz_event.get("question_id"), str) and quiz_event["question_id"]
+    assert quiz_assistant["quiz_question_id"] == quiz_event["question_id"]
+
 
 def test_user_stats_counts_persisted_chat_sessions(client):
     with client.stream("POST", "/api/chat",
@@ -566,6 +574,24 @@ def test_chat_quiz_two_turns_grade_after_generate(client, stub_llm):
         turn2 = _read_sse_events(resp)
     joined2 = "".join(e["text"] for e in turn2 if e["type"] == "token")
     assert "Correct" in joined2, f"turn 2 must grade as correct; got: {joined2!r}"
+
+    # Public additive contract: deterministic persisted quiz must emit the same
+    # question identity on live SSE and restored chat history.
+    messages_resp = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_HEADERS,
+    )
+    assert messages_resp.status_code == 200
+    messages = messages_resp.json()["messages"]
+    quiz_assistant = next(
+        m for m in messages
+        if m["role"] == "assistant" and "What does HyDE rewrite?" in m["content"]
+    )
+    quiz_question_events = [e for e in turn1 if e.get("type") == "quiz_question"]
+    assert len(quiz_question_events) == 1
+    quiz_event = quiz_question_events[0]
+    assert isinstance(quiz_event.get("question_id"), str) and quiz_event["question_id"]
+    assert quiz_assistant["quiz_question_id"] == quiz_event["question_id"]
 
 
 # --- P2.1-② Judge Guard same-model warning ---------------------------------

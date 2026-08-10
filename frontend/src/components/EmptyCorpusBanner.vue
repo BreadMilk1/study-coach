@@ -1,9 +1,20 @@
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { BookOpen, Upload } from 'lucide-vue-next'
 
+const route = useRoute()
 const router = useRouter()
-function go() { router.push({ path: '/library', query: { return: '/quiz' } }) }
+function go() {
+  const raw = route.query.topic
+  const topic = Array.isArray(raw) ? raw[0] : raw
+  router.push({
+    path: '/library',
+    query: {
+      return: '/quiz',
+      ...(typeof topic === 'string' && topic ? { topic } : {}),
+    },
+  })
+}
 </script>
 
 <template>

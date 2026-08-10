@@ -92,6 +92,12 @@ class HybridRetriever:
         self.dense.add_chunks(chunks)
         self.bm25.add_chunks(chunks)
 
+    def get_chunk(self, chunk_id: str) -> dict | None:
+        getter = getattr(self.dense, "get_chunk", None)
+        if callable(getter):
+            return getter(chunk_id)
+        return None
+
     def search(
         self, query: str, top_k: int = 5, retrieval_depth: int = 20
     ) -> list[dict]:

@@ -9,7 +9,8 @@
     "quiz": "Quiz",
     "mistakes": "Mistakes",
     "library": "Library",
-    "settings": "Settings"
+    "settings": "Settings",
+    "more": "More"
   },
   "dataLifecycle": {
     "startup": {
