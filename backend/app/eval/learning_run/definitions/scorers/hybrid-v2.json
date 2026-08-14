@@ -1,0 +1,107 @@
+{
+  "schema_version": "scorer-bundle-v1",
+  "scorer_id": "hybrid",
+  "version": "hybrid-v2",
+  "parser_version": "json-rubric-v2",
+  "rubric": {
+    "scale": {
+      "min": 1,
+      "max": 5
+    },
+    "anchors": {
+      "1": "Absent, contradicted, wholly unsupported, or a required refusal that is missing.",
+      "2": "Mostly unsupported, substantially incomplete, or an expected refusal that still leaks an answer.",
+      "3": "Materially incomplete, only partly supported, or a refusal that is vague about the missing evidence.",
+      "4": "Meets the bar: every atomized claim is evidence-supported, or the refusal names the missing evidence without extra claims.",
+      "5": "Complete, precise, and strictly atomized against allowed evidence; expected refusals cite the empty-evidence boundary."
+    }
+  },
+  "required_dimensions_by_case_type": {
+    "answerable": [
+      "groundedness",
+      "citation_entailment",
+      "coverage"
+    ],
+    "multi_evidence": [
+      "groundedness",
+      "citation_entailment",
+      "coverage"
+    ],
+    "expected_refusal": [
+      "refusal_appropriateness",
+      "unsupported_claims"
+    ]
+  },
+  "verdict_policy": {
+    "required_minimum": 4,
+    "critical_findings_fail": true,
+    "scorer_failure_verdict": "inconclusive",
+    "fallback_verdict": "never_pass",
+    "average_cannot_cover_dimension_below": 4
+  },
+  "model_config": {
+    "provider": "ollama",
+    "model": "llama3.2",
+    "temperature": 0,
+    "max_tokens": 512
+  },
+  "components": [
+    {
+      "id": "retrieval-integrity",
+      "version": "v1",
+      "kind": "deterministic",
+      "config": {
+        "checks": [
+          "evidence_membership",
+          "retrieval_empty"
+        ]
+      }
+    },
+    {
+      "id": "citation-integrity",
+      "version": "v1",
+      "kind": "deterministic",
+      "config": {
+        "checks": [
+          "citation_presence",
+          "citation_number",
+          "chunk_id",
+          "span"
+        ]
+      }
+    },
+    {
+      "id": "expected-refusal-observation",
+      "version": "v1",
+      "kind": "deterministic",
+      "config": {
+        "checks": [
+          "expected_refusal_observed"
+        ]
+      }
+    },
+    {
+      "id": "grounded-quality-rubric",
+      "version": "v2",
+      "kind": "llm",
+      "config": {
+        "dimensions": [
+          "groundedness",
+          "citation_entailment",
+          "coverage",
+          "refusal_appropriateness",
+          "unsupported_claims"
+        ],
+        "parser_version": "json-rubric-v2",
+        "model_config": {
+          "provider": "ollama",
+          "model": "llama3.2",
+          "temperature": 0,
+          "max_tokens": 512
+        }
+      }
+    }
+  ],
+  "calibration_hash": "f9366f45af07209801b2278319b151aa001de36bc5f426dbaa74f525880bcc02",
+  "definition_hash": "1585e624e6757b2e5a4d276ce0c82c3f9f55fefdad05c8d71cf60bccf4dd1114"
+}

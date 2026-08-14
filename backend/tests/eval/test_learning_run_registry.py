@@ -59,6 +59,17 @@ def test_registry_has_exactly_twelve_cases_with_required_distribution():
     assert set(registry.task_cases).isdisjoint(registry.calibration_case_ids)
 
 
+def test_registry_loads_real_hybrid_v2_bundle():
+    registry = TaskRegistry.load_default()
+    v2 = registry.scorer_for("hybrid-v2")
+    assert v2.version == "hybrid-v2"
+    assert v2.parser_version == "json-rubric-v2"
+    assert v2.verdict_policy["required_minimum"] == 4
+    assert registry.scorer.version == "hybrid-v1"
+    document = registry.scorer_document("hybrid-v2")
+    assert document["definition_hash"] == v2.definition_hash
+
+
 def test_default_prompt_is_byte_exact_production_v2_and_candidate_differs():
     registry = TaskRegistry.load_default()
 

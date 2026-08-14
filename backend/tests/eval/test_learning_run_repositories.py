@@ -598,6 +598,8 @@ def test_score_set_history_is_append_only_and_each_row_terminal_once(session):
     )
     assert first.id != second.id
     assert first.status == second.status == "pending"
+    assert first.scorer_snapshot_json
+    assert first.scorer_definition_hash
 
     running = score_repo.claim_running(first.id)
     assert running.status == "running"

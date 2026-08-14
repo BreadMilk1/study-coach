@@ -118,6 +118,24 @@ class GuardedRegistry:
     def resolve_run(self, **kwargs):
         return self._registry.resolve_run(**kwargs)
 
+    def scorer_for(self, version):
+        return self._registry.scorer_for(version)
+
+    def scorer_document(self, version):
+        return self._registry.scorer_document(version)
+
+    @property
+    def task_cases(self):
+        return self._registry.task_cases
+
+    @property
+    def experiment(self):
+        return self._registry.experiment
+
+    @property
+    def scorers(self):
+        return self._registry.scorers
+
 
 def _candidate(*, empty: bool = False) -> TutorCandidate:
     evidence = [] if empty else [
@@ -227,6 +245,43 @@ async def test_run_service_freezes_candidate_then_scores_four_auditable_executio
     assert "findings" in executions[0].output_json
     assert executions[3].output_json["result"]["groundedness"] == 4
     assert result.score_set.aggregate_scores_json == {"groundedness": 4, "citation_entailment": 4, "coverage": 4}
+
+
+class ExplodingDependency:
+    def __getattr__(self, name):
+        raise AssertionError("Tutor must not run")
+
+
+@pytest.mark.asyncio
+async def test_rescore_reads_frozen_artifact_and_never_calls_tutor(session):
+    runner = RecordingTutorRunner(_candidate())
+    scorer_llm = FakeScorerLLM()
+    service = _service(session, runner, scorer_llm=scorer_llm)
+    first = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(scorer_llm=scorer_llm),
+        events=[],
+    )
+    service.tutor_runner = ExplodingDependency()
+    service.attempt_engine = ExplodingDependency()
+    events = []
+    new_score_set = await service.rescore(
+        run_id=first.run.id,
+        scorer_version="hybrid-v2",
+        connection=_connection(scorer_llm=FakeScorerLLM()),
+        events=events,
+    )
+    assert new_score_set.run_id == first.run.id
+    assert new_score_set.artifact_input_hash == first.run.artifact_hash
+    assert new_score_set.scorer_version == "hybrid-v2"
+    assert new_score_set.scorer_definition_hash == REGISTRY.scorer_for("hybrid-v2").definition_hash
+    assert len(service.score_sets.list_for_run(first.run.id)) == 2
+    assert events[0]["type"] == "score_set_created"
+    assert events[0]["score_set_id"] == new_score_set.id
+    assert runner.calls == 1
 
 
 @pytest.mark.asyncio

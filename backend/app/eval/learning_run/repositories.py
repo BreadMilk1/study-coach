@@ -27,6 +27,7 @@ from .contracts import (
     as_plain,
     canonical_hash,
     canonical_json_bytes,
+    hash_without_field,
 )
 
 
@@ -331,6 +332,56 @@ def _resolve_scorer_identity(
     return str(scorer_id), str(scorer_version)
 
 
+def _freeze_scorer_audit(
+    *,
+    scorer_id: str,
+    scorer_version: str,
+    scorer_bundle: ScorerBundle | Mapping[str, Any] | None = None,
+    scorer_snapshot: Mapping[str, Any] | None = None,
+    scorer_definition_hash: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Freeze a ScoreSet's scorer document so historical re-score stays auditable."""
+
+    if scorer_snapshot is not None:
+        snapshot = as_plain(scorer_snapshot)
+        if not isinstance(snapshot, dict) or not snapshot:
+            raise ValueError("scorer_snapshot must be a non-empty mapping")
+        expected = str(scorer_definition_hash or snapshot.get("definition_hash") or "")
+        if not expected:
+            raise ValueError("scorer_definition_hash is required")
+        actual = hash_without_field(snapshot, "definition_hash")
+        if actual != expected:
+            raise ChecksumMismatchError("scorer snapshot definition hash mismatch")
+        return snapshot, expected
+
+    if isinstance(scorer_bundle, ScorerBundle):
+        snapshot = scorer_bundle.payload()
+        if scorer_bundle.definition_hash:
+            snapshot = {**snapshot, "definition_hash": scorer_bundle.definition_hash}
+            expected = scorer_bundle.definition_hash
+            actual = hash_without_field(snapshot, "definition_hash")
+            if actual != expected:
+                snapshot = scorer_bundle.payload()
+                expected = canonical_hash(snapshot)
+        else:
+            expected = canonical_hash(snapshot)
+        return snapshot, expected
+
+    if isinstance(scorer_bundle, Mapping):
+        snapshot = as_plain(scorer_bundle)
+        expected = str(scorer_definition_hash or snapshot.get("definition_hash") or "")
+        if expected:
+            actual = hash_without_field(snapshot, "definition_hash")
+            if actual != expected:
+                raise ChecksumMismatchError("scorer snapshot definition hash mismatch")
+            return snapshot, expected
+        expected = canonical_hash(snapshot)
+        return snapshot, expected
+
+    snapshot = {"scorer_id": scorer_id, "version": scorer_version}
+    return snapshot, canonical_hash(snapshot)
+
+
 def _begin_immediate(session: Session) -> None:
     """Acquire the SQLite write gate on an otherwise clean eval session."""
 
@@ -402,6 +453,23 @@ class EvalRunRepository:
         try:
             self.session.add(row)
             self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return _load(self.session, EvalRun, row.id)
+
+    def import_historical(
+        self,
+        *,
+        row: EvalRun,
+        auto_commit: bool = True,
+    ) -> EvalRun:
+        try:
+            self.session.add(row)
+            if auto_commit:
+                self.session.commit()
+            else:
+                self.session.flush()
         except Exception:
             self.session.rollback()
             raise
@@ -784,6 +852,8 @@ class EvalExecutionClaimRepository:
         scorer_bundle_id: str | None = None,
         scorer_bundle_version: str | None = None,
         scorer_bundle: ScorerBundle | Mapping[str, Any] | None = None,
+        scorer_snapshot: Mapping[str, Any] | None = None,
+        scorer_definition_hash: str | None = None,
         id: str | None = None,
         created_at: datetime | None = None,
     ) -> EvalScoreSet:
@@ -800,6 +870,13 @@ class EvalExecutionClaimRepository:
             scorer_bundle_id=scorer_bundle_id,
             scorer_bundle_version=scorer_bundle_version,
             scorer_bundle=scorer_bundle,
+        )
+        snapshot, definition_hash = _freeze_scorer_audit(
+            scorer_id=resolved_id,
+            scorer_version=resolved_version,
+            scorer_bundle=scorer_bundle,
+            scorer_snapshot=scorer_snapshot,
+            scorer_definition_hash=scorer_definition_hash,
         )
         try:
             _begin_immediate(self.session)
@@ -847,6 +924,8 @@ class EvalExecutionClaimRepository:
                 run_id=run_id,
                 scorer_id=resolved_id,
                 scorer_version=resolved_version,
+                scorer_snapshot_json=snapshot,
+                scorer_definition_hash=definition_hash,
                 artifact_input_hash=str(artifact_input_hash),
                 status="running",
                 quality_verdict="not_evaluated",
@@ -887,8 +966,11 @@ class EvalScoreSetRepository:
         scorer_bundle_id: str | None = None,
         scorer_bundle_version: str | None = None,
         scorer_bundle: ScorerBundle | Mapping[str, Any] | None = None,
+        scorer_snapshot: Mapping[str, Any] | None = None,
+        scorer_definition_hash: str | None = None,
         id: str | None = None,
         created_at: datetime | None = None,
+        auto_commit: bool = True,
     ) -> EvalScoreSet:
         run = self.runs.get_verified(run_id)
         if run.artifact_hash is None:
@@ -902,11 +984,20 @@ class EvalScoreSetRepository:
             scorer_bundle_version=scorer_bundle_version,
             scorer_bundle=scorer_bundle,
         )
+        snapshot, definition_hash = _freeze_scorer_audit(
+            scorer_id=resolved_id,
+            scorer_version=resolved_version,
+            scorer_bundle=scorer_bundle,
+            scorer_snapshot=scorer_snapshot,
+            scorer_definition_hash=scorer_definition_hash,
+        )
         row = EvalScoreSet(
             id=id or _new_id("score-set"),
             run_id=run_id,
             scorer_id=resolved_id,
             scorer_version=resolved_version,
+            scorer_snapshot_json=snapshot,
+            scorer_definition_hash=definition_hash,
             artifact_input_hash=str(artifact_input_hash),
             status="pending",
             quality_verdict="not_evaluated",
@@ -914,7 +1005,10 @@ class EvalScoreSetRepository:
         )
         try:
             self.session.add(row)
-            self.session.commit()
+            if auto_commit:
+                self.session.commit()
+            else:
+                self.session.flush()
         except Exception:
             self.session.rollback()
             raise
@@ -924,6 +1018,12 @@ class EvalScoreSetRepository:
         run = self.runs.get_verified(row.run_id)
         if run.artifact_hash is None or row.artifact_input_hash != run.artifact_hash:
             raise ChecksumMismatchError(f"score set artifact input hash mismatch: {row.id}")
+        snapshot = row.scorer_snapshot_json or {}
+        if not isinstance(snapshot, dict) or not snapshot:
+            raise ChecksumMismatchError(f"score set scorer snapshot missing: {row.id}")
+        actual = hash_without_field(snapshot, "definition_hash")
+        if actual != row.scorer_definition_hash:
+            raise ChecksumMismatchError(f"score set scorer snapshot hash mismatch: {row.id}")
         return row
 
     def get_verified(self, score_set_id: str) -> EvalScoreSet:
@@ -1508,6 +1608,131 @@ class EvalExecutionControlRepository:
             raise
 
 
+class EvalSuiteImportRepository:
+    """Parse a complete suite export, then write it in one transaction."""
+
+    def __init__(self, session: Session, *, registry: Any):
+        self.session = session
+        self.registry = registry
+        self.runs = EvalRunRepository(session)
+        self.score_sets = EvalScoreSetRepository(session)
+
+    def import_records(self, records: list[Mapping[str, Any]]) -> int:
+        if not records:
+            raise ValueError("suite import is empty")
+        parsed = [self._validate_record(record, index) for index, record in enumerate(records)]
+        run_ids = [item[0].id for item in parsed]
+        if len(run_ids) != len(set(run_ids)):
+            raise ChecksumMismatchError("suite import contains duplicate run ids")
+        try:
+            for run, score_sets, executions in parsed:
+                self.session.add(run)
+                for score_set in score_sets:
+                    self.session.add(score_set)
+                for execution in executions:
+                    self.session.add(execution)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return len(parsed)
+
+    def _validate_record(
+        self,
+        record: Mapping[str, Any],
+        index: int,
+    ) -> tuple[EvalRun, list[EvalScoreSet], list[EvalScorerExecution]]:
+        if not isinstance(record, Mapping):
+            raise ValueError(f"import record {index} must be an object")
+        raw_run = record.get("run")
+        if not isinstance(raw_run, Mapping):
+            raise ValueError(f"import record {index} is missing run")
+        experiment_id = str(raw_run.get("experiment_id") or "")
+        task_case_id = str(raw_run.get("task_case_id") or "")
+        variant_id = str(raw_run.get("variant_id") or "")
+        if experiment_id != self.registry.experiment.experiment_id:
+            raise ValueError(f"unknown experiment in import record {index}")
+        if task_case_id not in self.registry.task_cases:
+            raise ValueError(f"unknown task case in import record {index}")
+        if variant_id not in self.registry.experiment.variants:
+            raise ValueError(f"unknown variant in import record {index}")
+        manifest = raw_run.get("manifest") or raw_run.get("manifest_json")
+        if not isinstance(manifest, Mapping):
+            raise ValueError(f"import record {index} manifest is invalid")
+        expected_manifest_hash = str(raw_run.get("manifest_hash") or "")
+        if canonical_hash(manifest) != expected_manifest_hash:
+            raise ChecksumMismatchError(f"import record {index} manifest hash mismatch")
+        artifact = raw_run.get("candidate_artifact") or raw_run.get("candidate_artifact_json")
+        artifact_hash = raw_run.get("artifact_hash")
+        if artifact is not None:
+            if not isinstance(artifact, Mapping):
+                raise ValueError(f"import record {index} artifact is invalid")
+            if canonical_hash(artifact) != str(artifact_hash or ""):
+                raise ChecksumMismatchError(f"import record {index} artifact hash mismatch")
+        run = EvalRun(
+            id=str(raw_run.get("id") or _new_id("run")),
+            experiment_id=experiment_id,
+            suite_execution_id=raw_run.get("suite_execution_id"),
+            task_case_id=task_case_id,
+            task_case_version=str(raw_run.get("task_case_version") or "1"),
+            variant_id=variant_id,
+            run_profile=str(raw_run.get("run_profile") or "evaluation"),
+            lifecycle=str(raw_run.get("lifecycle") or "finished"),
+            outcome=raw_run.get("outcome") or "success",
+            operational_error_json=raw_run.get("operational_error_json"),
+            manifest_json=as_plain(manifest),
+            manifest_hash=expected_manifest_hash,
+            candidate_artifact_json=as_plain(artifact) if artifact is not None else None,
+            artifact_hash=str(artifact_hash) if artifact_hash else None,
+        )
+        score_sets: list[EvalScoreSet] = []
+        for raw_score in record.get("score_sets") or ():
+            if not isinstance(raw_score, Mapping):
+                raise ValueError(f"import record {index} score set is invalid")
+            snapshot = raw_score.get("scorer_snapshot") or raw_score.get("scorer_snapshot_json")
+            definition_hash = str(raw_score.get("scorer_definition_hash") or "")
+            if not isinstance(snapshot, Mapping) or not definition_hash:
+                raise ValueError(f"import record {index} score set is missing scorer snapshot")
+            if hash_without_field(snapshot, "definition_hash") != definition_hash:
+                raise ChecksumMismatchError(f"import record {index} score set hash mismatch")
+            version = str(raw_score.get("scorer_version") or "")
+            if version not in getattr(self.registry, "scorers", {self.registry.scorer.version: self.registry.scorer}):
+                if version != self.registry.scorer.version:
+                    raise ValueError(f"unknown scorer version in import record {index}")
+            score_sets.append(
+                EvalScoreSet(
+                    id=str(raw_score.get("id") or _new_id("score-set")),
+                    run_id=run.id,
+                    scorer_id=str(raw_score.get("scorer_id") or "hybrid"),
+                    scorer_version=version,
+                    scorer_snapshot_json=as_plain(snapshot),
+                    scorer_definition_hash=definition_hash,
+                    artifact_input_hash=str(raw_score.get("artifact_input_hash") or run.artifact_hash or ""),
+                    status=str(raw_score.get("status") or "completed"),
+                    quality_verdict=str(raw_score.get("quality_verdict") or "not_evaluated"),
+                    aggregate_scores_json=raw_score.get("aggregate_scores") or raw_score.get("aggregate_scores_json"),
+                    findings_json=raw_score.get("findings") or raw_score.get("findings_json"),
+                )
+            )
+        executions: list[EvalScorerExecution] = []
+        for raw_execution in record.get("executions") or ():
+            if not isinstance(raw_execution, Mapping):
+                raise ValueError(f"import record {index} execution is invalid")
+            parent_id = str(raw_execution.get("score_set_id") or (score_sets[0].id if score_sets else ""))
+            executions.append(
+                EvalScorerExecution(
+                    id=str(raw_execution.get("id") or _new_id("scorer")),
+                    score_set_id=parent_id,
+                    scorer_id=str(raw_execution.get("scorer_id") or ""),
+                    scorer_version=str(raw_execution.get("scorer_version") or ""),
+                    status=str(raw_execution.get("status") or "success"),
+                    input_hash=str(raw_execution.get("input_hash") or run.artifact_hash or ""),
+                    output_json=raw_execution.get("output") or raw_execution.get("output_json"),
+                )
+            )
+        return run, score_sets, executions
+
+
 # Short aliases keep imports ergonomic while the explicit names mirror the
 # table names and the approved Task 3 plan.
 RunRepository = EvalRunRepository
@@ -1524,6 +1749,7 @@ __all__ = [
     "EvalExecutionControlRepository",
     "EvalScoreSetRepository",
     "EvalScorerExecutionRepository",
+    "EvalSuiteImportRepository",
     "EvaluationBusyError",
     "EvaluationUnavailableError",
     "InvalidTransitionError",
