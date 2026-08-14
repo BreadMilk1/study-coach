@@ -1,6 +1,7 @@
 export const STARTUP_CHOICE_KEY = 'study-coach:startup-choice-made'
 export const CHAT_SESSION_KEY = 'study-coach:current-chat-session-id'
 export const FACTORY_RECOVERY_FINGERPRINT_KEY = 'study-coach:factory-recovery-fingerprint'
+export const ACTIVE_LEARNING_RUN_KEY = 'study-coach:active-learning-run-id'
 
 const APP_PREFIX = 'study-coach:'
 let learningStateEpoch = 0

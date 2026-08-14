@@ -16,7 +16,7 @@ import { usePlan } from '../stores/plan'
 import { useQuiz } from '../stores/quiz'
 import { memoryStorage } from '../test/memoryStorage'
 import { streamChat } from './api'
-import { CHAT_SESSION_KEY, clearStoredChatSessionId } from './dataLifecycle'
+import { ACTIVE_LEARNING_RUN_KEY, CHAT_SESSION_KEY, clearStoredChatSessionId } from './dataLifecycle'
 import { resetClientLearningState, type ClientLearningStores } from './resetClientState'
 
 beforeEach(() => {
@@ -863,5 +863,23 @@ describe('resetClientLearningState', () => {
     await resetClientLearningState(dependencies as ClientLearningStores)
 
     expect(evalReset).not.toHaveBeenCalled()
+  })
+
+  it('leaves the eval navigation id in browser storage', async () => {
+    localStorage.setItem(ACTIVE_LEARNING_RUN_KEY, 'run-1')
+    const dependencies = {
+      clearChatSession: () => undefined,
+      chat: { resetAfterDataClear: () => undefined },
+      quiz: { reset: () => undefined },
+      documents: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      plan: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      mistakes: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      mastery: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      activity: { resetAfterDataClear: () => undefined, fetch: async () => true },
+    }
+
+    await resetClientLearningState(dependencies)
+
+    expect(localStorage.getItem(ACTIVE_LEARNING_RUN_KEY)).toBe('run-1')
   })
 })

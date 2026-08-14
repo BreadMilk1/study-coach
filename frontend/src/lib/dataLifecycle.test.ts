@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { memoryStorage } from '../test/memoryStorage'
 import {
+  ACTIVE_LEARNING_RUN_KEY,
   CHAT_SESSION_KEY,
   STARTUP_CHOICE_KEY,
   clearFactoryBrowserState,
@@ -60,6 +61,7 @@ describe('browser state clearing', () => {
   it('learning clear removes only the current chat session key', () => {
     const local = memoryStorage({
       [CHAT_SESSION_KEY]: 'session-id',
+      [ACTIVE_LEARNING_RUN_KEY]: 'run-1',
       'study-coach:settings': '{"model":"gemma"}',
       unrelated: 'keep-me',
     })
@@ -67,6 +69,7 @@ describe('browser state clearing', () => {
     clearLearningBrowserState(local)
 
     expect(local.getItem(CHAT_SESSION_KEY)).toBeNull()
+    expect(local.getItem(ACTIVE_LEARNING_RUN_KEY)).toBe('run-1')
     expect(local.getItem('study-coach:settings')).toBe('{"model":"gemma"}')
     expect(local.getItem('unrelated')).toBe('keep-me')
   })
@@ -75,6 +78,7 @@ describe('browser state clearing', () => {
     const local = memoryStorage({
       'study-coach:settings': '{}',
       [CHAT_SESSION_KEY]: 'session-id',
+      [ACTIVE_LEARNING_RUN_KEY]: 'run-1',
       'study-coach:factory-recovery-fingerprint': 'next-fingerprint',
       unrelated: 'local-value',
     })
@@ -88,6 +92,7 @@ describe('browser state clearing', () => {
 
     expect(local.length).toBe(2)
     expect(local.getItem('study-coach:factory-recovery-fingerprint')).toBe('next-fingerprint')
+    expect(local.getItem(ACTIVE_LEARNING_RUN_KEY)).toBeNull()
     expect(local.getItem('unrelated')).toBe('local-value')
     expect(session.length).toBe(1)
     expect(session.getItem('unrelated')).toBe('session-value')
