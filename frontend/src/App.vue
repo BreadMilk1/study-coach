@@ -4,7 +4,7 @@ import { RouterLink, RouterView } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
   LayoutDashboard, MessageSquare, ListTodo, BookOpen,
-  AlertTriangle, FolderOpen, Settings as SettingsIcon,
+  AlertTriangle, FolderOpen, Settings as SettingsIcon, FlaskConical,
 } from 'lucide-vue-next'
 import { getDataSummary, resetData } from './lib/api'
 import { createDataLifecycleChannel } from './lib/dataLifecycleChannel'
@@ -25,6 +25,7 @@ import { useMistakes } from './stores/mistakes'
 import { useNotifications } from './stores/notifications'
 import { usePlan } from './stores/plan'
 import { useQuiz } from './stores/quiz'
+import { useLearningRuns } from './stores/learningRuns'
 import {
   invalidateAnonymousProvisioning,
   provisionFactoryIdentity,
@@ -47,6 +48,7 @@ const mistakes = useMistakes()
 const notifications = useNotifications()
 const plan = usePlan()
 const quiz = useQuiz()
+const learningRuns = useLearningRuns()
 let notifiedLearningGeneration = -1
 
 const lifecycleChannel = createDataLifecycleChannel(message => (
@@ -78,11 +80,17 @@ lifecycle.initialize({
   pause: milliseconds => new Promise(resolve => globalThis.setTimeout(resolve, milliseconds)),
 })
 
+function handlePageHide() {
+  learningRuns.handlePageHide()
+}
+
 onMounted(() => {
   void lifecycle.inspect()
+  window.addEventListener('pagehide', handlePageHide)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('pagehide', handlePageHide)
   lifecycleChannel.close()
 })
 
@@ -117,6 +125,7 @@ const navSections = [
   {
     label: 'nav.system',
     items: [
+      { to: '/run-lab',   icon: FlaskConical,    text: 'nav.runLab' },
       { to: '/library',   icon: FolderOpen,      text: 'nav.library' },
       { to: '/settings',  icon: SettingsIcon,    text: 'nav.settings' },
     ],

@@ -9,6 +9,7 @@
     "quiz": "测验",
     "mistakes": "错题",
     "library": "资料库",
+    "runLab": "Run Lab",
     "settings": "设置",
     "more": "更多"
   },
@@ -136,5 +137,33 @@
     "weakTopics": "薄弱主题",
     "activity": "活跃度",
     "radar": "学习画像"
+  },
+  "runLab": {
+    "title": "Run Lab",
+    "subtitle": "冻结的 Tutor Grounded QA suite 与已附着的 live run",
+    "axis": "实验轴",
+    "suite": "冻结 12-case suite",
+    "disabled": "本地评估模式已关闭。Run Lab 不会绕过此边界。",
+    "empty": "还没有导入或现场执行的 learning run。",
+    "regressions": "回归",
+    "inconclusive": "不确定",
+    "history": "历史",
+    "filterAll": "全部",
+    "filterFail": "回归",
+    "filterInconclusive": "不确定",
+    "liveCase": "Case",
+    "liveVariant": "Prompt 变体",
+    "start": "开始 run",
+    "cancel": "取消",
+    "rescore": "重新评分",
+    "openCompletedHistoricalRun": "打开可比较的 completed historical run",
+    "contract": "契约",
+    "evidence": "执行证据",
+    "verdict": "判定",
+    "findings": "质量发现",
+    "trace": "轨迹与用量",
+    "compare": "比较",
+    "caseDelta": "case delta",
+    "suiteDelta": "frozen 12-case suite delta"
   }
 }

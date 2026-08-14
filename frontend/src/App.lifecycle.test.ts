@@ -32,4 +32,12 @@ describe('application lifecycle boundary', () => {
       /@keydown\.esc\.prevent\.stop="handleCancel"/,
     )
   })
+
+  it('keeps a desktop path into Run Lab', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('./App.vue', import.meta.url)),
+      'utf8',
+    )
+    expect(appSource).toMatch(/to:\s*'\/run-lab'/)
+  })
 })
