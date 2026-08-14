@@ -1,11 +1,18 @@
 import { defineStore } from 'pinia'
 
-import { cancelLearningRun, getRunDetail, streamLearningRun } from '../lib/evalApi'
+import {
+  cancelLearningRun,
+  cancelScoreSet,
+  getRunDetail,
+  streamLearningRun,
+  streamRescore,
+} from '../lib/evalApi'
 import { ACTIVE_LEARNING_RUN_KEY } from '../lib/dataLifecycle'
 import type {
   EvalConnectionSnapshot,
   LearningRunEvent,
   LearningRunRequest,
+  RescoreRequest,
   RunDetail,
 } from '../lib/evalContracts'
 import { EvalApiError } from '../lib/evalApi'
@@ -14,7 +21,9 @@ export const HISTORICAL_FALLBACK_MS = 30_000
 
 export interface LearningRunDependencies {
   streamRun: typeof streamLearningRun
+  streamRescore?: typeof streamRescore
   cancelRun: typeof cancelLearningRun
+  cancelScoreSet?: typeof cancelScoreSet
   getDetail: typeof getRunDetail
   now?: () => number
   persistActiveRunId?: (runId: string | null) => void
@@ -62,6 +71,7 @@ export const useLearningRuns = defineStore('learningRuns', {
     startedAt: null as number | null,
     generation: 0,
     detail: null as RunDetail | null,
+    kind: 'run' as 'run' | 'rescore',
   }),
   actions: {
     canOpenHistoricalFallback(): boolean {
@@ -96,9 +106,55 @@ export const useLearningRuns = defineStore('learningRuns', {
       this.controller = controller
       this.startedAt = (dependencies().now ?? Date.now)()
       this.detail = null
+      this.kind = 'run'
 
       try {
         await dependencies().streamRun(
+          request,
+          connection,
+          event => this.applyEvent(generation, event),
+          controller.signal,
+        )
+        this.finishStream(generation, controller)
+      } catch (reason) {
+        this.finishStream(generation, controller, reason)
+      }
+    },
+
+    async startRescore(
+      runId: string,
+      request: RescoreRequest,
+      connection: EvalConnectionSnapshot,
+    ): Promise<void> {
+      const previousController = this.controller
+      const previousRunId = this.activeRunId
+      const previousScoreSetId = this.activeScoreSetId
+      const generation = this.generation + 1
+      this.generation = generation
+      if (previousScoreSetId) {
+        try { await (dependencies().cancelScoreSet ?? cancelScoreSet)(previousScoreSetId) }
+        catch { /* still detach */ }
+      } else if (previousRunId && previousRunId !== runId) {
+        try { await dependencies().cancelRun(previousRunId) }
+        catch { /* still detach */ }
+      }
+      previousController?.abort()
+
+      const controller = new AbortController()
+      this.status = 'running'
+      this.activeRunId = runId
+      this.activeScoreSetId = null
+      this.events = []
+      this.error = null
+      this.busyTarget = null
+      this.connection = connection
+      this.controller = controller
+      this.startedAt = (dependencies().now ?? Date.now)()
+      this.kind = 'rescore'
+
+      try {
+        await (dependencies().streamRescore ?? streamRescore)(
+          runId,
           request,
           connection,
           event => this.applyEvent(generation, event),
@@ -155,7 +211,9 @@ export const useLearningRuns = defineStore('learningRuns', {
         persist(event.run_id)
       }
       if ('score_set_id' in event) this.activeScoreSetId = event.score_set_id
-      if (event.type === 'run_finished') this.status = 'terminal'
+      if (event.type === 'run_finished' || event.type === 'score_set_finished') {
+        this.status = 'terminal'
+      }
     },
 
     async cancelActive(): Promise<void> {
@@ -164,7 +222,11 @@ export const useLearningRuns = defineStore('learningRuns', {
       if (!runId && !controller) return
       this.status = 'cancelling'
       try {
-        if (runId) await dependencies().cancelRun(runId)
+        if (this.kind === 'rescore' && this.activeScoreSetId) {
+          await (dependencies().cancelScoreSet ?? cancelScoreSet)(this.activeScoreSetId)
+        } else if (runId) {
+          await dependencies().cancelRun(runId)
+        }
         if (this.status === 'cancelling') this.status = 'terminal'
       } catch (reason) {
         this.error = reason instanceof EvalApiError

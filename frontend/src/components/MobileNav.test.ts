@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
 import { createRenderer, nextTick, ssrContextKey } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { describe, expect, it } from 'vitest'
@@ -94,5 +97,12 @@ describe('MobileNav More sheet route change', () => {
     expect(readMoreOpen(state)).toBe(false)
 
     app.unmount()
+  })
+})
+
+describe('MobileNav Run Lab entry', () => {
+  it('includes a /run-lab destination in the More sheet', () => {
+    const source = readFileSync(fileURLToPath(new URL('./MobileNav.vue', import.meta.url)), 'utf8')
+    expect(source).toMatch(/to:\s*'\/run-lab'/)
   })
 })

@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   MessageSquare, ListTodo, BookOpen, MoreHorizontal,
-  LayoutDashboard, AlertTriangle, FolderOpen, Settings as SettingsIcon,
+  LayoutDashboard, AlertTriangle, FolderOpen, Settings as SettingsIcon, FlaskConical,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -26,6 +26,7 @@ const primaryTabs = [
 const moreItems = [
   { to: '/', icon: LayoutDashboard, text: 'nav.overview' },
   { to: '/mistakes', icon: AlertTriangle, text: 'nav.mistakes' },
+  { to: '/run-lab', icon: FlaskConical, text: 'nav.runLab' },
   { to: '/library', icon: FolderOpen, text: 'nav.library' },
   { to: '/settings', icon: SettingsIcon, text: 'nav.settings' },
 ]

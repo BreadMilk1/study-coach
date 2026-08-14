@@ -9,6 +9,7 @@
     "quiz": "Quiz",
     "mistakes": "Mistakes",
     "library": "Library",
+    "runLab": "Run Lab",
     "settings": "Settings",
     "more": "More"
   },
@@ -136,5 +137,33 @@
     "weakTopics": "Weak Topics",
     "activity": "Activity",
     "radar": "Learning Profile"
+  },
+  "runLab": {
+    "title": "Run Lab",
+    "subtitle": "Frozen Tutor Grounded QA suite and attached live runs",
+    "axis": "Experiment axis",
+    "suite": "Frozen 12-case suite",
+    "disabled": "Local evaluation mode is disabled. Run Lab cannot bypass this boundary.",
+    "empty": "No imported or live learning runs yet.",
+    "regressions": "Regressions",
+    "inconclusive": "Inconclusive",
+    "history": "History",
+    "filterAll": "All",
+    "filterFail": "Regressions",
+    "filterInconclusive": "Inconclusive",
+    "liveCase": "Case",
+    "liveVariant": "Prompt variant",
+    "start": "Start run",
+    "cancel": "Cancel",
+    "rescore": "Re-score",
+    "openCompletedHistoricalRun": "Open comparable completed historical run",
+    "contract": "Contract",
+    "evidence": "Execution evidence",
+    "verdict": "Verdict",
+    "findings": "Quality findings",
+    "trace": "Trace and usage",
+    "compare": "Compare",
+    "caseDelta": "case delta",
+    "suiteDelta": "frozen 12-case suite delta"
   }
 }

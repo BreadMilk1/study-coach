@@ -8,11 +8,13 @@ import {
   type CompareResponse,
   type EvalConnectionSnapshot,
   type EvalErrorDetail,
+  type ExperimentSummary,
   type LearningRunEvent,
   type LearningRunRequest,
   type RescoreRequest,
   type RunDetail,
   type RunSummary,
+  type ScoreSetSummary,
 } from './evalContracts'
 
 export class EvalApiError extends Error {
@@ -180,6 +182,34 @@ export function parseSseFrame(frame: string): LearningRunEvent | null {
       active_kind: null,
     })
   }
+}
+
+export async function listExperiments(): Promise<ExperimentSummary[]> {
+  const headers = await authorizedHeaders()
+  const response = await fetch('/api/eval/experiments', { headers })
+  await throwIfNotOk(response)
+  return await response.json() as ExperimentSummary[]
+}
+
+export async function listRuns(): Promise<RunSummary[]> {
+  const headers = await authorizedHeaders()
+  const response = await fetch('/api/eval/runs', { headers })
+  await throwIfNotOk(response)
+  return await response.json() as RunSummary[]
+}
+
+export async function cancelScoreSet(
+  scoreSetId: string,
+  options: { keepalive?: boolean } = {},
+): Promise<ScoreSetSummary> {
+  const headers = await authorizedHeaders()
+  const response = await fetch(`/api/eval/score-sets/${scoreSetId}/cancel`, {
+    method: 'POST',
+    headers,
+    keepalive: options.keepalive === true,
+  })
+  await throwIfNotOk(response)
+  return await response.json() as ScoreSetSummary
 }
 
 export async function cancelLearningRun(
