@@ -1,0 +1,6 @@
+{
+  "code": "evaluation_busy",
+  "message": "another evaluation is already running",
+  "active_entity_id": "run-active-001",
+  "active_kind": "run"
+}

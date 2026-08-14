@@ -1,0 +1,21 @@
+{
+  "summary": {
+    "run_id": "run-example-001",
+    "experiment_id": "tutor-prompt-regression-v1",
+    "suite_execution_id": null,
+    "task_case_id": "tgqa-004",
+    "variant_id": "tutor-v3",
+    "run_profile": "evaluation",
+    "lifecycle": "finished",
+    "outcome": "success",
+    "latest_score_set": null,
+    "created_at": "2026-08-13T00:00:00Z",
+    "started_at": "2026-08-13T00:00:01Z",
+    "finished_at": "2026-08-13T00:00:02Z"
+  },
+  "manifest": {"schema_version": "learning-run-v1", "variant_id": "tutor-v3"},
+  "candidate_artifact": null,
+  "score_sets": [],
+  "scorer_executions": [],
+  "operational_error": null
+}
