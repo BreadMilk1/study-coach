@@ -13,7 +13,8 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import Base, EvalRun, EvalScoreSet
+from app.db.models import Base, Document, EvalRun, EvalScoreSet, EvalScorerExecution, User
+from app.db.repositories import DataLifecycleRepository
 from app.eval.learning_run.contracts import (
     CandidateArtifact,
     RunManifest,
@@ -1660,3 +1661,92 @@ def test_controlled_reconcile_new_claim_orders_use_typed_claim_and_cutoff(tmp_pa
             manifest=_manifest("controlled-reconcile-after")
         )
         assert another.lifecycle == "running"
+
+
+def test_learning_reset_during_and_after_preserves_eval_on_second_connection(tmp_path):
+    engine = _engine(tmp_path / "learning-reset-preserves-eval.db")
+    with Session(engine) as session:
+        session.add(User(id="user-1", fingerprint="learning-owner"))
+        session.flush()
+        session.add(
+            Document(
+                id="document-1",
+                user_id="user-1",
+                filename="notes.pdf",
+                hash="hash-1",
+                chunks_count=2,
+            )
+        )
+        session.add(
+            EvalRun(
+                id="preserved-run",
+                experiment_id="tutor-prompt-regression-v1",
+                task_case_id="tgqa-001",
+                task_case_version="1",
+                variant_id="tutor-v2",
+                run_profile="evaluation",
+                lifecycle="finished",
+                outcome="success",
+                manifest_json={"task_case_id": "tgqa-001"},
+                manifest_hash="a" * 64,
+                candidate_artifact_json={"answer": "x"},
+                artifact_hash="b" * 64,
+            )
+        )
+        session.add(
+            EvalScoreSet(
+                id="preserved-score",
+                run_id="preserved-run",
+                scorer_id="hybrid-v1",
+                scorer_version="v1",
+                scorer_snapshot_json={"scorer_id": "hybrid", "version": "v1"},
+                scorer_definition_hash="c" * 64,
+                artifact_input_hash="b" * 64,
+                status="completed",
+                quality_verdict="pass",
+            )
+        )
+        session.add(
+            EvalScorerExecution(
+                id="preserved-exec",
+                score_set_id="preserved-score",
+                scorer_id="retrieval-integrity",
+                scorer_version="v1",
+                status="success",
+                input_hash="b" * 64,
+                output_json={"result": True},
+            )
+        )
+        session.commit()
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def learning_delete() -> None:
+        with Session(engine) as session:
+            started.set()
+            release.wait(timeout=10)
+            DataLifecycleRepository(session).delete_learning_data(include_users=False)
+            session.commit()
+
+    worker = threading.Thread(target=learning_delete)
+    worker.start()
+    try:
+        assert started.wait(timeout=5)
+        with Session(engine) as session:
+            during = DataLifecycleRepository(session).count_eval()
+        assert during["runs"] == 1
+        assert during["score_sets"] == 1
+        assert during["scorer_executions"] == 1
+    finally:
+        release.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+
+    with Session(engine) as session:
+        repo = DataLifecycleRepository(session)
+        after = repo.count_eval()
+        assert after["runs"] == 1
+        assert after["score_sets"] == 1
+        assert after["scorer_executions"] == 1
+        assert repo.count_all()["documents"] == 0

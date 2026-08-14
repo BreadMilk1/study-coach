@@ -1003,3 +1003,23 @@ async def test_stream_body_consumer_cancelled_error_is_distinct_from_aclose(eval
     assert blocking.cancelled is True
     with session_scope() as session:
         assert EvalRunRepository(session).get_verified(run_id).lifecycle == "cancelled"
+
+
+def test_exclusive_reset_rejects_eval_stream_before_any_row(eval_client):
+    client, headers, application, fake_service, _ = eval_client
+    with session_scope() as session:
+        before = session.execute(select(EvalRun.id)).scalars().all()
+
+    with application.state.data_lifecycle_gate.exclusive_reset("factory"):
+        response = client.post(
+            "/api/eval/runs/stream",
+            headers={**headers, "x-provider": "ollama", "x-model": "llama3.2"},
+            json=RUN_REQUEST,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "reset_in_progress"
+    assert fake_service.prepare_calls == 0
+    with session_scope() as session:
+        after = session.execute(select(EvalRun.id)).scalars().all()
+    assert after == before

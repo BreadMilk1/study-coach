@@ -145,11 +145,20 @@ def test_active_reset_rejects_shared_and_second_reset_across_threads_without_wai
 
 
 class FakeRepository:
-    def __init__(self, counts):
+    def __init__(self, counts, eval_counts=None):
         self.counts = counts
+        self.eval_counts = eval_counts or {
+            "runs": 0,
+            "score_sets": 0,
+            "scorer_executions": 0,
+            "estimated_bytes": 0,
+        }
 
     def count_all(self):
         return self.counts
+
+    def count_eval(self):
+        return dict(self.eval_counts)
 
 
 class FakeRuntime:
@@ -192,9 +201,33 @@ def test_summary_reports_counts_and_ignores_users_for_learning_data(
         "vectors": vectors,
         "reset_enabled": reset_enabled,
         "has_learning_data": has_learning_data,
+        "eval": {
+            "runs": 0,
+            "score_sets": 0,
+            "scorer_executions": 0,
+            "estimated_bytes": 0,
+        },
     }
     assert repository.counts == counts
     assert result is not repository.counts
+
+
+def test_summary_ignores_eval_rows_for_has_learning_data():
+    repository = FakeRepository(
+        {"users": 1, "documents": 0},
+        eval_counts={"runs": 2, "score_sets": 3, "scorer_executions": 9, "estimated_bytes": 18432},
+    )
+    coordinator = ResetCoordinator(
+        gate=DataLifecycleGate(),
+        runtime=FakeRuntime(0),
+        repository=repository,
+        session=None,
+        app_state=None,
+        checkpointer_factory=object,
+    )
+    result = coordinator.summary(reset_enabled=True)
+    assert result["has_learning_data"] is False
+    assert result["eval"]["runs"] == 2
 
 
 def test_summary_holds_shared_gate_across_both_counts_to_prevent_mixed_snapshot():
@@ -274,13 +307,27 @@ RESET_COUNTS = {
 
 
 class EventRepository:
-    def __init__(self, events):
+    def __init__(self, events, eval_counts=None):
         self.events = events
         self.counts = dict(RESET_COUNTS)
+        self.eval_counts = eval_counts or {
+            "runs": 0,
+            "score_sets": 0,
+            "scorer_executions": 0,
+            "estimated_bytes": 0,
+        }
 
     def count_all(self):
         self.events.append("count")
         return dict(self.counts)
+
+    def count_eval(self):
+        return dict(self.eval_counts)
+
+    def delete_eval_data(self):
+        self.events.append("sqlite_eval")
+        for key in self.eval_counts:
+            self.eval_counts[key] = 0
 
     def delete_learning_data(self, *, include_users):
         self.events.append(f"sqlite:{include_users}")
@@ -387,6 +434,7 @@ def test_reset_uses_fixed_stage_order_and_replaces_memory_references(
         "chroma",
         "app_retriever",
         "app_checkpointer",
+        *(["sqlite_eval"] if include_users else []),
         f"sqlite:{include_users}",
         "commit",
     ]
@@ -398,7 +446,49 @@ def test_reset_uses_fixed_stage_order_and_replaces_memory_references(
         scope=scope,
         status="completed",
         deleted={**RESET_COUNTS, "users": deleted_users, "vectors": 7},
+        deleted_eval={
+            "runs": 0,
+            "score_sets": 0,
+            "scorer_executions": 0,
+            "estimated_bytes": 0,
+        },
     )
+
+
+def test_factory_reset_returns_pre_reset_eval_counts_and_learning_reset_does_not():
+    eval_counts = {
+        "runs": 2,
+        "score_sets": 3,
+        "scorer_executions": 9,
+        "estimated_bytes": 18432,
+    }
+    learning, learning_events, *_ = build_event_coordinator()
+    learning.repository.eval_counts = dict(eval_counts)
+
+    learning_result = learning.reset("learning")
+
+    assert "sqlite_eval" not in learning_events
+    assert learning_result.deleted_eval == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
+    }
+    assert learning.repository.eval_counts == eval_counts
+
+    factory, factory_events, factory_repo, *_ = build_event_coordinator()
+    factory_repo.eval_counts = dict(eval_counts)
+
+    factory_result = factory.reset("factory")
+
+    assert "sqlite_eval" in factory_events
+    assert factory_result.deleted_eval == eval_counts
+    assert factory_repo.eval_counts == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
+    }
 
 
 def test_repeated_reset_is_idempotent():

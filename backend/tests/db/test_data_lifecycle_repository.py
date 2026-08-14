@@ -10,6 +10,9 @@ from app.db.models import (
     ChatSession,
     Citation,
     Document,
+    EvalRun,
+    EvalScoreSet,
+    EvalScorerExecution,
     Goal,
     Mastery,
     Message,
@@ -184,3 +187,79 @@ def test_factory_delete_removes_full_foreign_key_graph_and_is_idempotent(session
     session.commit()
 
     assert repo.count_all() == {key: 0 for key in EXPECTED_COUNTS}
+
+
+def _seed_eval_rows(session):
+    session.add(
+        EvalRun(
+            id="eval-run-1",
+            experiment_id="tutor-prompt-regression-v1",
+            task_case_id="tgqa-001",
+            task_case_version="1",
+            variant_id="tutor-v2",
+            run_profile="evaluation",
+            lifecycle="finished",
+            outcome="success",
+            manifest_json={"task_case_id": "tgqa-001"},
+            manifest_hash="a" * 64,
+            candidate_artifact_json={"answer": "x"},
+            artifact_hash="b" * 64,
+        )
+    )
+    session.add(
+        EvalScoreSet(
+            id="eval-score-1",
+            run_id="eval-run-1",
+            scorer_id="hybrid",
+            scorer_version="hybrid-v1",
+            scorer_snapshot_json={"scorer_id": "hybrid", "version": "hybrid-v1"},
+            scorer_definition_hash="c" * 64,
+            artifact_input_hash="b" * 64,
+            status="completed",
+            quality_verdict="pass",
+            aggregate_scores_json={"groundedness": 4},
+        )
+    )
+    session.add(
+        EvalScorerExecution(
+            id="eval-exec-1",
+            score_set_id="eval-score-1",
+            scorer_id="retrieval-integrity",
+            scorer_version="v1",
+            status="success",
+            input_hash="b" * 64,
+            output_json={"result": True},
+        )
+    )
+    session.commit()
+
+
+def test_eval_counts_are_independent_and_learning_delete_preserves_them(session):
+    _seed_complete_graph(session)
+    _seed_eval_rows(session)
+    repo = DataLifecycleRepository(session)
+    eval_before = repo.count_eval()
+    assert eval_before["runs"] == 1
+    assert eval_before["score_sets"] == 1
+    assert eval_before["scorer_executions"] == 1
+    assert eval_before["estimated_bytes"] > 0
+
+    repo.delete_learning_data(include_users=False)
+    session.commit()
+    assert repo.count_eval() == eval_before
+
+
+def test_factory_eval_delete_is_child_first_and_idempotent(session):
+    _seed_eval_rows(session)
+    repo = DataLifecycleRepository(session)
+    repo.delete_eval_data()
+    session.commit()
+    assert repo.count_eval() == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
+    }
+    repo.delete_eval_data()
+    session.commit()
+    assert repo.count_eval()["runs"] == 0

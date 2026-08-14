@@ -9,6 +9,9 @@ from .models import (
     ChatSession,
     Citation,
     Document,
+    EvalRun,
+    EvalScoreSet,
+    EvalScorerExecution,
     Goal,
     Mastery,
     Message,
@@ -73,6 +76,39 @@ class DataLifecycleRepository:
             "mistakes": count(Mistake),
             "source_chunks": int(source_chunks),
         }
+
+    def count_eval(self) -> dict[str, int]:
+        def count(model) -> int:
+            return int(self.session.execute(select(func.count()).select_from(model)).scalar_one())
+
+        return {
+            "runs": count(EvalRun),
+            "score_sets": count(EvalScoreSet),
+            "scorer_executions": count(EvalScorerExecution),
+            "estimated_bytes": self._estimate_eval_bytes(),
+        }
+
+    def _estimate_eval_bytes(self) -> int:
+        total = 0
+        for payload in self.session.execute(select(EvalRun.manifest_json, EvalRun.candidate_artifact_json)):
+            for value in payload:
+                if value is not None:
+                    total += len(str(value))
+        for payload in self.session.execute(
+            select(EvalScoreSet.scorer_snapshot_json, EvalScoreSet.findings_json, EvalScoreSet.aggregate_scores_json)
+        ):
+            for value in payload:
+                if value is not None:
+                    total += len(str(value))
+        for payload in self.session.execute(select(EvalScorerExecution.output_json)):
+            if payload[0] is not None:
+                total += len(str(payload[0]))
+        return total
+
+    def delete_eval_data(self) -> None:
+        self.session.execute(delete(EvalScorerExecution))
+        self.session.execute(delete(EvalScoreSet))
+        self.session.execute(delete(EvalRun))
 
     def delete_learning_data(self, *, include_users: bool) -> None:
         for model in (

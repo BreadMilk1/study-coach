@@ -46,12 +46,20 @@ class DataCounts(BaseModel):
     mistakes: int
 
 
+class EvalCounts(BaseModel):
+    runs: int
+    score_sets: int
+    scorer_executions: int
+    estimated_bytes: int
+
+
 class DataSummary(DataCounts):
     reset_enabled: bool
     has_learning_data: bool
     # True when the signed bearer still maps to a user row. False after factory
     # reset deletes users; does not expose user ids or other identity fields.
     current_user_exists: bool
+    eval: EvalCounts
 
 
 class ResetRequest(BaseModel):
@@ -63,6 +71,7 @@ class ResetResponse(BaseModel):
     scope: Literal["learning", "factory"]
     status: Literal["completed"]
     deleted: DataCounts
+    deleted_eval: EvalCounts
 
 
 def reset_enabled() -> bool:
