@@ -25,8 +25,9 @@ function event(partial: LearningRunEvent): LearningRunEvent {
 function createStoreHarness() {
   const calls: string[] = []
   const emitters: Array<(value: LearningRunEvent) => void> = []
+  const signals: AbortSignal[] = []
   let rejectStream: ((reason: unknown) => void) | null = null
-  let signal: AbortSignal | null = null
+  let resolveStream: (() => void) | null = null
   let now = 0
   const store = useLearningRuns()
   store.initialize({
@@ -34,8 +35,9 @@ function createStoreHarness() {
     persistActiveRunId: () => undefined,
     streamRun: async (_request, _connection, onEvent, abortSignal) => {
       emitters.push(onEvent)
-      signal = abortSignal
+      signals.push(abortSignal)
       await new Promise<void>((resolve, reject) => {
+        resolveStream = resolve
         rejectStream = reject
         abortSignal.addEventListener('abort', () => {
           calls.push('abort-stream')
@@ -67,15 +69,21 @@ function createStoreHarness() {
   return {
     store,
     calls,
-    route: { unmount() { /* attached run outlives the page */ } },
+    route: { unmount() {} },
     get controller() {
-      return { signal: signal as AbortSignal }
+      return { signal: signals[signals.length - 1] as AbortSignal }
+    },
+    signalAt(index: number) {
+      return signals[index] as AbortSignal
     },
     emit(value: LearningRunEvent, index = emitters.length - 1) {
       emitters[index]?.(value)
     },
     fail(reason: unknown) {
       rejectStream?.(reason)
+    },
+    end() {
+      resolveStream?.()
     },
     advance(ms: number) {
       now += ms
@@ -240,5 +248,74 @@ describe('attached learning run store', () => {
     expect(harness.store.canOpenHistoricalFallback()).toBe(true)
     expect(harness.store.openHistoricalFallback('historical-run')).toBe('historical-run')
     expect(harness.store.activeRunId).toBe('live-run')
+  })
+
+  it('aborts the previous attached stream before a second start', async () => {
+    const harness = createStoreHarness()
+    void harness.start()
+    await Promise.resolve()
+    harness.emit(event({
+      schema_version: 'eval-api-v1',
+      type: 'run_created',
+      run_id: 'run-1',
+    }))
+    const firstSignal = harness.signalAt(0)
+    const second = harness.start()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(firstSignal.aborted).toBe(true)
+    expect(harness.controller.signal.aborted).toBe(false)
+    expect(harness.calls[0]).toBe('cancel-endpoint')
+    expect(harness.calls).toContain('abort-stream')
+    await harness.store.cancelActive()
+    await second
+  })
+
+  it('aborts the stream when the cancel endpoint fails', async () => {
+    const harness = createStoreHarness()
+    const started = harness.start()
+    await Promise.resolve()
+    harness.emit(event({
+      schema_version: 'eval-api-v1',
+      type: 'run_created',
+      run_id: 'run-1',
+    }))
+    harness.store.initialize({
+      cancelRun: async () => {
+        harness.calls.push('cancel-endpoint')
+        throw new EvalApiError(503, {
+          code: 'evaluation_unavailable',
+          message: 'evaluation storage is unavailable',
+          fields: [],
+          active_entity_id: null,
+          active_kind: null,
+        })
+      },
+    })
+
+    await harness.store.cancelActive()
+    await started
+
+    expect(harness.calls).toEqual(['cancel-endpoint', 'abort-stream'])
+    expect(harness.store.status).toBe('error')
+    expect(harness.store.error?.code).toBe('evaluation_unavailable')
+  })
+
+  it('treats a stream close without run_finished as process_interrupted', async () => {
+    const harness = createStoreHarness()
+    const started = harness.start()
+    await Promise.resolve()
+    harness.emit(event({
+      schema_version: 'eval-api-v1',
+      type: 'run_created',
+      run_id: 'run-1',
+    }))
+    harness.end()
+    await started
+
+    expect(harness.store.status).toBe('error')
+    expect(harness.store.error?.code).toBe('process_interrupted')
+    expect(harness.store.activeRunId).toBe('run-1')
   })
 })
