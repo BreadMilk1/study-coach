@@ -27,6 +27,9 @@ class StubDenseRetriever:
             if cid in self._chunks
         ]
 
+    def close(self):
+        self.closed = getattr(self, "closed", 0) + 1
+
 
 def test_bm25_index_retrieves_chunk_with_exact_keyword():
     bm25 = BM25Index()
@@ -251,3 +254,13 @@ def test_hybrid_retriever_returns_chunks_with_required_keys():
     for r in results:
         for key in ("chunk_id", "content", "source", "page", "score"):
             assert key in r, f"missing key {key} in {r}"
+
+
+def test_hybrid_retriever_close_closes_dense_once():
+    dense = StubDenseRetriever([])
+    hybrid = HybridRetriever(dense=dense)
+
+    hybrid.close()
+    hybrid.close()
+
+    assert dense.closed == 1

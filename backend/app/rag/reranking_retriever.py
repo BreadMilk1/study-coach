@@ -29,6 +29,7 @@ class RerankingRetriever:
         self.base = base
         self.reranker = reranker
         self.retrieval_depth = retrieval_depth
+        self._closed = False
 
     def add_chunks(self, chunks: list[dict]) -> None:
         self.base.add_chunks(chunks)
@@ -51,6 +52,18 @@ class RerankingRetriever:
             zip(candidates, scores), key=lambda x: x[1], reverse=True
         )[:top_k]
         return [{**c, "score": float(s)} for c, s in ranked]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for resource in (self.base, self.reranker):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
 class FastembedReranker:

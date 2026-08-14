@@ -13,6 +13,9 @@ class StubBaseRetriever:
         self.last_top_k = top_k
         return self._returns[:top_k]
 
+    def close(self):
+        self.closed = getattr(self, "closed", 0) + 1
+
 
 class StubReranker:
     def __init__(self, scores: list[float]):
@@ -24,6 +27,9 @@ class StubReranker:
         self.last_query = query
         self.last_documents = list(documents)
         return self._scores[: len(documents)]
+
+    def close(self):
+        self.closed = getattr(self, "closed", 0) + 1
 
 
 def test_reranking_retriever_reorders_candidates_by_reranker_score():
@@ -75,3 +81,15 @@ def test_reranking_retriever_calls_base_with_retrieval_depth_not_top_k():
     rr.search("query", top_k=5)
 
     assert base.last_top_k == 20
+
+
+def test_reranking_retriever_close_closes_base_and_reranker_once():
+    base = StubBaseRetriever(return_chunks=[])
+    reranker = StubReranker(scores=[])
+    rr = RerankingRetriever(base=base, reranker=reranker)
+
+    rr.close()
+    rr.close()
+
+    assert base.closed == 1
+    assert reranker.closed == 1

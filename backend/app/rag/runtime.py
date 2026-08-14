@@ -43,11 +43,11 @@ class RetrieverRuntime:
         return retriever
 
 
-def _build_retriever(
+def build_retriever_for_collection(
     collection,
     *,
     embed_model: str,
-    embed_host: str | None,
+    embed_host: str | None = None,
 ) -> RerankingRetriever:
     embedder = OllamaEmbedder(model=embed_model, base_url=embed_host)
     dense = Retriever(collection=collection, embedder=embedder)
@@ -77,7 +77,7 @@ def build_default_runtime() -> RetrieverRuntime:
     embed_host = os.environ.get("OLLAMA_HOST") or None
 
     def builder(collection) -> RerankingRetriever:
-        return _build_retriever(
+        return build_retriever_for_collection(
             collection,
             embed_model=embed_model,
             embed_host=embed_host,

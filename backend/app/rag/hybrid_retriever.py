@@ -87,6 +87,7 @@ class HybridRetriever:
     def __init__(self, dense: _DenseLike, bm25: BM25Index | None = None) -> None:
         self.dense = dense
         self.bm25 = bm25 or BM25Index()
+        self._closed = False
 
     def add_chunks(self, chunks: list[dict]) -> None:
         self.dense.add_chunks(chunks)
@@ -114,3 +115,14 @@ class HybridRetriever:
         ])
         ranked_ids = sorted(fused.keys(), key=lambda i: fused[i], reverse=True)[:top_k]
         return [{**chunk_by_id[cid], "score": fused[cid]} for cid in ranked_ids]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self.dense, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass

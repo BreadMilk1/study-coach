@@ -47,9 +47,10 @@ from .judge import (
     load_quiz_rubric,
     load_tutor_rubric,
 )
-from .prompt import build_citations, build_prompt, format_context
+from .prompt import TutorPromptTemplate
 from .router import route_intent
 from .state import CoachState
+from .tutor_attempt import TutorAttemptConfig, TutorAttemptEngine
 
 _QUIZ_STUB_MESSAGE = (
     "[P2.1-④ Quiz feature: configure a `quiz_master` callable via "
@@ -61,6 +62,19 @@ _PLAN_STUB_MESSAGE = (
     "Goal-driven study planning, milestone tracking, and review will land in P2.1-⑤.]"
 )
 _MAX_RETRIES = 2
+
+
+class _ProductionTutorEventSink:
+    """Expose only the established Tutor stream events to production Chat."""
+
+    _PUBLIC_EVENT_TYPES = frozenset(("citations", "token"))
+
+    def __init__(self, writer):
+        self._writer = writer
+
+    def __call__(self, event: dict) -> None:
+        if event.get("type") in self._PUBLIC_EVENT_TYPES:
+            self._writer(event)
 
 
 def _safe_writer():
@@ -91,7 +105,9 @@ def _degrade_disclaimer(score: float, weak_dims: list[str], retry_count: int = 0
     )
 
 
-def build_graph(*, retriever, llm, checkpointer=None):
+def build_graph(*, retriever, llm, checkpointer=None, tutor_attempt_engine=None):
+    tutor_attempt_engine = tutor_attempt_engine or TutorAttemptEngine()
+
     def memory_hydrator_node(state: CoachState, config) -> dict:
         configurable = (config or {}).get("configurable", {}) or {}
         hydrator = configurable.get("memory_hydrator")
@@ -138,33 +154,29 @@ def build_graph(*, retriever, llm, checkpointer=None):
         user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
         last_user = user_msgs[-1].content if user_msgs else state["messages"][-1].content
 
-        chunks = retriever.search(last_user, top_k=5)
-        citations = build_citations(chunks)
-        writer({"type": "citations", "citations": citations})
-
-        prompt = build_prompt(last_user, chunks)
+        prompt_template = TutorPromptTemplate.production_v2()
         retry_count = state.get("retry_count", 0)
         if retry_count > 0:
-            prompt = prompt + _retry_hint(
+            prompt_template = prompt_template.with_suffix(_retry_hint(
                 previous_score=state.get("judge_score", 0.0),
                 weak_dims=list(state.get("weak_dims", [])),
                 reasoning=state.get("judge_reasoning", ""),
-            )
+            ))
 
-        parts: list[str] = []
-        async for chunk in llm.astream([HumanMessage(content=prompt)]):
-            text = getattr(chunk, "content", "") or ""
-            if text:
-                writer({"type": "token", "text": text})
-                parts.append(text)
-
-        if (sw := _safe_writer()) is not None:
-            sw({"type": "trace", "step": "tutor", "citations_count": len(citations)})
+        candidate = await tutor_attempt_engine.answer(
+            question=last_user,
+            retriever=retriever,
+            llm=llm,
+            prompt_template=prompt_template,
+            event_sink=_ProductionTutorEventSink(writer),
+            attempt_config=TutorAttemptConfig.production_default(),
+        )
+        writer({"type": "trace", "step": "tutor", "citations_count": len(candidate.citations)})
 
         return {
-            "messages": [AIMessage(content="".join(parts))],
-            "citations": citations,
-            "last_context": format_context(chunks),
+            "messages": [AIMessage(content=candidate.answer)],
+            "citations": candidate.citations,
+            "last_context": candidate.formatted_context,
         }
 
     def quiz_stub_node(_state: CoachState) -> dict:

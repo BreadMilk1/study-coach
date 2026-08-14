@@ -1,0 +1,139 @@
+{
+  "schema_version": "task-suite-v1",
+  "suite_id": "tutor-grounded-qa-v1",
+  "cases": [
+    {
+      "id": "tgqa-001",
+      "version": "1",
+      "question": "What does Reciprocal Rank Fusion combine, and why can a result rank more strongly under it?",
+      "type": "answerable",
+      "expected_behavior": "Explain that RRF combines ranked lists and rewards results that appear near the top of multiple lists.",
+      "manual_rationale": "The answer is directly supported by the RRF note and should cite the exact evidence.",
+      "required_evidence_set": ["tgqa-c01-rrf"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-002",
+      "version": "1",
+      "question": "How is a grounded answer different from an answer that is merely fluent?",
+      "type": "answerable",
+      "expected_behavior": "Contrast evidence-supported claims with fluent claims that cannot be supported by retrieved context.",
+      "manual_rationale": "The grounding definition gives both sides of the distinction in one compact source.",
+      "required_evidence_set": ["tgqa-c02-grounding"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-003",
+      "version": "1",
+      "question": "What is the scheduling difference between spaced practice and studying everything in one sitting?",
+      "type": "answerable",
+      "expected_behavior": "Describe review across separated intervals and contrast it with concentrated practice.",
+      "manual_rationale": "The spaced-practice chunk explicitly states the scheduling contrast.",
+      "required_evidence_set": ["tgqa-c03-spaced-practice"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-004",
+      "version": "1",
+      "question": "According to the provided notes, which color of notebook produces the best exam score?",
+      "type": "expected_refusal",
+      "expected_behavior": "Say the provided sources do not contain that fact and decline to guess.",
+      "manual_rationale": "The corpus defines the refusal behavior but contains no notebook-color evidence.",
+      "required_evidence_set": [],
+      "required_dimensions": ["refusal_appropriateness", "unsupported_claims"],
+      "critical_policy": {"hard_fail_findings": ["unsupported_claim"], "expected_refusal": true}
+    },
+    {
+      "id": "tgqa-005",
+      "version": "1",
+      "question": "What does retrieval practice ask a learner to do before checking notes?",
+      "type": "answerable",
+      "expected_behavior": "Explain that the learner recalls the idea first and then checks notes.",
+      "manual_rationale": "The retrieval-practice note contains the requested sequence.",
+      "required_evidence_set": ["tgqa-c04-retrieval-practice"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-006",
+      "version": "1",
+      "question": "Why is topical relatedness alone not sufficient for citation entailment?",
+      "type": "answerable",
+      "expected_behavior": "State that the cited passage must entail the claim, not merely discuss a related topic.",
+      "manual_rationale": "The citation note directly defines entailment and rejects topical-only support.",
+      "required_evidence_set": ["tgqa-c05-citations"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-007",
+      "version": "1",
+      "question": "What is one purpose of evidence coverage when evaluating an answer?",
+      "type": "answerable",
+      "expected_behavior": "Explain that coverage checks whether important source-supported parts of the question were addressed.",
+      "manual_rationale": "The evidence-coverage note supplies the purpose and its boundary.",
+      "required_evidence_set": ["tgqa-c06-evidence-coverage"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-008",
+      "version": "1",
+      "question": "Do the provided notes prove that a ten-minute walk always doubles memory?",
+      "type": "expected_refusal",
+      "expected_behavior": "Refuse to claim the result because the provided sources do not contain that evidence.",
+      "manual_rationale": "The question introduces a specific claim absent from the small corpus.",
+      "required_evidence_set": [],
+      "required_dimensions": ["refusal_appropriateness", "unsupported_claims"],
+      "critical_policy": {"hard_fail_findings": ["unsupported_claim"], "expected_refusal": true}
+    },
+    {
+      "id": "tgqa-009",
+      "version": "1",
+      "question": "How do spaced practice and retrieval practice work together in a review routine?",
+      "type": "multi_evidence",
+      "expected_behavior": "Combine separated review intervals with recalling an idea before checking notes.",
+      "manual_rationale": "A complete answer must use both the spacing and retrieval chunks rather than only one.",
+      "required_evidence_set": ["tgqa-c03-spaced-practice", "tgqa-c04-retrieval-practice"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-010",
+      "version": "1",
+      "question": "What makes a citation useful, and how does that relate to evidence coverage?",
+      "type": "multi_evidence",
+      "expected_behavior": "Explain entailment for each citation and addressing important source-supported parts of the question.",
+      "manual_rationale": "The answer needs the separate citation and coverage definitions to be complete.",
+      "required_evidence_set": ["tgqa-c05-citations", "tgqa-c06-evidence-coverage"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-011",
+      "version": "1",
+      "question": "How should a tutor respond when evidence is missing, and what kind of feedback is useful after that?",
+      "type": "multi_evidence",
+      "expected_behavior": "Avoid inventing an answer, then identify a specific gap and suggest a next study action when giving feedback.",
+      "manual_rationale": "This case intentionally joins refusal guidance with the feedback guidance.",
+      "required_evidence_set": ["tgqa-c07-refusal", "tgqa-c08-feedback"],
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false}
+    },
+    {
+      "id": "tgqa-012",
+      "version": "1",
+      "question": "What does the corpus say about whether blue light glasses guarantee better grades?",
+      "type": "expected_refusal",
+      "expected_behavior": "State that the provided sources do not contain that claim and do not guess.",
+      "manual_rationale": "No chunk mentions blue light glasses or a guarantee about grades.",
+      "required_evidence_set": [],
+      "required_dimensions": ["refusal_appropriateness", "unsupported_claims"],
+      "critical_policy": {"hard_fail_findings": ["unsupported_claim"], "expected_refusal": true}
+    }
+  ],
+  "definition_hash": "90735b9708d6957c6c8ac7cbf5c09c2f6303bdf66ad2496241676a0be3e3ee1b"
+}

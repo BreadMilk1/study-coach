@@ -59,3 +59,14 @@ def test_retriever_get_chunk_returns_stored_document(fake_embedder, chroma_colle
         "page": 2,
     }
     assert missing is None
+
+
+def test_retriever_close_closes_embedder_once(fake_embedder, chroma_collection):
+    calls = []
+    fake_embedder.close = lambda: calls.append(1)
+    retriever = Retriever(collection=chroma_collection, embedder=fake_embedder)
+
+    retriever.close()
+    retriever.close()
+
+    assert calls == [1]

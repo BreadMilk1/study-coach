@@ -11,6 +11,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from app.agent.graph import build_graph
+from app.agent.tutor_attempt import TutorAttemptEngine
 
 
 class RecordingTutorLLM:
@@ -49,6 +50,16 @@ class StubRetriever:
 
     def search(self, query: str, top_k: int = 5):
         return self.chunks[:top_k]
+
+
+class RecordingTutorAttemptEngine:
+    def __init__(self):
+        self.calls = 0
+        self.delegate = TutorAttemptEngine()
+
+    async def answer(self, **kwargs):
+        self.calls += 1
+        return await self.delegate.answer(**kwargs)
 
 
 _PASS = (
@@ -179,3 +190,43 @@ async def test_judge_retry_hint_passes_previous_score_and_weak_dims_to_tutor():
         "accuracy", "citation_quality", "relevance",
         "accessibility", "example_quality", "learner_level_fit",
     ))
+
+
+@pytest.mark.asyncio
+async def test_judge_first_pass_success_executes_one_tutor_attempt():
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["grounded answer"])
+    judge_llm = StubJudgeLLM([_PASS])
+    attempt_engine = RecordingTutorAttemptEngine()
+    graph = build_graph(
+        retriever=retriever,
+        llm=llm,
+        tutor_attempt_engine=attempt_engine,
+    )
+
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="What is HyDE?")]},
+        config={"configurable": {"judge_llm": judge_llm}},
+    )
+
+    assert attempt_engine.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_weak_path_executes_at_most_three_tutor_attempts():
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["weak answer"] * 3)
+    judge_llm = StubJudgeLLM([_WEAK, _WEAK, _WEAK])
+    attempt_engine = RecordingTutorAttemptEngine()
+    graph = build_graph(
+        retriever=retriever,
+        llm=llm,
+        tutor_attempt_engine=attempt_engine,
+    )
+
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="Explain BM25")]},
+        config={"configurable": {"judge_llm": judge_llm}},
+    )
+
+    assert attempt_engine.calls == 3

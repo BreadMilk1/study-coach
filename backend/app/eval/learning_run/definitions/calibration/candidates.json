@@ -1,0 +1,119 @@
+{
+  "schema_version": "scorer-calibration-v1",
+  "candidates": [
+    {
+      "id": "cal-001",
+      "version": "1",
+      "question": "What does Reciprocal Rank Fusion combine?",
+      "case_type": "answerable",
+      "expected_behavior": "Explain the combination of ranked lists using the provided evidence.",
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false},
+      "candidate_artifact": {
+        "answer": "Reciprocal Rank Fusion combines ranked lists and rewards a result that appears near the top of several lists [1].",
+        "citations": [{"chunk_id": "tgqa-c01-rrf", "source": "learning-run-notes.md", "page": 1, "span_start": 0, "span_end": 190}],
+        "exact_evidence": [{"chunk_id": "tgqa-c01-rrf", "content": "Reciprocal Rank Fusion combines several ranked lists by adding a reciprocal contribution for each result position. A result appearing near the top of multiple lists receives a stronger combined rank.", "source": "learning-run-notes.md", "page": 1}],
+        "formatted_context": "[1] learning-run-notes.md p.1: Reciprocal Rank Fusion combines several ranked lists.",
+        "usage": "unavailable",
+        "trace": [{"stage": "fixture", "event": "frozen_calibration"}],
+        "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90}
+      },
+      "artifact_hash": "d8622242d4a099df06d3fdac439d8ee8491dd2827f55fdd576e3ee385f1d99ec",
+      "anchor_label": "pass",
+      "manual_expected_verdict": "pass",
+      "manual_reason": "Every claim is supported by the exact allowed evidence and the answer addresses the question."
+    },
+    {
+      "id": "cal-002",
+      "version": "1",
+      "question": "What does Reciprocal Rank Fusion combine?",
+      "case_type": "answerable",
+      "expected_behavior": "Explain the combination of ranked lists using the provided evidence.",
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false},
+      "candidate_artifact": {
+        "answer": "Reciprocal Rank Fusion guarantees that every model will always be correct [1].",
+        "citations": [{"chunk_id": "tgqa-c01-rrf", "source": "learning-run-notes.md", "page": 1, "span_start": 0, "span_end": 190}],
+        "exact_evidence": [{"chunk_id": "tgqa-c01-rrf", "content": "Reciprocal Rank Fusion combines several ranked lists by adding a reciprocal contribution for each result position. A result appearing near the top of multiple lists receives a stronger combined rank.", "source": "learning-run-notes.md", "page": 1}],
+        "formatted_context": "[1] learning-run-notes.md p.1: Reciprocal Rank Fusion combines several ranked lists.",
+        "usage": "unavailable",
+        "trace": [{"stage": "fixture", "event": "frozen_calibration"}],
+        "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90}
+      },
+      "artifact_hash": "4754f56adf48be3de61c288ec5557ce3d2d35fd24a0740c52276ffb8cb8085fe",
+      "anchor_label": "fail",
+      "manual_expected_verdict": "fail",
+      "manual_reason": "The answer adds a guarantee absent from the cited evidence, creating a critical unsupported claim."
+    },
+    {
+      "id": "cal-003",
+      "version": "1",
+      "question": "How do spaced practice and retrieval practice work together?",
+      "case_type": "multi_evidence",
+      "expected_behavior": "Combine separated review intervals with recalling an idea before checking notes.",
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false},
+      "candidate_artifact": {
+        "answer": "Spaced practice separates review sessions [1].",
+        "citations": [{"chunk_id": "tgqa-c03-spaced-practice", "source": "learning-run-notes.md", "page": 2, "span_start": 0, "span_end": 160}],
+        "exact_evidence": [
+          {"chunk_id": "tgqa-c03-spaced-practice", "content": "Spaced practice schedules review sessions across separated intervals instead of concentrating all practice in one sitting. The spacing makes retrieval effort part of later review.", "source": "learning-run-notes.md", "page": 2},
+          {"chunk_id": "tgqa-c04-retrieval-practice", "content": "Retrieval practice asks a learner to recall an idea before checking notes. A short self-test can reveal which parts need another explanation or review.", "source": "learning-run-notes.md", "page": 2}
+        ],
+        "formatted_context": "[1] learning-run-notes.md p.2: Spaced practice schedules review sessions across separated intervals.",
+        "usage": "unavailable",
+        "trace": [{"stage": "fixture", "event": "frozen_calibration"}],
+        "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90}
+      },
+      "artifact_hash": "1e8fc70d0aace216332a78f4ab56ad4defae107420d3b41007c87cf117d35687",
+      "anchor_label": "borderline",
+      "manual_expected_verdict": "fail",
+      "manual_reason": "The candidate uses only one part of the required multi-evidence answer and is materially incomplete."
+    },
+    {
+      "id": "cal-004",
+      "version": "1",
+      "question": "Which notebook color produces the best exam score according to the notes?",
+      "case_type": "expected_refusal",
+      "expected_behavior": "State that the provided evidence does not contain the requested fact and do not guess.",
+      "required_dimensions": ["refusal_appropriateness", "unsupported_claims"],
+      "critical_policy": {"hard_fail_findings": ["unsupported_claim"], "expected_refusal": true},
+      "candidate_artifact": {
+        "answer": "I don't know; the provided sources do not contain evidence about notebook color and exam scores.",
+        "citations": [],
+        "exact_evidence": [],
+        "formatted_context": "(no relevant sources retrieved)",
+        "usage": "unavailable",
+        "trace": [{"stage": "fixture", "event": "frozen_calibration"}],
+        "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90}
+      },
+      "artifact_hash": "69be5450e7ccd0615e0c1cb6966a1ada9cd3e77ca56b2bb0013ce5c653275579",
+      "anchor_label": "correct_refusal",
+      "manual_expected_verdict": "pass",
+      "manual_reason": "The requested fact is absent and the candidate refuses without inventing an answer."
+    },
+    {
+      "id": "cal-005",
+      "version": "1",
+      "question": "What does Reciprocal Rank Fusion combine?",
+      "case_type": "answerable",
+      "expected_behavior": "Explain the combination of ranked lists using the provided evidence.",
+      "required_dimensions": ["groundedness", "citation_entailment", "coverage"],
+      "critical_policy": {"hard_fail_findings": ["citation_invalid", "unsupported_claim"], "expected_refusal": false},
+      "candidate_artifact": {
+        "answer": "I don't know.",
+        "citations": [],
+        "exact_evidence": [{"chunk_id": "tgqa-c01-rrf", "content": "Reciprocal Rank Fusion combines several ranked lists by adding a reciprocal contribution for each result position. A result appearing near the top of multiple lists receives a stronger combined rank.", "source": "learning-run-notes.md", "page": 1}],
+        "formatted_context": "[1] learning-run-notes.md p.1: Reciprocal Rank Fusion combines several ranked lists.",
+        "usage": "unavailable",
+        "trace": [{"stage": "fixture", "event": "frozen_calibration"}],
+        "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90}
+      },
+      "artifact_hash": "c9b1a3131fc84c1b7b3cf7b49ca7190cd63fdec5bafa726fb0b2b2a8728c6110",
+      "anchor_label": "incorrect_refusal",
+      "manual_expected_verdict": "fail",
+      "manual_reason": "The evidence directly answers this answerable question, so refusal is inappropriate."
+    }
+  ],
+  "definition_hash": "b73ebd4d1f4b13ac4037fb23be5acaf57de3f2202e6b653ad3b57788000fde92"
+}

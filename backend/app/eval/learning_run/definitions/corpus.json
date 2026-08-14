@@ -1,0 +1,69 @@
+{
+  "schema_version": "corpus-snapshot-v1",
+  "snapshot_id": "tgqa-corpus-v1",
+  "version": "1",
+  "chunking_config_version": "fixed-whole-chunk-v1",
+  "embedding_config_version": "ollama-nomic-embed-text-v1",
+  "retrieval_config_version": "hybrid-rrf-v1",
+  "reranker_config_version": "fastembed-bge-v1",
+  "chunks": [
+    {
+      "chunk_id": "tgqa-c01-rrf",
+      "content": "Reciprocal Rank Fusion combines several ranked lists by adding a reciprocal contribution for each result position. A result appearing near the top of multiple lists receives a stronger combined rank.",
+      "source": "learning-run-notes.md",
+      "page": 1,
+      "content_hash": "7af0932897dc850ae6daa3295719c424cce4795f424384deae7490fd94fe1c1e"
+    },
+    {
+      "chunk_id": "tgqa-c02-grounding",
+      "content": "A grounded answer connects each factual claim to evidence in the retrieved context. A fluent answer is not grounded when its claims cannot be supported by that context.",
+      "source": "learning-run-notes.md",
+      "page": 1,
+      "content_hash": "4445e2c46d6abd2d650cee12c16d108f16a561045f217824ae846a7a3d61f727"
+    },
+    {
+      "chunk_id": "tgqa-c03-spaced-practice",
+      "content": "Spaced practice schedules review sessions across separated intervals instead of concentrating all practice in one sitting. The spacing makes retrieval effort part of later review.",
+      "source": "learning-run-notes.md",
+      "page": 2,
+      "content_hash": "f135556593c612f8ae5c12dd8f33f168e5f7358037e5454865e0dd6435247914"
+    },
+    {
+      "chunk_id": "tgqa-c04-retrieval-practice",
+      "content": "Retrieval practice asks a learner to recall an idea before checking notes. A short self-test can reveal which parts need another explanation or review.",
+      "source": "learning-run-notes.md",
+      "page": 2,
+      "content_hash": "853e8a6d56b626888064846011d10f601324340bf1619b0788bc9d92c3ba7176"
+    },
+    {
+      "chunk_id": "tgqa-c05-citations",
+      "content": "A citation is useful only when the cited passage entails the claim it follows. A source being topically related is not enough to establish citation entailment.",
+      "source": "learning-run-notes.md",
+      "page": 3,
+      "content_hash": "f584605b3d084b1b810c8894eee7fdeae2a226de44eedaca353f6d20afd2d99b"
+    },
+    {
+      "chunk_id": "tgqa-c06-evidence-coverage",
+      "content": "Evidence coverage asks whether the answer addresses the important parts of the question that the available sources can support. It does not require claims about facts absent from the sources.",
+      "source": "learning-run-notes.md",
+      "page": 3,
+      "content_hash": "ab414d07fb23d21e0ce1e84e43629e183640821b081df38ce145e4f55dd0dbae"
+    },
+    {
+      "chunk_id": "tgqa-c07-refusal",
+      "content": "When the provided sources do not contain an answer, the tutor should state that it does not know and avoid inventing a fact. This is an expected refusal, not a retrieval failure.",
+      "source": "learning-run-notes.md",
+      "page": 4,
+      "content_hash": "6331acaf83dcd3b731a50caf8dc47dcb658e177e06e676b8928a684a2e09c4f4"
+    },
+    {
+      "chunk_id": "tgqa-c08-feedback",
+      "content": "Useful feedback identifies a specific gap, points to supporting evidence, and proposes a next study action. Generic praise alone does not show what the learner should do next.",
+      "source": "learning-run-notes.md",
+      "page": 4,
+      "content_hash": "e649e6bc150740fc8452da596dbeb00cd28e27439074148db016561f3c9646a4"
+    }
+  ],
+  "aggregate_hash": "69b9814e51f2a38f882dffc0d0a3ebb9e2a4c7e1aca86f52782fe70ce739140b",
+  "definition_hash": "9dd2758d60c8c51f4cbaccc9bacb153cf83b87b11add902787a5f3de404255cf"
+}
