@@ -168,7 +168,15 @@ def test_learning_run_eval_schema_has_foreign_keys_checks_and_unique_scorer_iden
         column["name"] for column in inspector.get_columns("eval_scorer_executions")
     }
     assert "user_id" not in run_columns | score_columns | execution_columns
-    assert {"id", "run_id", "scorer_id", "scorer_version", "artifact_input_hash"} <= score_columns
+    assert {
+        "id",
+        "run_id",
+        "scorer_id",
+        "scorer_version",
+        "scorer_snapshot_json",
+        "scorer_definition_hash",
+        "artifact_input_hash",
+    } <= score_columns
     assert {"id", "score_set_id", "scorer_id", "scorer_version", "input_hash"} <= execution_columns
 
     score_fks = inspector.get_foreign_keys("eval_score_sets")
@@ -212,9 +220,11 @@ def test_migrated_eval_foreign_keys_require_child_first_deletion(tmp_path):
         conn.execute(
             text(
                 "INSERT INTO eval_score_sets "
-                "(id, run_id, scorer_id, scorer_version, artifact_input_hash, "
+                "(id, run_id, scorer_id, scorer_version, scorer_snapshot_json, "
+                "scorer_definition_hash, artifact_input_hash, "
                 "status, quality_verdict) VALUES "
-                "('fk-score-set', 'fk-run', 'hybrid', 'v1', 'artifact-hash', "
+                "('fk-score-set', 'fk-run', 'hybrid', 'v1', '{\"scorer_id\": \"hybrid\"}', "
+                "'hash', 'artifact-hash', "
                 "'pending', 'not_evaluated')"
             )
         )

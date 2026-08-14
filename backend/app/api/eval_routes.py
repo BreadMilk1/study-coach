@@ -24,6 +24,7 @@ from app.eval.learning_run.repositories import (
     EvaluationUnavailableError,
     RepositoryNotFoundError,
 )
+from app.eval.learning_run.compare import compare_score_sets
 from app.eval.learning_run.service import (
     EvalModelConnection,
     RunRequestError,
@@ -33,8 +34,10 @@ from app.eval.learning_run.registry import RegistryError, TaskRegistry
 
 from .deps import require_existing_user, require_local_eval_mode
 from .eval_schemas import (
+    CompareResponse,
     EvalErrorDetail,
     ExperimentSummary,
+    RescoreStreamRequest,
     RunDetail,
     RunStreamRequest,
     RunSummary,
@@ -218,6 +221,7 @@ def _score_summary(row: Any) -> ScoreSetSummary:
         score_set_id=row.id,
         scorer_id=row.scorer_id,
         scorer_version=row.scorer_version,
+        scorer_definition_hash=getattr(row, "scorer_definition_hash", None),
         status=row.status,
         quality_verdict=row.quality_verdict,
         aggregate_scores=row.aggregate_scores_json,
@@ -373,6 +377,170 @@ def cancel_run(
             "evaluation_unavailable",
             "evaluation storage is unavailable",
         ) from None
+
+
+@eval_router.post("/score-sets/{score_set_id}/cancel", response_model=ScoreSetSummary)
+def cancel_score_set(
+    score_set_id: str,
+    session: Session = Depends(get_eval_session),
+) -> ScoreSetSummary:
+    try:
+        row = EvalScoreSetRepository(session).cancel_once(score_set_id)
+        return _score_summary(row)
+    except RepositoryNotFoundError:
+        raise _error(404, "evaluation_not_found", "evaluation score set was not found") from None
+    except ChecksumMismatchError:
+        raise _error(
+            500,
+            "evaluation_integrity_error",
+            "evaluation artifact integrity could not be verified",
+        ) from None
+
+
+@eval_router.get("/compare", response_model=CompareResponse)
+def compare_runs(
+    left: str,
+    right: str,
+    session: Session = Depends(get_eval_session),
+) -> CompareResponse:
+    try:
+        runs = EvalRunRepository(session)
+        scores = EvalScoreSetRepository(session)
+        left_run = runs.get_verified(left)
+        right_run = runs.get_verified(right)
+        left_sets = scores.list_verified(left_run.id)
+        right_sets = scores.list_verified(right_run.id)
+    except RepositoryNotFoundError:
+        raise _error(404, "evaluation_not_found", "evaluation run was not found") from None
+    except ChecksumMismatchError:
+        raise _error(
+            500,
+            "evaluation_integrity_error",
+            "evaluation artifact integrity could not be verified",
+        ) from None
+    left_score = left_sets[-1] if left_sets else None
+    right_score = right_sets[-1] if right_sets else None
+    payload = compare_score_sets(
+        {
+            "run_id": left_run.id,
+            "variant_id": left_run.variant_id,
+            "manifest": left_run.manifest_json,
+            "artifact": left_run.candidate_artifact_json,
+            "score_set": None
+            if left_score is None
+            else {
+                "scorer_id": left_score.scorer_id,
+                "scorer_version": left_score.scorer_version,
+                "aggregate_scores": left_score.aggregate_scores_json,
+            },
+        },
+        {
+            "run_id": right_run.id,
+            "variant_id": right_run.variant_id,
+            "manifest": right_run.manifest_json,
+            "artifact": right_run.candidate_artifact_json,
+            "score_set": None
+            if right_score is None
+            else {
+                "scorer_id": right_score.scorer_id,
+                "scorer_version": right_score.scorer_version,
+                "aggregate_scores": right_score.aggregate_scores_json,
+            },
+        },
+    )
+    return CompareResponse(**payload)
+
+
+@eval_router.post("/runs/{run_id}/rescore/stream")
+async def stream_rescore(
+    run_id: str,
+    request: Request,
+    payload: RescoreStreamRequest,
+    session: Session = Depends(get_eval_session),
+    x_provider: str | None = Header(None),
+    x_model: str | None = Header(None),
+    x_api_key: str | None = Header(None),
+    x_base_url: str | None = Header(None),
+) -> StreamingResponse:
+    registry = _registry(request)
+    try:
+        existing = EvalRunRepository(session).get_verified(run_id)
+        connection = _build_connection(
+            request,
+            registry,
+            provider=x_provider,
+            model=x_model,
+            api_key=x_api_key,
+            base_url=x_base_url,
+            variant_id=existing.variant_id,
+        )
+        service = _service(request, session, registry)
+    except RepositoryNotFoundError:
+        raise _error(404, "evaluation_not_found", "evaluation run was not found") from None
+    except ChecksumMismatchError:
+        raise _error(
+            500,
+            "evaluation_integrity_error",
+            "evaluation artifact integrity could not be verified",
+        ) from None
+    except RunRequestError as exc:
+        raise _error(422, exc.code, exc.sanitized_message, fields=exc.fields) from None
+
+    async def body():
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        def emit(event: Mapping[str, Any]) -> None:
+            adapted = _adapt_event(event, run_id)
+            if adapted is not None:
+                queue.put_nowait(adapted)
+
+        try:
+            score_set = await service.rescore(
+                run_id=run_id,
+                scorer_version=payload.scorer_version,
+                connection=connection,
+                events=emit,
+            )
+            queue.put_nowait(
+                {
+                    "schema_version": "eval-api-v1",
+                    "type": "score_set_finished",
+                    "run_id": run_id,
+                    "score_set_id": score_set.id,
+                    "status": score_set.status,
+                    "quality_verdict": score_set.quality_verdict,
+                }
+            )
+        except RunRequestError as exc:
+            queue.put_nowait(
+                {
+                    "schema_version": "eval-api-v1",
+                    "type": "run_finished",
+                    "run_id": run_id,
+                    "lifecycle": "finished",
+                    "outcome": "system_failed",
+                    "error_code": exc.code,
+                }
+            )
+        except Exception:
+            queue.put_nowait(
+                {
+                    "schema_version": "eval-api-v1",
+                    "type": "run_finished",
+                    "run_id": run_id,
+                    "lifecycle": "finished",
+                    "outcome": "system_failed",
+                    "error_code": "harness_internal_error",
+                }
+            )
+        queue.put_nowait(None)
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return StreamingResponse(body(), media_type="text/event-stream")
 
 
 def _adapt_event(payload: Mapping[str, Any], run_id: str) -> dict[str, Any] | None:

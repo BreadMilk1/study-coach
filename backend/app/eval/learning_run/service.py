@@ -17,11 +17,13 @@ from .contracts import (
     as_plain,
 )
 from .repositories import (
+    ChecksumMismatchError,
     EvalExecutionClaimRepository,
     EvalExecutionControlRepository,
     EvalRunRepository,
     EvalScoreSetRepository,
     EvalScorerExecutionRepository,
+    EvaluationBusyError,
     EvaluationUnavailableError,
     RepositoryNotFoundError,
 )
@@ -991,6 +993,118 @@ class RunService:
             connection=connection,
         )
         return await self.execute_prepared(prepared, events)
+
+    async def rescore(
+        self,
+        *,
+        run_id: str,
+        scorer_version: str,
+        connection: EvalModelConnection,
+        events: Any = None,
+    ) -> Any:
+        """Score a frozen CandidateArtifact again without calling Tutor."""
+
+        try:
+            run = self.runs.get_verified(run_id)
+        except RepositoryNotFoundError as exc:
+            raise RunRequestError("manifest_invalid", "evaluation run was not found") from exc
+        except ChecksumMismatchError as exc:
+            raise RunRequestError("manifest_invalid", "frozen artifact hash mismatch") from exc
+        if run.lifecycle != "finished" or run.artifact_hash is None or not run.candidate_artifact_json:
+            raise RunRequestError("manifest_invalid", "run is not a finished frozen candidate")
+        artifact = CandidateArtifact.from_dict(run.candidate_artifact_json)
+        if artifact.compute_hash() != run.artifact_hash:
+            raise RunRequestError("manifest_invalid", "frozen artifact hash mismatch")
+
+        try:
+            bundle = self.registry.scorer_for(scorer_version)
+            document = self.registry.scorer_document(scorer_version)
+            task = self.registry.task_cases[run.task_case_id]
+        except Exception as exc:
+            raise RunRequestError("manifest_invalid", "scorer version is not in the registry") from exc
+
+        scorer_config = as_plain(bundle.model_config)
+        expected_scorer = {
+            "provider": scorer_config.get("provider"),
+            "model": scorer_config.get("model"),
+            "parameters": {
+                key: value
+                for key, value in scorer_config.items()
+                if key not in {"provider", "model"}
+            },
+        }
+        actual_scorer = {
+            "provider": connection.scorer_provider,
+            "model": connection.scorer_model,
+            "parameters": as_plain(connection.scorer_parameters),
+        }
+        if actual_scorer != expected_scorer:
+            raise RunRequestError(
+                "evaluation_config_mismatch",
+                "scorer evaluation configuration does not match",
+            )
+
+        claim = self.claim_repository or EvalExecutionClaimRepository(self.runs.session)
+        try:
+            score_set = claim.claim_score_set(
+                run_id=run.id,
+                artifact_input_hash=run.artifact_hash,
+                scorer_bundle=bundle,
+                scorer_snapshot=document,
+                scorer_definition_hash=bundle.definition_hash,
+            )
+        except EvaluationBusyError as exc:
+            raise RunRequestError(
+                "evaluation_busy",
+                "another evaluation is already running",
+            ) from exc
+
+        _event(events, {"type": "score_set_created", "score_set_id": score_set.id})
+
+        def on_execution(draft: ScorerExecutionDraft) -> None:
+            self.scorer_executions.append_draft(score_set.id, draft)
+            _event(
+                events,
+                {
+                    "type": "scorer_completed" if draft.status == "success" else "scorer_failed",
+                    "score_set_id": score_set.id,
+                    "scorer_id": draft.scorer_id,
+                    "status": draft.status,
+                    "error_code": draft.error_code,
+                },
+            )
+
+        hybrid_limit = float(self.registry.experiment.budget["hybrid_scoring_seconds"])
+        scoring = (
+            self.scoring_service_factory(connection.scorer_llm, timeout_seconds=hybrid_limit)
+            if self.scoring_service_factory is not None
+            else ScoringService(connection.scorer_llm, timeout_seconds=hybrid_limit)
+        )
+        score_result = await scoring.score(
+            task=task,
+            candidate=artifact,
+            scorer_bundle=bundle,
+            on_execution=on_execution,
+        )
+        score_set = self.score_sets.finalize_once(
+            score_set.id,
+            status=score_result.status,
+            quality_verdict=score_result.verdict,
+            aggregate_scores=score_result.aggregate_scores,
+            findings=score_result.findings,
+            error_code=score_result.error_code,
+            sanitized_message=score_result.error_message,
+        )
+        _event(
+            events,
+            {
+                "type": "score_set_finished",
+                "score_set_id": score_set.id,
+                "status": score_set.status,
+                "quality_verdict": score_set.quality_verdict,
+            },
+        )
+        return score_set
 
 
 __all__ = [

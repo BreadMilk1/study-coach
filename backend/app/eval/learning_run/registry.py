@@ -388,6 +388,8 @@ class TaskRegistry:
         prompts: Mapping[str, PromptDefinition],
         scorer: ScorerBundle,
         calibration_candidates: tuple[CalibrationCandidate, ...],
+        scorers: Mapping[str, ScorerBundle] | None = None,
+        scorer_documents: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.definitions_path = definitions_path
         self.experiment = experiment
@@ -395,6 +397,8 @@ class TaskRegistry:
         self.corpus = corpus
         self.prompts = MappingProxyType(dict(prompts))
         self.scorer = scorer
+        self.scorers = MappingProxyType(dict(scorers or {scorer.version: scorer}))
+        self.scorer_documents = MappingProxyType(dict(scorer_documents or {}))
         self.calibration_candidates = tuple(calibration_candidates)
         self.calibration_case_ids = tuple(
             candidate.candidate_id for candidate in self.calibration_candidates
@@ -424,7 +428,13 @@ class TaskRegistry:
         experiment_payload = _read_json(root / "experiment.json")
         task_payload = _read_json(root / "task_cases.json")
         corpus_payload = _read_json(root / "corpus.json")
-        scorer_payload = _read_json(root / "scorers" / "hybrid-v1.json")
+        scorer_payloads = {
+            path.stem: _read_json(path)
+            for path in sorted((root / "scorers").glob("*.json"))
+        }
+        if "hybrid-v1" not in scorer_payloads:
+            raise RegistryError("hybrid-v1 scorer bundle is required")
+        scorer_payload = scorer_payloads["hybrid-v1"]
         calibration_payload = _read_json(
             root / "calibration" / "candidates.json"
         )
@@ -435,6 +445,9 @@ class TaskRegistry:
         _validate_experiment_raw(experiment_payload)
         _validate_task_cases_raw(task_payload)
         _validate_corpus_raw(corpus_payload)
+        for name, payload in scorer_payloads.items():
+            _validate_scorer_raw(payload)
+            _verify_definition_hash(payload, label=f"scorer.{name}")
         _validate_scorer_raw(scorer_payload)
         _validate_calibration_raw(
             calibration_payload,
@@ -504,6 +517,28 @@ class TaskRegistry:
             scorer = ScorerBundle.from_dict(scorer_payload)
         except (KeyError, TypeError, ValueError) as exc:
             raise RegistryError(f"invalid scorer definition: {exc}") from exc
+
+        scorers = {scorer.version: scorer}
+        scorer_documents = {scorer.version: scorer_payload}
+        for name, payload in scorer_payloads.items():
+            if name == "hybrid-v1":
+                continue
+            try:
+                extra = ScorerBundle.from_dict(payload)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RegistryError(f"invalid scorer definition {name}: {exc}") from exc
+            self_validate_components(extra)
+            scorers[extra.version] = extra
+            scorer_documents[extra.version] = payload
+            labels_path = root / "calibration" / f"{extra.version}-labels.json"
+            if labels_path.exists():
+                labels_payload = _read_json(labels_path)
+                if labels_payload.get("scorer_version") not in {extra.version, extra.scorer_id}:
+                    if str(labels_payload.get("scorer_version") or "") != extra.version:
+                        raise RegistryError(f"{extra.version} labels target mismatch")
+                _verify_definition_hash(labels_payload, label=f"calibration.{extra.version}")
+                if extra.calibration_hash != labels_payload.get("definition_hash"):
+                    raise RegistryError(f"{extra.version} calibration hash mismatch")
 
         self_validate_components(scorer)
 
@@ -656,6 +691,8 @@ class TaskRegistry:
             corpus=corpus,
             prompts=prompts,
             scorer=scorer,
+            scorers=scorers,
+            scorer_documents=scorer_documents,
             calibration_candidates=calibration_candidates,
         )
 
@@ -694,6 +731,18 @@ class TaskRegistry:
             budget=self.experiment.budget,
             variant_controls=controls,
         )
+
+    def scorer_for(self, version: str) -> ScorerBundle:
+        try:
+            return self.scorers[version]
+        except KeyError as exc:
+            raise RegistryError(f"unknown scorer version: {version}") from exc
+
+    def scorer_document(self, version: str) -> Mapping[str, Any]:
+        try:
+            return self.scorer_documents[version]
+        except KeyError as exc:
+            raise RegistryError(f"unknown scorer version: {version}") from exc
 
     def validate(self) -> dict[str, Any]:
         distribution = {

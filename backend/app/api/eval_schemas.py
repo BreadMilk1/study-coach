@@ -19,6 +19,11 @@ class RunStreamRequest(StrictModel):
     run_profile: Literal["evaluation"]
 
 
+class RescoreStreamRequest(StrictModel):
+    scorer_version: str
+    run_profile: Literal["evaluation"] = "evaluation"
+
+
 class EvalErrorDetail(StrictModel):
     code: str
     message: str
@@ -46,6 +51,7 @@ class ScoreSetSummary(StrictModel):
     score_set_id: str
     scorer_id: str
     scorer_version: str
+    scorer_definition_hash: str | None = None
     status: Literal["pending", "running", "completed", "partial", "failed", "cancelled"]
     quality_verdict: Literal["pass", "fail", "inconclusive", "not_evaluated"]
     aggregate_scores: dict[str, object] | None = None
@@ -117,6 +123,8 @@ class CompareResponse(StrictModel):
     scorer_bundle: ScorerBundleRef
     delta: dict | None
     scope: Literal["case", "suite"]
+    rescore_required: bool = False
+    caption: str = "case delta"
 
 
 class EvalEventBase(StrictModel):

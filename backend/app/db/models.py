@@ -223,6 +223,8 @@ class EvalScoreSet(Base):
     )
     scorer_id: Mapped[str] = mapped_column(String(128), nullable=False)
     scorer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    scorer_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    scorer_definition_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     artifact_input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     quality_verdict: Mapped[str] = mapped_column(
