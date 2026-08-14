@@ -428,6 +428,13 @@ export async function markMistakeUnderstood(mistakeId: string): Promise<{
 
 export type ResetScope = 'learning' | 'factory'
 
+export interface EvalCounts {
+  runs: number
+  score_sets: number
+  scorer_executions: number
+  estimated_bytes: number
+}
+
 export interface DataCounts {
   users: number
   documents: number
@@ -451,12 +458,14 @@ export interface DataSummaryDto extends DataCounts {
   has_learning_data: boolean
   /** False when the signed bearer no longer maps to a user row (e.g. after factory reset). */
   current_user_exists: boolean
+  eval: EvalCounts
 }
 
 export interface ResetResultDto {
   scope: ResetScope
   status: 'completed'
   deleted: DataCounts
+  deleted_eval: EvalCounts
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {

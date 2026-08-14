@@ -1,6 +1,6 @@
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Callable, Iterator, Literal, NoReturn
 
@@ -34,11 +34,20 @@ class ResetStageError(RuntimeError):
 ResetScope = Literal["learning", "factory"]
 
 
+_EMPTY_EVAL = {
+    "runs": 0,
+    "score_sets": 0,
+    "scorer_executions": 0,
+    "estimated_bytes": 0,
+}
+
+
 @dataclass(frozen=True)
 class ResetResult:
     scope: ResetScope
     status: Literal["completed"]
     deleted: dict[str, int]
+    deleted_eval: dict[str, int] = field(default_factory=lambda: dict(_EMPTY_EVAL))
 
 
 class DataLifecycleGate:
@@ -109,6 +118,7 @@ class ResetCoordinator:
     def summary(self, *, reset_enabled: bool) -> dict[str, int | bool]:
         with self.gate.shared_operation():
             counts = dict(self.repository.count_all())
+            eval_counts = dict(self.repository.count_eval()) if hasattr(self.repository, "count_eval") else dict(_EMPTY_EVAL)
             vectors = self.runtime.vector_count()
             has_learning_data = vectors > 0 or any(
                 count > 0 for name, count in counts.items() if name != "users"
@@ -118,6 +128,7 @@ class ResetCoordinator:
                 "vectors": vectors,
                 "reset_enabled": reset_enabled,
                 "has_learning_data": has_learning_data,
+                "eval": eval_counts,
             }
 
     def _raise_sqlite_stage(self, exc: Exception) -> NoReturn:
@@ -141,6 +152,11 @@ class ResetCoordinator:
         with self.gate.exclusive_reset(scope):
             try:
                 counts = dict(self.repository.count_all())
+                eval_counts = (
+                    dict(self.repository.count_eval())
+                    if hasattr(self.repository, "count_eval")
+                    else dict(_EMPTY_EVAL)
+                )
             except Exception as exc:
                 self._raise_sqlite_stage(exc)
 
@@ -161,6 +177,8 @@ class ResetCoordinator:
 
             include_users = scope == "factory"
             try:
+                if include_users and hasattr(self.repository, "delete_eval_data"):
+                    self.repository.delete_eval_data()
                 self.repository.delete_learning_data(include_users=include_users)
                 self.session.commit()
             except Exception as exc:
@@ -170,4 +188,10 @@ class ResetCoordinator:
             deleted = {**counts, "vectors": vectors}
             if not include_users:
                 deleted["users"] = 0
-            return ResetResult(scope=scope, status="completed", deleted=deleted)
+            deleted_eval = dict(eval_counts) if include_users else dict(_EMPTY_EVAL)
+            return ResetResult(
+                scope=scope,
+                status="completed",
+                deleted=deleted,
+                deleted_eval=deleted_eval,
+            )

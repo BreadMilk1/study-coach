@@ -17,7 +17,7 @@ import { useQuiz } from '../stores/quiz'
 import { memoryStorage } from '../test/memoryStorage'
 import { streamChat } from './api'
 import { CHAT_SESSION_KEY, clearStoredChatSessionId } from './dataLifecycle'
-import { resetClientLearningState } from './resetClientState'
+import { resetClientLearningState, type ClientLearningStores } from './resetClientState'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -844,5 +844,24 @@ describe('resetClientLearningState', () => {
       'mastery',
       'activity',
     ])
+  })
+
+  it('does not clear eval artifacts because learning reset preserves them', async () => {
+    const evalReset = vi.fn()
+    const dependencies = {
+      clearChatSession: () => undefined,
+      chat: { resetAfterDataClear: () => undefined },
+      quiz: { reset: () => undefined },
+      documents: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      plan: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      mistakes: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      mastery: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      activity: { resetAfterDataClear: () => undefined, fetch: async () => true },
+      eval: { reset: evalReset },
+    }
+
+    await resetClientLearningState(dependencies as ClientLearningStores)
+
+    expect(evalReset).not.toHaveBeenCalled()
   })
 })

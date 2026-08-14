@@ -24,6 +24,12 @@ function summary(overrides: Partial<Awaited<ReturnType<LifecycleDependencies['su
     questions: 0,
     mastery: 0,
     mistakes: 0,
+    eval: {
+      runs: 0,
+      score_sets: 0,
+      scorer_executions: 0,
+      estimated_bytes: 0,
+    },
     ...overrides,
   }
 }
@@ -31,7 +37,33 @@ function summary(overrides: Partial<Awaited<ReturnType<LifecycleDependencies['su
 function dependencies(overrides: Partial<LifecycleDependencies> = {}): LifecycleDependencies {
   return {
     summary: async () => summary(),
-    reset: async scope => ({ scope, status: 'completed', deleted: summary() }),
+    reset: async scope => ({
+      scope,
+      status: 'completed',
+      deleted: {
+        users: 1,
+        documents: 1,
+        source_chunks: 3,
+        vectors: 3,
+        chat_sessions: 0,
+        messages: 0,
+        citations: 0,
+        goals: 0,
+        topics: 0,
+        plans: 0,
+        plan_milestones: 0,
+        plan_events: 0,
+        questions: 0,
+        mastery: 0,
+        mistakes: 0,
+      },
+      deleted_eval: {
+        runs: 0,
+        score_sets: 0,
+        scorer_executions: 0,
+        estimated_bytes: 0,
+      },
+    }),
     resetClient: async () => undefined,
     markChoice: () => undefined,
     clearChoice: () => undefined,
@@ -448,7 +480,7 @@ describe('reset confirmation', () => {
     const calls: string[] = []
     const store = useDataLifecycle()
     store.initialize(dependencies({
-      reset: async scope => { calls.push(`reset:${scope}`); return { scope, status: 'completed', deleted: summary() } },
+      reset: async scope => { calls.push(`reset:${scope}`); return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval } },
       resetClient: async () => { calls.push('client') },
       markChoice: () => calls.push('choice'),
       clearChoice: () => calls.push('clear-choice'),
@@ -481,7 +513,7 @@ describe('learning reset', () => {
       summary: async () => { calls.push('summary'); return summary({ has_learning_data: false }) },
       reset: async scope => {
         calls.push(`reset:${scope}`)
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       resetClient: async () => { calls.push('client') },
       markChoice: () => calls.push('choice'),
@@ -515,7 +547,7 @@ describe('learning reset', () => {
         calls.push(`reset:${scope}`)
         attempts += 1
         if (attempts === 1) throw new Error('backend failed')
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       resetClient: async () => { calls.push('client') },
       markChoice: () => calls.push('choice'),
@@ -550,7 +582,7 @@ describe('learning reset', () => {
     store.initialize(dependencies({
       reset: async scope => {
         calls.push('reset')
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       resetClient: async () => { calls.push('client'); throw new Error('client failed') },
       markChoice: () => calls.push('choice'),
@@ -587,7 +619,7 @@ describe('learning reset', () => {
     expect(calls).toEqual(['reset:learning'])
 
     await store.handleExternalReset('learning')
-    finishBackend({ scope: 'learning', status: 'completed', deleted: summary() })
+    finishBackend({ scope: 'learning', status: 'completed', deleted: summary(), deleted_eval: summary().eval })
     await localReset
 
     expect(calls).toEqual(['reset:learning', 'clear-choice', 'client'])
@@ -609,7 +641,7 @@ describe('learning reset', () => {
     const second = store.confirmLearningReset()
 
     expect(reset).toHaveBeenCalledOnce()
-    finishBackend({ scope: 'learning', status: 'completed', deleted: summary() })
+    finishBackend({ scope: 'learning', status: 'completed', deleted: summary(), deleted_eval: summary().eval })
     await Promise.all([first, second])
   })
 })
@@ -621,7 +653,7 @@ describe('factory reset', () => {
     store.initialize(dependencies({
       reset: async scope => {
         calls.push(`reset:${scope}`)
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       stageFactoryIdentity: async (forceRotate?: boolean) => {
         calls.push(`stage:${String(forceRotate)}`)
@@ -670,7 +702,7 @@ describe('factory reset', () => {
         calls.push(`reset:${scope}`)
         attempts += 1
         if (attempts === 1) throw new Error('factory backend failed')
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       broadcast: scope => calls.push(`broadcast:${scope}`),
       pause: async () => { calls.push('pause') },
@@ -713,7 +745,7 @@ describe('factory reset', () => {
     store.initialize(dependencies({
       reset: async scope => {
         calls.push(`reset:${scope}`)
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       clearFactory: () => {
         clearAttempts += 1
@@ -772,7 +804,7 @@ describe('factory reset', () => {
       stageFactoryIdentity: async () => staging,
       reset: async scope => {
         calls.push(`reset:${scope}`)
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       broadcast: scope => calls.push(`broadcast:${scope}`),
       pause: async () => { calls.push('pause') },
@@ -1050,7 +1082,7 @@ describe('reset_recovery_required scope switching', () => {
       reset: async (scope) => {
         resetCalls.push(scope)
         if (resetCalls.length === 1) throw recoveryRequired('learning')
-        return { scope, status: 'completed', deleted: summary({ has_learning_data: false }) }
+        return { scope, status: 'completed', deleted: summary({ has_learning_data: false }), deleted_eval: summary().eval }
       },
       summary: async () => summary({ has_learning_data: false }),
     }))
@@ -1080,7 +1112,7 @@ describe('reset_recovery_required scope switching', () => {
       reset: async (scope) => {
         resetCalls.push(scope)
         if (resetCalls.length === 1) throw recoveryRequired('factory')
-        return { scope, status: 'completed', deleted: summary() }
+        return { scope, status: 'completed', deleted: summary(), deleted_eval: summary().eval }
       },
       clearFactory: () => undefined,
       provisionFactoryIdentity: async () => 'fresh-token',
@@ -1102,5 +1134,68 @@ describe('reset_recovery_required scope switching', () => {
 
     expect(resetCalls).toEqual(['learning', 'factory'])
     expect(store.phase).toBe('factory_restarting')
+  })
+})
+
+describe('learning reset toast counts', () => {
+  it('keeps preserved eval counts out of the learning deleted totals', async () => {
+    const preservedEval = {
+      runs: 2,
+      score_sets: 3,
+      scorer_executions: 9,
+      estimated_bytes: 18432,
+    }
+    const deleted = {
+      users: 0,
+      documents: 1,
+      source_chunks: 3,
+      vectors: 3,
+      chat_sessions: 0,
+      messages: 2,
+      citations: 0,
+      goals: 0,
+      topics: 0,
+      plans: 0,
+      plan_milestones: 0,
+      plan_events: 0,
+      questions: 0,
+      mastery: 0,
+      mistakes: 0,
+    }
+    const store = useDataLifecycle()
+    store.initialize(dependencies({
+      reset: async scope => ({
+        scope,
+        status: 'completed',
+        deleted,
+        deleted_eval: {
+          runs: 0,
+          score_sets: 0,
+          scorer_executions: 0,
+          estimated_bytes: 0,
+        },
+      }),
+      summary: async () => summary({ eval: preservedEval, has_learning_data: false }),
+    }))
+    store.phase = 'ready'
+    store.requestLearningReset()
+
+    await store.confirmLearningReset()
+
+    expect(store.lastResult?.deleted).toEqual(deleted)
+    expect(store.lastResult?.deleted_eval).toEqual({
+      runs: 0,
+      score_sets: 0,
+      scorer_executions: 0,
+      estimated_bytes: 0,
+    })
+    const toastCount = Object.values(store.lastResult?.deleted ?? {}).reduce(
+      (total, value) => total + value,
+      0,
+    )
+    expect(toastCount).toBe(9)
+    expect(toastCount).toBeLessThan(
+      preservedEval.runs + preservedEval.score_sets + preservedEval.scorer_executions,
+    )
   })
 })

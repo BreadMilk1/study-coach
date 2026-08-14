@@ -8,7 +8,7 @@ from app.api.deps import require_signed_user
 from app.auth import JWT_ALGORITHM, JWT_SECRET, issue_token
 from app.data_lifecycle import ResetStageError
 from app.db.repositories import DataLifecycleRepository
-from app.db.models import Document, User
+from app.db.models import Document, EvalRun, EvalScoreSet, EvalScorerExecution, User
 from app.db.session import session_scope
 from app.main import create_app
 
@@ -138,6 +138,12 @@ COUNT_KEYS = {
     "mastery",
     "mistakes",
 }
+EVAL_COUNT_KEYS = {
+    "runs",
+    "score_sets",
+    "scorer_executions",
+    "estimated_bytes",
+}
 
 
 def test_summary_ignores_users_when_computing_learning_data(client):
@@ -187,6 +193,13 @@ def test_summary_reports_source_chunks_separately_from_vectors(client, app):
         "reset_enabled",
         "has_learning_data",
         "current_user_exists",
+        "eval",
+    }
+    assert payload["eval"] == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
     }
     assert payload["current_user_exists"] is True
     assert payload["source_chunks"] == 7
@@ -272,6 +285,143 @@ def test_reset_completes_with_every_deleted_count_key(
     assert set(payload["deleted"]) == COUNT_KEYS
     assert payload["deleted"]["vectors"] == 2
     assert payload["deleted"]["users"] == (0 if scope == "learning" else 1)
+    assert set(payload["deleted_eval"]) == EVAL_COUNT_KEYS
+    assert payload["deleted_eval"] == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
+    }
+
+
+def _seed_eval_rows(run_id: str = "eval-run-1") -> None:
+    with session_scope() as session:
+        session.add(
+            EvalRun(
+                id=run_id,
+                experiment_id="tutor-prompt-regression-v1",
+                task_case_id="tgqa-001",
+                task_case_version="1",
+                variant_id="tutor-v2",
+                run_profile="evaluation",
+                lifecycle="finished",
+                outcome="success",
+                manifest_json={"task_case_id": "tgqa-001"},
+                manifest_hash="a" * 64,
+                candidate_artifact_json={"answer": "x"},
+                artifact_hash="b" * 64,
+            )
+        )
+        session.add(
+            EvalScoreSet(
+                id=f"{run_id}-score",
+                run_id=run_id,
+                scorer_id="hybrid",
+                scorer_version="hybrid-v1",
+                scorer_snapshot_json={"scorer_id": "hybrid", "version": "hybrid-v1"},
+                scorer_definition_hash="c" * 64,
+                artifact_input_hash="b" * 64,
+                status="completed",
+                quality_verdict="pass",
+                aggregate_scores_json={"groundedness": 4},
+            )
+        )
+        session.add(
+            EvalScorerExecution(
+                id=f"{run_id}-exec",
+                score_set_id=f"{run_id}-score",
+                scorer_id="retrieval-integrity",
+                scorer_version="v1",
+                status="success",
+                input_hash="b" * 64,
+                output_json={"result": True},
+            )
+        )
+        session.commit()
+
+
+def test_summary_eval_only_does_not_count_as_learning_data(client):
+    _seed_eval_rows()
+
+    response = client.get("/api/data/summary", headers=bearer())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["has_learning_data"] is False
+    assert payload["eval"]["runs"] == 1
+    assert payload["eval"]["score_sets"] == 1
+    assert payload["eval"]["scorer_executions"] == 1
+    assert payload["eval"]["estimated_bytes"] > 0
+
+
+def test_learning_reset_preserves_eval_rows_and_reports_empty_deleted_eval(
+    client, monkeypatch
+):
+    enable_reset(monkeypatch)
+    _seed_eval_rows()
+
+    response = client.post(
+        "/api/data/reset",
+        headers=bearer(),
+        json={"scope": "learning", "confirmation": "CLEAR_LEARNING_DATA"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deleted_eval"] == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
+    }
+    summary = client.get("/api/data/summary", headers=bearer()).json()
+    assert summary["eval"]["runs"] == 1
+    assert summary["eval"]["score_sets"] == 1
+    assert summary["eval"]["scorer_executions"] == 1
+
+
+def test_active_eval_lease_rejects_factory_reset_and_keeps_eval_rows(
+    client, app, monkeypatch
+):
+    enable_reset(monkeypatch)
+    _seed_eval_rows()
+
+    with app.state.data_lifecycle_gate.shared_operation():
+        response = client.post(
+            "/api/data/reset",
+            headers=bearer(),
+            json={"scope": "factory", "confirmation": "FACTORY_RESET"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "data_operation_in_progress"
+    summary = client.get("/api/data/summary", headers=bearer()).json()
+    assert summary["eval"]["runs"] == 1
+    assert summary["eval"]["score_sets"] == 1
+    assert summary["eval"]["scorer_executions"] == 1
+
+
+def test_factory_reset_clears_eval_and_returns_pre_reset_deleted_eval(
+    client, monkeypatch
+):
+    enable_reset(monkeypatch)
+    _seed_eval_rows()
+    before = client.get("/api/data/summary", headers=bearer()).json()["eval"]
+
+    response = client.post(
+        "/api/data/reset",
+        headers=bearer(),
+        json={"scope": "factory", "confirmation": "FACTORY_RESET"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deleted_eval"] == before
+    after = client.get("/api/data/summary", headers=bearer()).json()["eval"]
+    assert after == {
+        "runs": 0,
+        "score_sets": 0,
+        "scorer_executions": 0,
+        "estimated_bytes": 0,
+    }
 
 
 def test_reset_accepts_signed_token_when_user_row_does_not_exist(client, monkeypatch):

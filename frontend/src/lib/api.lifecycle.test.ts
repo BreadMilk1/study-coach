@@ -38,10 +38,18 @@ const EMPTY_COUNTS: DataCounts = {
   mistakes: 0,
 }
 
+const EMPTY_EVAL = {
+  runs: 0,
+  score_sets: 0,
+  scorer_executions: 0,
+  estimated_bytes: 0,
+}
+
 const EMPTY_SUMMARY: DataSummaryDto = {
   reset_enabled: false,
   has_learning_data: false,
   current_user_exists: true,
+  eval: EMPTY_EVAL,
   ...EMPTY_COUNTS,
 }
 
@@ -107,7 +115,12 @@ describe('strict lifecycle API', () => {
     ['learning', 'CLEAR_LEARNING_DATA'],
     ['factory', 'FACTORY_RESET'],
   ])('sends the exact %s reset confirmation', async (scope, confirmation) => {
-    const result: ResetResultDto = { scope, status: 'completed', deleted: EMPTY_COUNTS }
+    const result: ResetResultDto = {
+      scope,
+      status: 'completed',
+      deleted: EMPTY_COUNTS,
+      deleted_eval: EMPTY_EVAL,
+    }
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(result))
     vi.stubGlobal('fetch', fetchMock)
 
