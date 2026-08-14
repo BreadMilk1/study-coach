@@ -6,9 +6,6 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base
-
-
 def get_database_url() -> str:
     return os.environ.get("DATABASE_URL", "sqlite:///./study_coach.db")
 
@@ -72,6 +69,21 @@ def session_scope() -> Session:
 
 def get_session() -> Session:
     """FastAPI dependency."""
+    get_engine()
+    s = _SessionLocal()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def get_eval_session() -> Session:
+    """FastAPI dependency for an isolated evaluation session.
+
+    Evaluation claims must never reuse the authentication/learning session:
+    the claim repository starts an explicit SQLite ``BEGIN IMMEDIATE`` on this
+    clean session before it performs any read.
+    """
     get_engine()
     s = _SessionLocal()
     try:
