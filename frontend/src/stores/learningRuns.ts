@@ -74,9 +74,18 @@ export const useLearningRuns = defineStore('learningRuns', {
     },
 
     async start(request: LearningRunRequest, connection: EvalConnectionSnapshot): Promise<void> {
+      const previousController = this.controller
+      const previousRunId = this.activeRunId
       const generation = this.generation + 1
-      const controller = new AbortController()
       this.generation = generation
+      if (previousRunId) {
+        try {
+          await dependencies().cancelRun(previousRunId)
+        } catch { /* still detach the previous local stream */ }
+      }
+      previousController?.abort()
+
+      const controller = new AbortController()
       this.status = 'running'
       this.activeRunId = null
       this.activeScoreSetId = null
@@ -95,17 +104,19 @@ export const useLearningRuns = defineStore('learningRuns', {
           event => this.applyEvent(generation, event),
           controller.signal,
         )
-        if (this.generation === generation && this.status === 'running') {
-          this.status = 'terminal'
-        }
+        this.finishStream(generation, controller)
       } catch (reason) {
-        if (controller.signal.aborted) {
-          if (this.generation === generation && this.status !== 'terminal') {
-            this.status = 'terminal'
-          }
-          return
-        }
-        if (this.generation !== generation) return
+        this.finishStream(generation, controller, reason)
+      }
+    },
+
+    finishStream(generation: number, controller: AbortController, reason?: unknown): void {
+      if (this.generation !== generation) return
+      if (controller.signal.aborted || isAbortError(reason)) {
+        if (this.status !== 'error') this.status = 'terminal'
+        return
+      }
+      if (reason !== undefined) {
         const error = reason instanceof EvalApiError
           ? reason
           : new EvalApiError(0, {
@@ -120,6 +131,17 @@ export const useLearningRuns = defineStore('learningRuns', {
         if (error.code === 'evaluation_busy' && error.active_entity_id && error.active_kind) {
           this.busyTarget = { id: error.active_entity_id, kind: error.active_kind }
         }
+        return
+      }
+      if (this.status === 'running') {
+        this.error = new EvalApiError(0, {
+          code: 'process_interrupted',
+          message: 'The evaluation stream ended without a terminal event.',
+          fields: [],
+          active_entity_id: null,
+          active_kind: null,
+        })
+        this.status = 'error'
       }
     },
 
@@ -141,8 +163,23 @@ export const useLearningRuns = defineStore('learningRuns', {
       const controller = this.controller
       if (!runId && !controller) return
       this.status = 'cancelling'
-      if (runId) await dependencies().cancelRun(runId)
-      controller?.abort()
+      try {
+        if (runId) await dependencies().cancelRun(runId)
+        if (this.status === 'cancelling') this.status = 'terminal'
+      } catch (reason) {
+        this.error = reason instanceof EvalApiError
+          ? reason
+          : new EvalApiError(0, {
+            code: 'evaluation_unavailable',
+            message: reason instanceof Error ? reason.message : 'evaluation cancel failed',
+            fields: [],
+            active_entity_id: null,
+            active_kind: null,
+          })
+        this.status = 'error'
+      } finally {
+        controller?.abort()
+      }
     },
 
     handlePageHide(): void {
@@ -161,4 +198,8 @@ export const useLearningRuns = defineStore('learningRuns', {
 
 export function resetLearningRunDependencies(): void {
   learningRunDependencies = null
+}
+
+function isAbortError(reason: unknown): boolean {
+  return reason instanceof Error && reason.name === 'AbortError'
 }
