@@ -418,8 +418,8 @@ def compare_runs(
             "evaluation_integrity_error",
             "evaluation artifact integrity could not be verified",
         ) from None
-    left_score = left_sets[-1] if left_sets else None
-    right_score = right_sets[-1] if right_sets else None
+    left_score = next((row for row in reversed(left_sets) if row.status == "completed"), None)
+    right_score = next((row for row in reversed(right_sets) if row.status == "completed"), None)
     payload = compare_score_sets(
         {
             "run_id": left_run.id,
@@ -475,6 +475,19 @@ async def stream_rescore(
             variant_id=existing.variant_id,
         )
         service = _service(request, session, registry)
+        prepared = service.prepare_rescore(
+            run_id=run_id,
+            scorer_version=payload.scorer_version,
+            connection=connection,
+        )
+    except EvaluationBusyError as exc:
+        raise _error(
+            409,
+            "evaluation_busy",
+            "another evaluation is already running",
+            active_entity_id=exc.active_entity_id,
+            active_kind=exc.active_kind,
+        ) from None
     except RepositoryNotFoundError:
         raise _error(404, "evaluation_not_found", "evaluation run was not found") from None
     except ChecksumMismatchError:
@@ -484,7 +497,19 @@ async def stream_rescore(
             "evaluation artifact integrity could not be verified",
         ) from None
     except RunRequestError as exc:
-        raise _error(422, exc.code, exc.sanitized_message, fields=exc.fields) from None
+        status = {
+            "evaluation_config_mismatch": 409,
+            "manifest_invalid": 422,
+            "evaluation_busy": 409,
+        }.get(exc.code, 500)
+        raise _error(
+            status,
+            exc.code,
+            exc.sanitized_message,
+            fields=exc.fields,
+            active_entity_id=getattr(exc, "active_entity_id", None),
+            active_kind=getattr(exc, "active_kind", None),
+        ) from None
 
     async def body():
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -494,51 +519,62 @@ async def stream_rescore(
             if adapted is not None:
                 queue.put_nowait(adapted)
 
+        task = asyncio.create_task(service.execute_rescore(prepared, emit))
+        get_event: asyncio.Task[Any] | None = None
         try:
-            score_set = await service.rescore(
-                run_id=run_id,
-                scorer_version=payload.scorer_version,
-                connection=connection,
-                events=emit,
-            )
-            queue.put_nowait(
-                {
-                    "schema_version": "eval-api-v1",
-                    "type": "score_set_finished",
-                    "run_id": run_id,
-                    "score_set_id": score_set.id,
-                    "status": score_set.status,
-                    "quality_verdict": score_set.quality_verdict,
-                }
-            )
-        except RunRequestError as exc:
-            queue.put_nowait(
-                {
-                    "schema_version": "eval-api-v1",
-                    "type": "run_finished",
-                    "run_id": run_id,
-                    "lifecycle": "finished",
-                    "outcome": "system_failed",
-                    "error_code": exc.code,
-                }
-            )
-        except Exception:
-            queue.put_nowait(
-                {
-                    "schema_version": "eval-api-v1",
-                    "type": "run_finished",
-                    "run_id": run_id,
-                    "lifecycle": "finished",
-                    "outcome": "system_failed",
-                    "error_code": "harness_internal_error",
-                }
-            )
-        queue.put_nowait(None)
-        while True:
-            item = await queue.get()
-            if item is None:
+            while True:
+                get_event = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    {get_event, task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if get_event in done:
+                    yield f"data: {json.dumps(get_event.result(), separators=(',', ':'))}\n\n"
+                    get_event = None
+                    continue
+                get_event.cancel()
+                try:
+                    await get_event
+                except BaseException:
+                    pass
+                get_event = None
+                while not queue.empty():
+                    yield f"data: {json.dumps(queue.get_nowait(), separators=(',', ':'))}\n\n"
+                if task.cancelled():
+                    return
+                exc = task.exception() if task.done() else None
+                if exc is not None and not isinstance(exc, asyncio.CancelledError):
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "schema_version": "eval-api-v1",
+                                "type": "score_set_finished",
+                                "run_id": run_id,
+                                "score_set_id": prepared.score_set.id,
+                                "status": "failed",
+                                "quality_verdict": "inconclusive",
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n\n"
+                    )
                 break
-            yield f"data: {json.dumps(item)}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            prepared.cancellation.cancel()
+            if not task.done():
+                task.cancel()
+            raise
+        finally:
+            if get_event is not None and not get_event.done():
+                get_event.cancel()
+            if not task.done():
+                prepared.cancellation.cancel()
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
 
     return StreamingResponse(body(), media_type="text/event-stream")
 

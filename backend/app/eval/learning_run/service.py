@@ -145,6 +145,19 @@ class PreparedRun:
     cancellation: CancellationToken = field(default_factory=CancellationToken, compare=False)
 
 
+@dataclass(frozen=True)
+class PreparedRescore:
+    """Claimed historical ScoreSet ready for attached scoring."""
+
+    run: Any
+    score_set: Any
+    artifact: CandidateArtifact
+    bundle: Any
+    task: Any
+    connection: EvalModelConnection
+    cancellation: CancellationToken = field(default_factory=CancellationToken, compare=False)
+
+
 _TIMEOUT = object()
 _CANCEL_HANDOFF_TIMEOUT = 0.05
 
@@ -994,15 +1007,14 @@ class RunService:
         )
         return await self.execute_prepared(prepared, events)
 
-    async def rescore(
+    def prepare_rescore(
         self,
         *,
         run_id: str,
         scorer_version: str,
         connection: EvalModelConnection,
-        events: Any = None,
-    ) -> Any:
-        """Score a frozen CandidateArtifact again without calling Tutor."""
+    ) -> PreparedRescore:
+        """Claim a historical ScoreSet before the attached stream starts."""
 
         try:
             run = self.runs.get_verified(run_id)
@@ -1019,7 +1031,13 @@ class RunService:
         try:
             bundle = self.registry.scorer_for(scorer_version)
             document = self.registry.scorer_document(scorer_version)
-            task = self.registry.task_cases[run.task_case_id]
+            task_snapshot = (run.manifest_json or {}).get("task_snapshot")
+            if isinstance(task_snapshot, Mapping) and task_snapshot:
+                from .contracts import TaskCase
+
+                task = TaskCase.from_dict(task_snapshot)
+            else:
+                task = self.registry.task_cases[run.task_case_id]
         except Exception as exc:
             raise RunRequestError("manifest_invalid", "scorer version is not in the registry") from exc
 
@@ -1045,23 +1063,58 @@ class RunService:
             )
 
         claim = self.claim_repository or EvalExecutionClaimRepository(self.runs.session)
-        try:
-            score_set = claim.claim_score_set(
-                run_id=run.id,
-                artifact_input_hash=run.artifact_hash,
-                scorer_bundle=bundle,
-                scorer_snapshot=document,
-                scorer_definition_hash=bundle.definition_hash,
-            )
-        except EvaluationBusyError as exc:
-            raise RunRequestError(
-                "evaluation_busy",
-                "another evaluation is already running",
-            ) from exc
+        score_set = claim.claim_score_set(
+            run_id=run.id,
+            artifact_input_hash=run.artifact_hash,
+            scorer_bundle=bundle,
+            scorer_snapshot=document,
+            scorer_definition_hash=bundle.definition_hash,
+        )
+        return PreparedRescore(
+            run=run,
+            score_set=score_set,
+            artifact=artifact,
+            bundle=bundle,
+            task=task,
+            connection=connection,
+        )
 
+    async def execute_rescore(self, prepared: PreparedRescore, events: Any = None) -> Any:
+        """Score a claimed historical ScoreSet and emit stream events."""
+
+        score_set = prepared.score_set
         _event(events, {"type": "score_set_created", "score_set_id": score_set.id})
+        try:
+            return await self._execute_rescore_inner(prepared, events)
+        except asyncio.CancelledError:
+            prepared.cancellation.cancel()
+            try:
+                self.score_sets.cancel_once(score_set.id)
+            except Exception:
+                pass
+            raise
+        except Exception:
+            try:
+                self.score_sets.finalize_once(
+                    score_set.id,
+                    status="failed",
+                    quality_verdict="inconclusive",
+                    error_code="harness_internal_error",
+                    sanitized_message="historical rescore failed",
+                )
+            except Exception:
+                pass
+            raise
+
+    async def _execute_rescore_inner(self, prepared: PreparedRescore, events: Any) -> Any:
+
+        score_set = prepared.score_set
+        if prepared.cancellation.cancelled:
+            return self.score_sets.cancel_once(score_set.id)
 
         def on_execution(draft: ScorerExecutionDraft) -> None:
+            if prepared.cancellation.cancelled:
+                raise _CooperativeCancellation()
             self.scorer_executions.append_draft(score_set.id, draft)
             _event(
                 events,
@@ -1076,16 +1129,23 @@ class RunService:
 
         hybrid_limit = float(self.registry.experiment.budget["hybrid_scoring_seconds"])
         scoring = (
-            self.scoring_service_factory(connection.scorer_llm, timeout_seconds=hybrid_limit)
+            self.scoring_service_factory(
+                prepared.connection.scorer_llm, timeout_seconds=hybrid_limit
+            )
             if self.scoring_service_factory is not None
-            else ScoringService(connection.scorer_llm, timeout_seconds=hybrid_limit)
+            else ScoringService(
+                prepared.connection.scorer_llm, timeout_seconds=hybrid_limit
+            )
         )
-        score_result = await scoring.score(
-            task=task,
-            candidate=artifact,
-            scorer_bundle=bundle,
-            on_execution=on_execution,
-        )
+        try:
+            score_result = await scoring.score(
+                task=prepared.task,
+                candidate=prepared.artifact,
+                scorer_bundle=prepared.bundle,
+                on_execution=on_execution,
+            )
+        except _CooperativeCancellation:
+            return self.score_sets.cancel_once(score_set.id)
         score_set = self.score_sets.finalize_once(
             score_set.id,
             status=score_result.status,
@@ -1106,10 +1166,26 @@ class RunService:
         )
         return score_set
 
+    async def rescore(
+        self,
+        *,
+        run_id: str,
+        scorer_version: str,
+        connection: EvalModelConnection,
+        events: Any = None,
+    ) -> Any:
+        prepared = self.prepare_rescore(
+            run_id=run_id,
+            scorer_version=scorer_version,
+            connection=connection,
+        )
+        return await self.execute_rescore(prepared, events)
+
 
 __all__ = [
     "Clock",
     "EvalModelConnection",
+    "PreparedRescore",
     "PreparedRun",
     "RunRequestError",
     "RunService",

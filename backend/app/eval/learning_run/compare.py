@@ -11,6 +11,24 @@ _ALIGN_FIELDS = (
     "corpus_snapshot_hash",
 )
 _DECLARED_AXES_DEFAULT = ("prompt_version",)
+_AXIS_DEPENDENT = {
+    "prompt_version": frozenset(
+        {"prompt_version", "prompt_text", "prompt_hash", "variant_id"}
+    ),
+}
+_BOOKKEEPING_FIELDS = frozenset(
+    {
+        "experiment_id",
+        "task_snapshot",
+        "connection_fingerprint",
+        "manifest_hash",
+        "runner_version",
+        "code_revision",
+        "seed",
+        "corpus_snapshot",
+        "scorer_snapshot",
+    }
+)
 
 
 def _manifest(side: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -36,7 +54,10 @@ def _undeclared_diffs(
     *,
     axes: tuple[str, ...],
 ) -> tuple[str, ...]:
-    ignored = set(_ALIGN_FIELDS) | set(axes) | {
+    axis_fields: set[str] = set()
+    for axis in axes:
+        axis_fields |= set(_AXIS_DEPENDENT.get(axis, {axis}))
+    ignored = set(_ALIGN_FIELDS) | axis_fields | _BOOKKEEPING_FIELDS | {
         "variant_id",
         "experiment_axes",
         "schema_version",

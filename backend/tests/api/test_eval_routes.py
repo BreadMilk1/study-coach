@@ -121,6 +121,24 @@ class _FakeEvalService:
             )
         return _FakePrepared()
 
+    def prepare_rescore(self, **_kwargs):
+        self.prepare_calls += 1
+        return SimpleNamespace(
+            score_set=SimpleNamespace(id="fake-score-set-001"),
+            cancellation=SimpleNamespace(cancel=lambda: None),
+        )
+
+    async def execute_rescore(self, prepared, events):
+        self.execute_calls += 1
+        events({"type": "score_set_created", "score_set_id": prepared.score_set.id})
+        events({
+            "type": "score_set_finished",
+            "score_set_id": prepared.score_set.id,
+            "status": "completed",
+            "quality_verdict": "pass",
+        })
+        return prepared.score_set
+
     async def execute_prepared(self, prepared, events):
         self.execute_calls += 1
         score_set_id = "fake-score-set-001"
@@ -164,6 +182,12 @@ class _BusyEvalService(_FakeEvalService):
 
         self.prepare_calls += 1
         raise EvaluationBusyError("active-run-001", "run")
+
+    def prepare_rescore(self, **_kwargs):
+        from app.eval.learning_run.repositories import EvaluationBusyError
+
+        self.prepare_calls += 1
+        raise EvaluationBusyError("active-score-set-001", "score_set")
 
 
 class _FailingEvalService(_FakeEvalService):
@@ -704,6 +728,38 @@ def test_eval_get_lists_and_detail_are_read_only_and_checksum_verified(eval_clie
     missing = client.get("/api/eval/runs/not-found", headers=headers)
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "evaluation_not_found"
+
+
+def test_rescore_busy_is_http_409_before_stream(eval_client):
+    client, headers, application, _, _ = eval_client
+    run_id = _seed_historical_run()
+    busy = _BusyEvalService()
+    application.state.eval_service_factory = lambda **_kwargs: busy
+    response = client.post(
+        f"/api/eval/runs/{run_id}/rescore/stream",
+        headers={**headers, "x-provider": "ollama", "x-model": "llama3.2"},
+        json={"scorer_version": "hybrid-v2", "run_profile": "evaluation"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "evaluation_busy"
+    assert response.json()["detail"]["active_kind"] == "score_set"
+    assert busy.execute_calls == 0
+
+
+def test_rescore_stream_emits_score_set_id_before_finished(eval_client):
+    client, headers, application, fake_service, _ = eval_client
+    run_id = _seed_historical_run()
+    application.state.eval_service_factory = lambda **_kwargs: fake_service
+    response = client.post(
+        f"/api/eval/runs/{run_id}/rescore/stream",
+        headers={**headers, "x-provider": "ollama", "x-model": "llama3.2"},
+        json={"scorer_version": "hybrid-v2", "run_profile": "evaluation"},
+    )
+    assert response.status_code == 200
+    events = _read_sse(response)
+    assert events[0]["type"] == "score_set_created"
+    assert events[0]["score_set_id"]
+    assert any(event["type"] == "score_set_finished" for event in events)
 
 
 def test_busy_is_returned_before_streaming_response_and_never_executes(eval_client):
