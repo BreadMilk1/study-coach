@@ -208,6 +208,31 @@ def test_chat_via_graph_tutor_path_emits_citations_then_tokens_then_done(
     assert stub_llm.invoked is True
 
 
+def test_chat_hides_engine_phase_and_budget_events_but_keeps_tutor_trace(client):
+    with client.stream("POST", "/api/chat",
+                       json={"message": "What is HyDE?"},
+                       headers=_HEADERS) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    types = [event["type"] for event in events]
+    citation_idx = types.index("citations")
+    token_idx = types.index("token")
+    done_idx = types.index("done")
+    assert citation_idx < token_idx < done_idx
+    assert not any(event["type"] == "budget" for event in events)
+    assert not any(
+        event["type"] == "trace"
+        and event.get("step") in {"retrieval", "generation"}
+        for event in events
+    )
+    assert {
+        "type": "trace",
+        "step": "tutor",
+        "citations_count": 1,
+    } in events
+
+
 def test_chat_persists_current_session_messages_and_citations(client):
     with client.stream("POST", "/api/chat",
                        json={"message": "What is HyDE?"},

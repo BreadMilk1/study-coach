@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -113,6 +114,130 @@ def test_alembic_upgrade_head_creates_plan_milestone_progression_tables(tmp_path
         "reason",
         "created_at",
     } <= event_cols
+
+
+def test_alembic_upgrade_head_creates_only_bounded_learning_run_eval_tables(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'learning_run_eval.db'}"
+    cfg = _alembic_config(db_url)
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(db_url)
+    tables = set(inspect(engine).get_table_names())
+    assert {"eval_runs", "eval_score_sets", "eval_scorer_executions"} <= tables
+    assert "eval_suite_executions" not in tables
+
+
+def test_learning_run_eval_migration_downgrade_and_reupgrade_preserves_single_head(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'learning_run_round_trip.db'}"
+    cfg = _alembic_config(db_url)
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(db_url)
+    assert set(inspect(engine).get_table_names()) >= {
+        "eval_runs",
+        "eval_score_sets",
+        "eval_scorer_executions",
+    }
+
+    command.downgrade(cfg, "7a52fe598fd1")
+    downgraded_tables = set(inspect(engine).get_table_names())
+    assert not {
+        "eval_runs",
+        "eval_score_sets",
+        "eval_scorer_executions",
+    } & downgraded_tables
+
+    command.upgrade(cfg, "head")
+    upgraded_tables = set(inspect(engine).get_table_names())
+    assert {"eval_runs", "eval_score_sets", "eval_scorer_executions"} <= upgraded_tables
+
+
+def test_learning_run_eval_schema_has_foreign_keys_checks_and_unique_scorer_identity(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'learning_run_schema.db'}"
+    cfg = _alembic_config(db_url)
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(db_url)
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    assert {"eval_runs", "eval_score_sets", "eval_scorer_executions"} <= tables
+    run_columns = {column["name"] for column in inspector.get_columns("eval_runs")}
+    score_columns = {column["name"] for column in inspector.get_columns("eval_score_sets")}
+    execution_columns = {
+        column["name"] for column in inspector.get_columns("eval_scorer_executions")
+    }
+    assert "user_id" not in run_columns | score_columns | execution_columns
+    assert {"id", "run_id", "scorer_id", "scorer_version", "artifact_input_hash"} <= score_columns
+    assert {"id", "score_set_id", "scorer_id", "scorer_version", "input_hash"} <= execution_columns
+
+    score_fks = inspector.get_foreign_keys("eval_score_sets")
+    execution_fks = inspector.get_foreign_keys("eval_scorer_executions")
+    assert {fk["referred_table"] for fk in score_fks} == {"eval_runs"}
+    assert {fk["referred_table"] for fk in execution_fks} == {"eval_score_sets"}
+
+    unique_constraints = inspector.get_unique_constraints("eval_scorer_executions")
+    assert any(
+        set(constraint["column_names"])
+        == {"score_set_id", "scorer_id", "scorer_version"}
+        for constraint in unique_constraints
+    )
+    assert inspector.get_check_constraints("eval_runs")
+    assert inspector.get_check_constraints("eval_score_sets")
+    assert inspector.get_check_constraints("eval_scorer_executions")
+
+
+def test_migrated_eval_foreign_keys_require_child_first_deletion(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'learning_run_fk.db'}"
+    cfg = _alembic_config(db_url)
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(db_url)
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    with engine.begin() as conn:
+        assert conn.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
+        conn.execute(
+            text(
+                "INSERT INTO eval_runs "
+                "(id, experiment_id, task_case_id, task_case_version, variant_id, "
+                "run_profile, lifecycle, manifest_json, manifest_hash) "
+                "VALUES ('fk-run', 'experiment', 'case', '1', 'tutor-v2', "
+                "'evaluation', 'queued', '{\"manifest\": true}', 'manifest-hash')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO eval_score_sets "
+                "(id, run_id, scorer_id, scorer_version, artifact_input_hash, "
+                "status, quality_verdict) VALUES "
+                "('fk-score-set', 'fk-run', 'hybrid', 'v1', 'artifact-hash', "
+                "'pending', 'not_evaluated')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO eval_scorer_executions "
+                "(id, score_set_id, scorer_id, scorer_version, status, input_hash) "
+                "VALUES ('fk-execution', 'fk-score-set', 'citations', 'v1', "
+                "'skipped', 'artifact-hash')"
+            )
+        )
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM eval_runs WHERE id = 'fk-run'"))
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM eval_scorer_executions WHERE id = 'fk-execution'")
+        )
+        conn.execute(text("DELETE FROM eval_score_sets WHERE id = 'fk-score-set'"))
+        conn.execute(text("DELETE FROM eval_runs WHERE id = 'fk-run'"))
+        assert conn.execute(text("PRAGMA foreign_key_check")).all() == []
 
 
 def test_alembic_plan_milestone_backfill_skips_malformed_rows_and_preserves_plan_json(tmp_path):

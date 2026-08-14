@@ -1,3 +1,4 @@
+import os
 from typing import Annotated, Literal
 
 from fastapi import Depends, Header, HTTPException, Request
@@ -12,7 +13,7 @@ from app.db.repositories import (
     TopicRepository,
     UserRepository,
 )
-from app.db.session import get_session
+from app.db.session import get_session, get_eval_session as _get_eval_session
 from app.llm.provider import LLMConfig, parse_llm_config
 
 
@@ -43,6 +44,23 @@ async def require_existing_user(
     if UserRepository(session).get_by_id(user_id) is None:
         raise HTTPException(401, detail="user no longer exists") from None
     return user_id
+
+
+async def require_local_eval_mode() -> None:
+    """Allow evaluation routes only on an explicitly local instance."""
+    if os.environ.get("STUDY_COACH_LOCAL_MODE") != "1":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "evaluation_disabled",
+                "message": "local evaluation mode is disabled",
+            },
+        )
+
+
+def get_eval_session():
+    """Dependency alias kept under the API dependency boundary."""
+    yield from _get_eval_session()
 
 
 def get_user_id(
