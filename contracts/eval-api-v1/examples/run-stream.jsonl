@@ -1,0 +1,7 @@
+{"schema_version":"eval-api-v1","type":"run_created","run_id":"run-example-001"}
+{"schema_version":"eval-api-v1","type":"stage_started","run_id":"run-example-001","stage":"tutor"}
+{"schema_version":"eval-api-v1","type":"stage_completed","run_id":"run-example-001","stage":"tutor"}
+{"schema_version":"eval-api-v1","type":"score_set_created","run_id":"run-example-001","score_set_id":"score-set-example-001"}
+{"schema_version":"eval-api-v1","type":"scorer_completed","run_id":"run-example-001","score_set_id":"score-set-example-001","scorer_id":"retrieval-integrity","status":"success"}
+{"schema_version":"eval-api-v1","type":"score_set_finished","run_id":"run-example-001","score_set_id":"score-set-example-001","status":"completed","quality_verdict":"pass"}
+{"schema_version":"eval-api-v1","type":"run_finished","run_id":"run-example-001","lifecycle":"finished","outcome":"success"}

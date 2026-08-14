@@ -1,0 +1,9 @@
+{
+  "compatibility": "controlled",
+  "reasons": [],
+  "left": {"run_id": "run-left", "variant_id": "tutor-v2"},
+  "right": {"run_id": "run-right", "variant_id": "tutor-v3"},
+  "scorer_bundle": {"scorer_id": "hybrid-v1", "version": "v1"},
+  "delta": null,
+  "scope": "case"
+}
