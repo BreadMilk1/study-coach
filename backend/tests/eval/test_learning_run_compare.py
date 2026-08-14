@@ -55,6 +55,38 @@ def test_controlled_compare_allows_prompt_axis_case_delta_only():
     assert "quality" not in result["caption"]
 
 
+def test_full_run_manifest_prompt_axis_stays_controlled():
+    left = _side(run_id="left", variant_id="tutor-v2", prompt_version="tutor-v2")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", score=1)
+    left["manifest"].update(
+        {
+            "prompt_text": "tutor v2 prompt",
+            "prompt_hash": "a" * 64,
+            "provider": "ollama",
+            "model": "llama3.2",
+            "connection_fingerprint": "b" * 64,
+            "manifest_hash": "c" * 64,
+            "code_revision": "left",
+        }
+    )
+    right["manifest"].update(
+        {
+            "prompt_text": "tutor v3 prompt",
+            "prompt_hash": "d" * 64,
+            "provider": "ollama",
+            "model": "llama3.2",
+            "connection_fingerprint": "e" * 64,
+            "manifest_hash": "f" * 64,
+            "code_revision": "right",
+        }
+    )
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["delta"]["groundedness"]["delta"] == -3
+
+
 def test_informational_compare_when_undeclared_config_differs():
     left = _side(run_id="left")
     right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
