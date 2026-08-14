@@ -1624,6 +1624,16 @@ class EvalSuiteImportRepository:
         run_ids = [item[0].id for item in parsed]
         if len(run_ids) != len(set(run_ids)):
             raise ChecksumMismatchError("suite import contains duplicate run ids")
+        pairs = [(item[0].task_case_id, item[0].variant_id) for item in parsed]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("suite import contains duplicate case/variant pairs")
+        expected = {
+            (case_id, variant_id)
+            for case_id in self.registry.task_cases
+            for variant_id in self.registry.experiment.variants
+        }
+        if set(pairs) != expected:
+            raise ValueError("suite import does not cover the registry case/variant matrix")
         try:
             for run, score_sets, executions in parsed:
                 self.session.add(run)
@@ -1654,6 +1664,10 @@ class EvalSuiteImportRepository:
             raise ValueError(f"unknown experiment in import record {index}")
         if task_case_id not in self.registry.task_cases:
             raise ValueError(f"unknown task case in import record {index}")
+        expected_case_version = str(self.registry.task_cases[task_case_id].task_case_version)
+        actual_case_version = str(raw_run.get("task_case_version") or "")
+        if actual_case_version != expected_case_version:
+            raise ValueError(f"task case version mismatch in import record {index}")
         if variant_id not in self.registry.experiment.variants:
             raise ValueError(f"unknown variant in import record {index}")
         manifest = raw_run.get("manifest") or raw_run.get("manifest_json")
@@ -1669,6 +1683,8 @@ class EvalSuiteImportRepository:
                 raise ValueError(f"import record {index} artifact is invalid")
             if canonical_hash(artifact) != str(artifact_hash or ""):
                 raise ChecksumMismatchError(f"import record {index} artifact hash mismatch")
+        elif artifact_hash:
+            raise ChecksumMismatchError(f"import record {index} artifact hash mismatch")
         run = EvalRun(
             id=str(raw_run.get("id") or _new_id("run")),
             experiment_id=experiment_id,
@@ -1696,9 +1712,14 @@ class EvalSuiteImportRepository:
             if hash_without_field(snapshot, "definition_hash") != definition_hash:
                 raise ChecksumMismatchError(f"import record {index} score set hash mismatch")
             version = str(raw_score.get("scorer_version") or "")
-            if version not in getattr(self.registry, "scorers", {self.registry.scorer.version: self.registry.scorer}):
-                if version != self.registry.scorer.version:
-                    raise ValueError(f"unknown scorer version in import record {index}")
+            known_scorers = getattr(self.registry, "scorers", {self.registry.scorer.version: self.registry.scorer})
+            if version not in known_scorers:
+                raise ValueError(f"unknown scorer version in import record {index}")
+            artifact_input_hash = str(raw_score.get("artifact_input_hash") or "")
+            if run.artifact_hash and artifact_input_hash != run.artifact_hash:
+                raise ChecksumMismatchError(
+                    f"import record {index} score set artifact input hash mismatch"
+                )
             score_sets.append(
                 EvalScoreSet(
                     id=str(raw_score.get("id") or _new_id("score-set")),

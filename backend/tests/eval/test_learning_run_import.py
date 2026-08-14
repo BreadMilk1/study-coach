@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-import json
+import importlib.util
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, inspect, select
 from sqlalchemy.orm import Session
 
 from app.db.models import Base, EvalRun, EvalScoreSet
-from app.eval.learning_run.contracts import canonical_hash, hash_without_field
+from app.eval.learning_run.contracts import canonical_hash
 from app.eval.learning_run.registry import TaskRegistry
 from app.eval.learning_run.repositories import (
     ChecksumMismatchError,
     EvalSuiteImportRepository,
 )
+
+
+def _load_import_script():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "import_learning_run_suite.py"
+    spec = importlib.util.spec_from_file_location("import_learning_run_suite", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 REGISTRY = TaskRegistry.load_default()
@@ -34,25 +43,40 @@ def session():
         yield db_session
 
 
-def _record(run_id: str = "import-run-1", *, artifact: str = "answer", hash_suffix: str = "") -> dict:
-    snapshot = dict(REGISTRY.scorer_document("hybrid-v1"))
+def _record(
+    run_id: str,
+    *,
+    case_id: str = "tgqa-001",
+    variant_id: str = "tutor-v2",
+    scorer_version: str = "hybrid-v1",
+    artifact: str = "answer",
+) -> dict:
+    snapshot = dict(REGISTRY.scorer_document(scorer_version))
     definition_hash = snapshot["definition_hash"]
-    artifact_payload = {"answer": artifact, "citations": [], "exact_evidence": [], "formatted_context": "", "usage": "unavailable", "trace": [], "budget": {}}
+    artifact_payload = {
+        "answer": artifact,
+        "citations": [],
+        "exact_evidence": [],
+        "formatted_context": "",
+        "usage": "unavailable",
+        "trace": [],
+        "budget": {},
+    }
+    artifact_hash = canonical_hash(artifact_payload)
+    case = REGISTRY.task_cases[case_id]
     manifest = {
         "experiment_id": REGISTRY.experiment.experiment_id,
-        "task_case_id": "tgqa-001",
-        "variant_id": "tutor-v2",
-        "prompt_version": "tutor-v2",
+        "task_case_id": case_id,
+        "variant_id": variant_id,
+        "prompt_version": variant_id,
     }
-    if hash_suffix:
-        manifest["tamper"] = hash_suffix
     return {
         "run": {
             "id": run_id,
             "experiment_id": REGISTRY.experiment.experiment_id,
-            "task_case_id": "tgqa-001",
-            "task_case_version": REGISTRY.task_cases["tgqa-001"].task_case_version,
-            "variant_id": "tutor-v2",
+            "task_case_id": case_id,
+            "task_case_version": case.task_case_version,
+            "variant_id": variant_id,
             "run_profile": "evaluation",
             "lifecycle": "finished",
             "outcome": "success",
@@ -60,16 +84,16 @@ def _record(run_id: str = "import-run-1", *, artifact: str = "answer", hash_suff
             "manifest": manifest,
             "manifest_hash": canonical_hash(manifest),
             "candidate_artifact": artifact_payload,
-            "artifact_hash": canonical_hash(artifact_payload),
+            "artifact_hash": artifact_hash,
         },
         "score_sets": [
             {
                 "id": f"score-{run_id}",
                 "scorer_id": "hybrid",
-                "scorer_version": "hybrid-v1",
+                "scorer_version": scorer_version,
                 "scorer_snapshot": snapshot,
                 "scorer_definition_hash": definition_hash,
-                "artifact_input_hash": canonical_hash(artifact_payload),
+                "artifact_input_hash": artifact_hash,
                 "status": "completed",
                 "quality_verdict": "pass",
             }
@@ -78,42 +102,64 @@ def _record(run_id: str = "import-run-1", *, artifact: str = "answer", hash_suff
     }
 
 
-def test_valid_fixture_imports_atomically(session):
-    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(
-        [_record("import-a"), _record("import-b")]
-    )
-    assert imported == 2
-    assert session.scalar(select(func.count()).select_from(EvalRun)) == 2
-    assert session.scalar(select(func.count()).select_from(EvalScoreSet)) == 2
+def _complete_suite() -> list[dict]:
+    return [
+        _record(f"{case_id}-{variant_id}", case_id=case_id, variant_id=variant_id)
+        for case_id in REGISTRY.task_cases
+        for variant_id in REGISTRY.experiment.variants
+    ]
 
 
-@pytest.mark.parametrize("kind", ["missing", "duplicate", "unknown", "hash"])
+def test_valid_complete_suite_imports_atomically(session):
+    records = _complete_suite()
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    expected = len(REGISTRY.task_cases) * len(REGISTRY.experiment.variants)
+    assert imported == expected
+    assert session.scalar(select(func.count()).select_from(EvalRun)) == expected
+    assert session.scalar(select(func.count()).select_from(EvalScoreSet)) == expected
+
+
+@pytest.mark.parametrize("kind", ["missing", "duplicate", "unknown_case", "unknown_scorer", "hash", "incomplete", "artifact_align", "case_version"])
 def test_invalid_import_writes_zero_rows(session, kind):
-    good = _record("good-run")
+    records = _complete_suite()
     if kind == "missing":
-        bad = {"score_sets": []}
+        records[0] = {"score_sets": []}
     elif kind == "duplicate":
-        bad = _record("good-run")
-    elif kind == "unknown":
-        bad = _record("bad-run")
-        bad["run"]["task_case_id"] = "missing-case"
+        records.append(_record("dup", case_id="tgqa-001", variant_id="tutor-v2"))
+    elif kind == "unknown_case":
+        records[0]["run"]["task_case_id"] = "missing-case"
+    elif kind == "unknown_scorer":
+        records[0]["score_sets"][0]["scorer_version"] = "hybrid-v9"
+    elif kind == "hash":
+        records[0]["run"]["manifest_hash"] = "0" * 64
+    elif kind == "incomplete":
+        records = records[:-1]
+    elif kind == "artifact_align":
+        records[0]["score_sets"][0]["artifact_input_hash"] = "1" * 64
     else:
-        bad = _record("bad-run")
-        bad["run"]["manifest_hash"] = "0" * 64
+        records[0]["run"]["task_case_version"] = "not-the-registry-version"
     repo = EvalSuiteImportRepository(session, registry=REGISTRY)
     with pytest.raises((ValueError, ChecksumMismatchError)):
-        repo.import_records([good, bad])
+        repo.import_records(records)
     assert session.scalar(select(func.count()).select_from(EvalRun)) == 0
     assert session.scalar(select(func.count()).select_from(EvalScoreSet)) == 0
 
 
 def test_suite_execution_id_groups_without_new_table(session):
-    EvalSuiteImportRepository(session, registry=REGISTRY).import_records(
-        [_record("one"), _record("two")]
-    )
-    ids = session.scalars(select(EvalRun.suite_execution_id)).all()
-    assert ids == ["suite-demo", "suite-demo"]
-    assert "eval_suite_executions" not in session.bind.dialect.default_schema_name or True
-    from sqlalchemy import inspect
-
+    EvalSuiteImportRepository(session, registry=REGISTRY).import_records(_complete_suite())
+    ids = set(session.scalars(select(EvalRun.suite_execution_id)).all())
+    assert ids == {"suite-demo"}
     assert "eval_suite_executions" not in inspect(session.bind).get_table_names()
+
+
+def test_parse_jsonl_rejects_malformed_lines(tmp_path: Path):
+    path = tmp_path / "suite.jsonl"
+    path.write_text("{}\nnot-json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid JSONL"):
+        _load_import_script().parse_jsonl(path)
+
+
+def test_parse_jsonl_skips_blank_lines(tmp_path: Path):
+    path = tmp_path / "suite.jsonl"
+    path.write_text('\n{"run": {"id": "a"}}\n\n', encoding="utf-8")
+    assert _load_import_script().parse_jsonl(path) == [{"run": {"id": "a"}}]

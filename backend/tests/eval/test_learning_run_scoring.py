@@ -1253,3 +1253,34 @@ async def test_five_calibration_anchors_match_manual_labels_with_frozen_llm_outp
             on_execution=lambda _: None,
         )
         assert result.verdict == candidate.manual_expected_verdict
+
+
+@pytest.mark.asyncio
+async def test_hybrid_v2_calibration_anchors_match_versioned_labels():
+    ScoringService, _, _, _ = _scoring_api()
+    v2 = REGISTRY.scorer_for("hybrid-v2")
+    labels = {
+        item["id"]: item["manual_expected_verdict"]
+        for item in json.loads(
+            (
+                REGISTRY.definitions_path / "calibration" / "hybrid-v2-labels.json"
+            ).read_text(encoding="utf-8")
+        )["labels"]
+    }
+    outputs = {
+        "cal-001": {"groundedness": 4, "citation_entailment": 4, "coverage": 4},
+        "cal-002": {"groundedness": 2, "citation_entailment": 2, "coverage": 2},
+        "cal-003": {"groundedness": 4, "citation_entailment": 4, "coverage": 3},
+        "cal-004": {"refusal_appropriateness": 5, "unsupported_claims": 5},
+        "cal-005": {"groundedness": 1, "citation_entailment": 1, "coverage": 1},
+    }
+    for candidate in REGISTRY.calibration_candidates:
+        payload = dict(outputs[candidate.candidate_id])
+        payload.update({"reasoning": "frozen hybrid-v2 calibration", "findings": []})
+        result = await ScoringService(FakeLLM(_response(payload))).score(
+            task=_task_for_calibration(candidate),
+            candidate=candidate.artifact,
+            scorer_bundle=v2,
+            on_execution=lambda _: None,
+        )
+        assert result.verdict == labels[candidate.candidate_id]
