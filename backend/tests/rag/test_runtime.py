@@ -307,7 +307,7 @@ def test_default_retriever_builder_hydrates_bm25_from_existing_collection(
     monkeypatch.setattr(runtime_module, "FastembedReranker", lambda: "reranker")
     monkeypatch.setattr(runtime_module, "RerankingRetriever", FakeReranking)
 
-    runtime_module._build_retriever(
+    runtime_module.build_retriever_for_collection(
         collection,
         embed_model="test-model",
         embed_host="http://ollama.test",
@@ -340,7 +340,7 @@ def test_build_default_runtime_uses_configured_chroma_path_and_fixed_collection(
     monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("OLLAMA_HOST", "http://ollama.test")
     monkeypatch.setattr(runtime_module.chromadb, "PersistentClient", persistent_client)
-    monkeypatch.setattr(runtime_module, "_build_retriever", build_retriever)
+    monkeypatch.setattr(runtime_module, "build_retriever_for_collection", build_retriever)
 
     runtime = runtime_module.build_default_runtime()
 

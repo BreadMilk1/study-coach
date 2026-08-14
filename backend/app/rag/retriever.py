@@ -5,6 +5,7 @@ class Retriever:
     def __init__(self, collection, embedder: Embedder):
         self.collection = collection
         self.embedder = embedder
+        self._closed = False
 
     def add_chunks(self, chunks: list[dict]) -> None:
         if not chunks:
@@ -48,3 +49,14 @@ class Retriever:
             }
             for i in range(len(ids))
         ]
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self.embedder, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass

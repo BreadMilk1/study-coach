@@ -1,6 +1,7 @@
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from app.agent.graph import build_graph
+from app.agent.tutor_attempt import TutorAttemptEngine
 
 
 class StubLLM:
@@ -25,6 +26,19 @@ class StubRetriever:
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         self.last_query = query
         return self.chunks[:top_k]
+
+
+class RecordingTutorAttemptEngine:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.delegate = TutorAttemptEngine()
+
+    async def answer(self, **kwargs):
+        self.calls.append({
+            "question": kwargs["question"],
+            "attempt_config": kwargs["attempt_config"],
+        })
+        return await self.delegate.answer(**kwargs)
 
 
 async def test_graph_retrieves_then_answers_using_retriever_chunks():
@@ -183,3 +197,39 @@ async def test_graph_routes_tutor_query_through_retrieve_and_answer():
     ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
     assert ai_msgs and ai_msgs[-1].content == "HyDE is a technique."
     assert result.get("citations") and len(result["citations"]) == 1
+
+
+async def test_graph_tutor_adapter_maps_one_attempt_candidate_without_changing_state_contract():
+    chunks = [
+        {"chunk_id": "a:1:0", "content": "HyDE rewrites queries.",
+         "source": "a.pdf", "page": 1, "score": 0.9},
+    ]
+    retriever = StubRetriever(chunks)
+    llm = StubLLM("HyDE is a technique.")
+    attempt_engine = RecordingTutorAttemptEngine()
+    graph = build_graph(
+        retriever=retriever,
+        llm=llm,
+        tutor_attempt_engine=attempt_engine,
+    )
+
+    result = await graph.ainvoke({"messages": [HumanMessage(content="What is HyDE?")]})
+
+    assert len(attempt_engine.calls) == 1
+    assert attempt_engine.calls[0]["question"] == "What is HyDE?"
+    assert attempt_engine.calls[0]["attempt_config"].top_k == 5
+    assert attempt_engine.calls[0]["attempt_config"].retrieval_seconds is None
+    assert attempt_engine.calls[0]["attempt_config"].generation_seconds is None
+    assert result["messages"][-1].content == "HyDE is a technique."
+    assert result["citations"] == [
+        {
+            "chunk_id": "a:1:0",
+            "source": "a.pdf",
+            "page": 1,
+            "span_start": 0,
+            "span_end": len(chunks[0]["content"]),
+        }
+    ]
+    assert result["last_context"] == (
+        "[1] a.pdf p.1: HyDE rewrites queries."
+    )

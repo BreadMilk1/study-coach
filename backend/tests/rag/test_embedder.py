@@ -23,3 +23,33 @@ def test_ollama_embedder_ignores_process_proxy_settings(monkeypatch):
         "host": "http://127.0.0.1:11434",
         "trust_env": False,
     }
+
+
+def test_ollama_embedder_close_is_idempotent_and_does_not_initialize_client(monkeypatch):
+    calls = []
+
+    class ExplodingClient:
+        def __init__(self, **_kwargs):
+            calls.append("init")
+
+    monkeypatch.setattr("ollama.Client", ExplodingClient)
+    embedder = OllamaEmbedder()
+
+    embedder.close()
+    embedder.close()
+    assert calls == []
+
+
+def test_ollama_embedder_close_closes_existing_client_once(monkeypatch):
+    close_calls = []
+
+    class FakeClient:
+        def close(self):
+            close_calls.append(1)
+
+    monkeypatch.setattr("ollama.Client", lambda **_kwargs: FakeClient())
+    embedder = OllamaEmbedder()
+    embedder._ensure_client()
+    embedder.close()
+    embedder.close()
+    assert close_calls == [1]

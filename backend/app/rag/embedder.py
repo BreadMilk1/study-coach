@@ -27,3 +27,16 @@ class OllamaEmbedder:
             resp = client.embeddings(model=self.model, prompt=text)
             out.append(list(resp["embedding"]))
         return out
+
+    def close(self) -> None:
+        """Close an initialized local client without creating one."""
+
+        client = self._client
+        self._client = None
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass

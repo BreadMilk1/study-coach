@@ -1,0 +1,42 @@
+{
+  "schema_version": "scorer-bundle-v1",
+  "scorer_id": "hybrid",
+  "version": "hybrid-v1",
+  "parser_version": "json-rubric-v1",
+  "rubric": {
+    "scale": {"min": 1, "max": 5},
+    "anchors": {
+      "1": "Absent, contradicted, or wholly unsupported.",
+      "2": "Mostly unsupported or substantially incomplete.",
+      "3": "Materially incomplete or only partly supported by the evidence.",
+      "4": "Meets the required quality bar with evidence-supported reasoning.",
+      "5": "Complete, precise, and consistently supported by the allowed evidence."
+    }
+  },
+  "required_dimensions_by_case_type": {
+    "answerable": ["groundedness", "citation_entailment", "coverage"],
+    "multi_evidence": ["groundedness", "citation_entailment", "coverage"],
+    "expected_refusal": ["refusal_appropriateness", "unsupported_claims"]
+  },
+  "verdict_policy": {
+    "required_minimum": 4,
+    "critical_findings_fail": true,
+    "scorer_failure_verdict": "inconclusive",
+    "fallback_verdict": "never_pass",
+    "average_cannot_cover_dimension_below": 4
+  },
+  "model_config": {
+    "provider": "ollama",
+    "model": "llama3.2",
+    "temperature": 0,
+    "max_tokens": 512
+  },
+  "components": [
+    {"id": "retrieval-integrity", "version": "v1", "kind": "deterministic", "config": {"checks": ["evidence_membership", "retrieval_empty"]}},
+    {"id": "citation-integrity", "version": "v1", "kind": "deterministic", "config": {"checks": ["citation_presence", "citation_number", "chunk_id", "span"]}},
+    {"id": "expected-refusal-observation", "version": "v1", "kind": "deterministic", "config": {"checks": ["expected_refusal_observed"]}},
+    {"id": "grounded-quality-rubric", "version": "v1", "kind": "llm", "config": {"dimensions": ["groundedness", "citation_entailment", "coverage", "refusal_appropriateness", "unsupported_claims"], "parser_version": "json-rubric-v1", "model_config": {"provider": "ollama", "model": "llama3.2", "temperature": 0, "max_tokens": 512}}}
+  ],
+  "calibration_hash": "b73ebd4d1f4b13ac4037fb23be5acaf57de3f2202e6b653ad3b57788000fde92",
+  "definition_hash": "41ad3573a3d48503e1f2c6a7404a10b5c37e2c5ede11d289529101101a1e7897"
+}
