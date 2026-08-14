@@ -91,6 +91,7 @@ class ScorerExecutionDetail(StrictModel):
 
 class ScoreSetDetail(ScoreSetSummary):
     artifact_input_hash: str
+    scorer_snapshot: dict | None = None
     operational_error_code: str | None = None
     operational_error_message: str | None = None
     findings: list | dict | None = None

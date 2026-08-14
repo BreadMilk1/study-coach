@@ -285,6 +285,64 @@ async def test_rescore_reads_frozen_artifact_and_never_calls_tutor(session):
 
 
 @pytest.mark.asyncio
+async def test_prepare_rescore_prefers_frozen_task_snapshot(session):
+    runner = RecordingTutorRunner(_candidate())
+    scorer_llm = FakeScorerLLM()
+    service = _service(session, runner, scorer_llm=scorer_llm)
+    first = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(scorer_llm=scorer_llm),
+        events=[],
+    )
+    manifest = dict(first.run.manifest_json)
+    snapshot = dict(manifest["task_snapshot"])
+    snapshot["question"] = "frozen historical question"
+    manifest["task_snapshot"] = snapshot
+    first.run.manifest_json = manifest
+    first.run.manifest_hash = canonical_hash(manifest)
+    session.add(first.run)
+    session.commit()
+    prepared = service.prepare_rescore(
+        run_id=first.run.id,
+        scorer_version="hybrid-v2",
+        connection=_connection(scorer_llm=FakeScorerLLM()),
+    )
+    assert prepared.task.question == "frozen historical question"
+
+
+@pytest.mark.asyncio
+async def test_rescore_failure_terminalizes_score_set(session):
+    runner = RecordingTutorRunner(_candidate())
+    scorer_llm = FakeScorerLLM()
+    service = _service(session, runner, scorer_llm=scorer_llm)
+    first = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(scorer_llm=scorer_llm),
+        events=[],
+    )
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("scorer exploded")
+
+    service.scoring_service_factory = explode
+    with pytest.raises(RuntimeError, match="scorer exploded"):
+        await service.rescore(
+            run_id=first.run.id,
+            scorer_version="hybrid-v2",
+            connection=_connection(scorer_llm=FakeScorerLLM()),
+        )
+    rows = service.score_sets.list_for_run(first.run.id)
+    assert rows[-1].status == "failed"
+    assert rows[-1].quality_verdict == "inconclusive"
+
+
+@pytest.mark.asyncio
 async def test_service_uses_only_injected_eval_collaborators_and_never_business_dependencies(session):
     runner = RecordingTutorRunner(_candidate())
     service = _service(session, runner)

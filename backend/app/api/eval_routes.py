@@ -252,10 +252,20 @@ def _score_detail(row: Any) -> ScoreSetDetail:
     return ScoreSetDetail(
         **_score_summary(row).model_dump(),
         artifact_input_hash=row.artifact_input_hash,
+        scorer_snapshot=getattr(row, "scorer_snapshot_json", None),
         operational_error_code=row.operational_error_code,
         operational_error_message=row.operational_error_message,
         findings=row.findings_json,
     )
+
+
+def _latest_comparable_score_set(rows: list[Any], *, peer_versions: set[str] | None = None):
+    completed = [row for row in rows if getattr(row, "status", None) == "completed"]
+    if peer_versions:
+        matched = [row for row in completed if row.scorer_version in peer_versions]
+        if matched:
+            return matched[-1]
+    return completed[-1] if completed else None
 
 
 def _execution_detail(row: Any) -> ScorerExecutionDetail:
@@ -418,8 +428,11 @@ def compare_runs(
             "evaluation_integrity_error",
             "evaluation artifact integrity could not be verified",
         ) from None
-    left_score = next((row for row in reversed(left_sets) if row.status == "completed"), None)
-    right_score = next((row for row in reversed(right_sets) if row.status == "completed"), None)
+    left_completed = {row.scorer_version for row in left_sets if row.status == "completed"}
+    right_completed = {row.scorer_version for row in right_sets if row.status == "completed"}
+    shared = left_completed & right_completed
+    left_score = _latest_comparable_score_set(left_sets, peer_versions=shared or None)
+    right_score = _latest_comparable_score_set(right_sets, peer_versions=shared or None)
     payload = compare_score_sets(
         {
             "run_id": left_run.id,

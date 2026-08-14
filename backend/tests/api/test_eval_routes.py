@@ -724,6 +724,8 @@ def test_eval_get_lists_and_detail_are_read_only_and_checksum_verified(eval_clie
     assert detail.status_code == 200
     assert detail.json()["manifest"]["task_case_id"] == "tgqa-004"
     assert len(detail.json()["score_sets"]) == 1
+    assert detail.json()["score_sets"][0]["scorer_snapshot"]
+    assert detail.json()["score_sets"][0]["scorer_definition_hash"]
     assert len(detail.json()["scorer_executions"]) == 1
     missing = client.get("/api/eval/runs/not-found", headers=headers)
     assert missing.status_code == 404
