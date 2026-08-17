@@ -44,6 +44,12 @@ describe('Run Lab source contracts', () => {
     expect(lab).not.toMatch(/batch/i)
   })
 
+  it('renders the attached store error after a failed Start', () => {
+    const lab = readSource('./RunLab.vue')
+    expect(lab).toMatch(/runsStore\.error/)
+    expect(lab).toMatch(/v-if="!disabled && runsStore\.error"/)
+  })
+
   it('hides score delta for scorer mismatch and incompatible compares', () => {
     expect(shouldShowScoreDelta({
       compatibility: 'controlled',
