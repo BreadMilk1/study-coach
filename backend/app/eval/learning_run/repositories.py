@@ -1142,21 +1142,27 @@ class EvalScoreSetRepository:
             if expected_status not in {"pending", "running"}:
                 raise InvalidTransitionError("ScoreSet is already terminal")
             where[1] = EvalScoreSet.status == expected_status
-        _commit_update(
-            self.session,
-            update(EvalScoreSet)
-            .where(*where)
-            .values(
-                status="cancelled",
-                quality_verdict="not_evaluated",
-                operational_error_code=error["code"],
-                operational_error_message=error.get("message"),
-                finished_at=datetime.utcnow(),
-            ),
-            model=EvalScoreSet,
-            row_id=score_set_id,
-            conflict=f"score set already terminal or missing: {score_set_id}",
-        )
+        try:
+            _commit_update(
+                self.session,
+                update(EvalScoreSet)
+                .where(*where)
+                .values(
+                    status="cancelled",
+                    quality_verdict="not_evaluated",
+                    operational_error_code=error["code"],
+                    operational_error_message=error.get("message"),
+                    finished_at=datetime.utcnow(),
+                ),
+                model=EvalScoreSet,
+                row_id=score_set_id,
+                conflict=f"score set already terminal or missing: {score_set_id}",
+            )
+        except RepositoryConflictError:
+            row = self.get_verified(score_set_id)
+            if row.status in {"cancelled", "completed", "partial", "failed"}:
+                return row
+            raise
         return self.get_verified(score_set_id)
 
     cancel = cancel_once
