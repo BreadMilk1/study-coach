@@ -86,6 +86,15 @@ Refreshed for P5 / P4.5 product narrative: startup choice, Danger Zone lifecycle
 - **Cross-tab coordination** — Reset invalidates stale views across open tabs and blocks overlapping Chat/upload work for the full operation lifetime
 - **Safe deployment default** — Destructive reset is disabled unless `STUDY_COACH_LOCAL_MODE=1`; Docker Compose enables it with the backend bound to loopback only
 
+### Learning Run Harness
+
+- **Frozen 12-case Tutor Grounded QA suite** — 6 answerable, 3 multi-evidence, 3 expected-refusal cases on one axis: `prompt_version` (`tutor-v2` production vs `tutor-v3` candidate)
+- **Isolated one-attempt evaluation** — shares `TutorAttemptEngine` with production Chat, not the 7-node Graph; `runtime_judge` is off
+- **Run Lab** — list, detail, and controlled compare of historical Runs, CandidateArtifacts, Hybrid ScoreSets, and scorer-v1/v2 re-scores
+- **Fresh-clone seed** — import the committed curated fixture; do not treat those 12 cases as overall Tutor quality
+
+See `docs/EVAL.md`, `docs/DEMO.md`, and `docs/adr/0001-share-tutor-attempt-not-production-orchestration.md`.
+
 ### BYOK Multi-Model
 
 - **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers, never persisted server-side
@@ -96,7 +105,7 @@ Refreshed for P5 / P4.5 product narrative: startup choice, Danger Zone lifecycle
 
 ### Frontend
 
-- **8 views**: Overview (dashboard + radar + activity heatmap), Chat (SSE streaming, current-session restore after refresh, grounded answers with citation chips; Debug Mode adds recoverable Agent Trace / Agent Run), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + Connection/Tool-check + language + Danger Zone), Onboarding (3-step goal setup wizard)
+- **9 views**: Overview (dashboard + radar + activity heatmap), Chat (SSE streaming, current-session restore after refresh, grounded answers with citation chips; Debug Mode adds recoverable Agent Trace / Agent Run), Plan (milestone list + vertical Gantt timeline), Quiz (adaptive MCQ + grade result), Mistake Bank (SM-2 due list + redo), Library (PDF upload), Settings (BYOK + Connection/Tool-check + language + Danger Zone), Onboarding (3-step goal setup wizard), Run Lab (frozen 12-case suite, evidence console, controlled compare)
 - **Dark Cinema design system** — Inter / JetBrains Mono / Noto Sans SC, indigo primary
 - **i18n bilingual** — English / 中文 (zh-CN), switchable in Settings
 - **Mobile responsive** — Bottom tab bar for Chat / Quiz / Plan on <768px viewports
@@ -195,8 +204,9 @@ The backend Google OAuth API is frozen and deferred. It has no frontend login su
 | P2.0 Retrieval | 15 queries | Hit@5 0.733 → 0.933 (+27%), MRR 0.633 → 0.822 (+30%) |
 | P2.2 Plan Ablation | 396 runs | Agent loop: +0.05–0.16 quality on capable models, 3–20× latency cost. Tool schemas substitute for in-model reasoning when `reasoning=False` |
 | P2.3 Quiz Ablation | 396 primary + 396 no-retriever pilot | Strict schemas invert P2.2 rescue effect. Agent loop creates alignment safety net via tool-feedback channel |
+| Learning Run 12-case suite | 24 real Runs | Frozen `tutor-v2` vs `tutor-v3` on `ollama`/`llama3.2` aliased to `gemma4:e4b`. hybrid-v1 is 12/12 inconclusive (rubric parse). Directed regression: v3 drops `expected_refusal_observed` on `tgqa-008`/`012` and adds general knowledge. See `docs/EVAL.md`. |
 
-The two primary matrices contain 792 runs total (P2.2 396 + P2.3 396). Including the P2.3 no-retriever pilot, the raw corpus contains 1,188 runs.
+The two primary matrices contain 792 runs total (P2.2 396 + P2.3 396). Including the P2.3 no-retriever pilot, the raw corpus contains 1,188 runs. The Learning Run fixture is a separate 24-run directed suite, not part of that 1,188.
 
 Full reports: `docs/EVAL.md`, `docs/agent_loop_vs_deterministic.md`, `docs/quiz_ablation_followup.md`.
 

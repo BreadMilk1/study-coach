@@ -219,6 +219,30 @@ Expected:
 - Assistant citations are restored.
 - Debug / Agent Run evidence for assistant turns is restored.
 
+### 6. Run Lab (five-minute eval path)
+
+This path uses the committed curated fixture. Do not read ignored `backend/app/eval/learning_run/output/`.
+
+```bash
+cd backend
+fixture_check_dir=$(mktemp -d)
+uv run python scripts/import_learning_run_suite.py \
+  app/eval/learning_run/fixtures/tutor-prompt-regression-v1.jsonl \
+  --database-url "sqlite:///$fixture_check_dir/learning-run-fixture-check.db"
+```
+
+To review the same seed in the running local app, import into the instance database instead of a temp URL, then open `/run-lab` with `STUDY_COACH_LOCAL_MODE=1`.
+
+Expected, in about five minutes:
+
+1. Run Lab list shows the frozen 12-case × 2 prompt suite (`tutor-prompt-regression-v1`).
+2. Open an `expected_refusal` detail (for example `tgqa-004`) and confirm the CandidateArtifact, exact evidence, and Hybrid ScoreSet.
+3. Open Compare for `tgqa-008` or `tgqa-012` on `tutor-v2` vs `tutor-v3`. v2 is a short refusal (`I don't know`) with `expected_refusal_observed`. v3 adds "General Study Knowledge" after saying the notes are silent. Hybrid-v1 may still be `inconclusive` because the rubric JSON failed to parse — do not present that as a Pass.
+4. Open a historical `hybrid-v1` / `hybrid-v2` pair on the same frozen Candidate. Re-score uses a different ScoreSet id; it does not rewrite the first.
+5. Optionally start one live expected-refusal cell with Settings provider/model equal to the frozen `ollama` / `llama3.2` pair. A mismatched Settings model returns 409.
+
+If a live cell exceeds the remaining time, stop after the imported historical path and say so. Do not invent metrics.
+
 ---
 
 ## Appendix: Full coach loop (optional, ~10 min)
@@ -381,3 +405,4 @@ Injected Chroma failure, SQLite failure, lock conflict, stale response, and idem
 - Durable learning memory timeline.
 - OpenTelemetry / token-cost dashboard.
 - Multi-agent orchestration beyond the current LangGraph node dispatch.
+- Learning Run background queue, multi-worker coordinator, custom corpus, and Plan/Quiz eval.
