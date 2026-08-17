@@ -895,6 +895,31 @@ def test_cancel_endpoint_finished_run_is_a_noop(eval_client):
     assert body["latest_score_set"]["status"] == before["score_sets"][0]["status"]
 
 
+def test_score_set_cancel_is_idempotent_and_does_not_rewrite_finished(eval_client):
+    client, headers, _, _, _ = eval_client
+    run_id = _seed_historical_run()
+    before = client.get(f"/api/eval/runs/{run_id}", headers=headers).json()
+    finished_id = before["score_sets"][0]["score_set_id"]
+
+    finished = client.post(f"/api/eval/score-sets/{finished_id}/cancel", headers=headers)
+    assert finished.status_code == 200
+    assert finished.json()["status"] == before["score_sets"][0]["status"]
+    assert finished.json()["quality_verdict"] == before["score_sets"][0]["quality_verdict"]
+
+    _seed_running_run(
+        run_id="score-set-cancel-run",
+        frozen=True,
+        score_set_id="score-set-cancel-set",
+    )
+    first = client.post("/api/eval/score-sets/score-set-cancel-set/cancel", headers=headers)
+    second = client.post("/api/eval/score-sets/score-set-cancel-set/cancel", headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["status"] == "cancelled"
+    assert second.json()["status"] == "cancelled"
+    assert first.json()["quality_verdict"] == "not_evaluated"
+
+
 def test_cancel_endpoint_rejects_tampered_active_run_without_mutation(eval_client):
     client, headers, _, _, _ = eval_client
     run_id = _seed_running_run(run_id="api-tampered-active-run", frozen=True)

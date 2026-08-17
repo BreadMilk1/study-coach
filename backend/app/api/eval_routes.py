@@ -22,6 +22,7 @@ from app.eval.learning_run.repositories import (
     EvalScorerExecutionRepository,
     EvaluationBusyError,
     EvaluationUnavailableError,
+    RepositoryConflictError,
     RepositoryNotFoundError,
 )
 from app.eval.learning_run.compare import compare_score_sets
@@ -414,11 +415,23 @@ def cancel_score_set(
         return _score_summary(row)
     except RepositoryNotFoundError:
         raise _error(404, "evaluation_not_found", "evaluation score set was not found") from None
+    except RepositoryConflictError:
+        raise _error(
+            409,
+            "evaluation_conflict",
+            "evaluation score set cannot be cancelled",
+        ) from None
     except ChecksumMismatchError:
         raise _error(
             500,
             "evaluation_integrity_error",
             "evaluation artifact integrity could not be verified",
+        ) from None
+    except EvaluationUnavailableError:
+        raise _error(
+            503,
+            "evaluation_unavailable",
+            "evaluation storage is unavailable",
         ) from None
 
 
