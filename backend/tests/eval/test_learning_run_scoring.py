@@ -635,6 +635,24 @@ async def test_refusal_observation_avoids_generic_cannot_phrases(answer, observe
 
 
 @pytest.mark.asyncio
+async def test_refusal_observation_uses_answer_text_even_when_retrieval_is_populated():
+    ScoringService, _, _, _ = _scoring_api()
+    seen = []
+    await ScoringService(FakeLLM(_response(_rubric_payload(REFUSAL)))).score(
+        task=REFUSAL,
+        candidate=_artifact(
+            answer="I don't know; the provided sources do not contain that fact."
+        ),
+        scorer_bundle=SCORER,
+        on_execution=seen.append,
+    )
+    observation = next(
+        draft for draft in seen if draft.component_id == "expected-refusal-observation"
+    )
+    assert "expected_refusal_observed" in {finding["code"] for finding in observation.findings}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("span", [(0, 0), (5, 2), (0, 10_000)])
 async def test_citation_span_requires_positive_in_bounds_interval(span):
     ScoringService, _, _, _ = _scoring_api()
@@ -683,6 +701,71 @@ async def test_retrieval_empty_is_quality_finding_not_operational_failure():
     assert retrieval.status == "success"
     assert retrieval.error_code is None
     assert any(item["code"] == "retrieval_empty" for item in retrieval.findings)
+
+
+@pytest.mark.asyncio
+async def test_citation_numbering_maps_prompt_markers_to_used_sources_only():
+    ScoringService, _, _, _ = _scoring_api()
+    evidence = tuple(
+        {
+            "chunk_id": f"chunk-{index}",
+            "content": f"chunk {index} content here.",
+            "source": "learning-run-notes.md",
+            "page": 1,
+        }
+        for index in range(1, 6)
+    )
+    citations = tuple(
+        {
+            "chunk_id": item["chunk_id"],
+            "source": item["source"],
+            "page": item["page"],
+            "span_start": 0,
+            "span_end": len(item["content"]),
+        }
+        for item in evidence
+    )
+    formatted = "\n".join(
+        f"[{index}] learning-run-notes.md p.1: {item['content']}"
+        for index, item in enumerate(evidence, start=1)
+    )
+    candidate = CandidateArtifact(
+        answer="RRF combines ranked lists [N1].",
+        citations=citations,
+        exact_evidence=evidence,
+        formatted_context=formatted,
+        usage="unavailable",
+        trace=({"stage": "tutor", "event": "complete"},),
+        budget={"total_seconds": 1},
+    )
+    result = await ScoringService(FakeLLM(_response(_rubric_payload(ANSWERABLE)))).score(
+        task=ANSWERABLE,
+        candidate=candidate,
+        scorer_bundle=SCORER,
+        on_execution=lambda _: None,
+    )
+    citation = next(
+        item for item in result.executions if item.component_id == "citation-integrity"
+    )
+    assert citation.status == "success"
+    assert [
+        item for item in citation.findings if item.get("check") == "citation_number"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_citation_numbering_rejects_markers_outside_the_source_list():
+    ScoringService, _, _, _ = _scoring_api()
+    result = await ScoringService(FakeLLM(_response(_rubric_payload(ANSWERABLE)))).score(
+        task=ANSWERABLE,
+        candidate=_artifact(answer="RRF combines ranked lists [N9]."),
+        scorer_bundle=SCORER,
+        on_execution=lambda _: None,
+    )
+    citation = next(
+        item for item in result.executions if item.component_id == "citation-integrity"
+    )
+    assert any(item.get("check") == "citation_number" for item in citation.findings)
 
 
 @pytest.mark.asyncio

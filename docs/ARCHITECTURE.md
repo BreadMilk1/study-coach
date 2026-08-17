@@ -71,6 +71,12 @@ erDiagram
 - **Mistake**: SM-2 spaced-repetition schedule (`srs_due_at`, `srs_interval_days`, `srs_ease`)
 - **Session** / **Message** / **Citation**: persisted chat history, assistant citations, and recoverable agent-run artifacts restored after frontend refresh
 
+### Production Graph vs Learning Run
+
+Production Chat owns the 7-node LangGraph (MemoryHydrator → Router → Tutor / Quiz / Plan → Judge Guard → MemoryWriter). Both production Tutor and the Learning Run Harness call the same graph-free `TutorAttemptEngine` for one retrieval + prompt + generation. Evaluation does **not** reuse the Graph: `runtime_judge` is off, corpus is an isolated Registry snapshot, and Chat / Memory / Judge retry are out of the measured path. See `docs/adr/0001-share-tutor-attempt-not-production-orchestration.md`.
+
+Run Lab is local-mode only. Evaluation execution is **single-worker**: one attached Run or ScoreSet at a time, claimed in SQLite before the stream starts. A ScoreSet is independently auditable via its scorer snapshot and hash; historical re-score appends, it does not overwrite.
+
 ---
 
 ## 3. Architecture Decision Records
@@ -238,6 +244,9 @@ Key tables (full definition at `backend/app/db/models.py`):
 | `messages` | `id, session_id, role, content, tool_calls_json?` | Displayable chat turns restored after frontend refresh; `tool_calls_json` stores assistant artifacts |
 | `citations` | `id, message_id, chunk_id, page, span_start, span_end` | Source citations attached to assistant messages |
 | `documents` | `id, user_id, filename, hash, chunks_count` | Uploaded PDFs |
+| `eval_runs` | `id, experiment_id, task_case_id, variant_id, lifecycle, outcome, manifest_json, manifest_hash, candidate_artifact_json, artifact_hash` | One isolated Learning Run; factory reset deletes these after child rows |
+| `eval_score_sets` | `id, run_id, scorer_version, scorer_snapshot_json, scorer_definition_hash, quality_verdict, aggregate_scores_json` | Append-only Hybrid Score for one frozen Candidate; historical re-score adds a row |
+| `eval_scorer_executions` | `id, score_set_id, scorer_id, scorer_version, status, input_hash, output_json` | Append-only component execution; used to rebuild the ScoreSet verdict |
 
 Chunks live in **Chroma** (collection `study_coach_chunks`), not in SQL.
 SQL `documents` is the empty-corpus gate for retrieval: Chroma stores chunks, while the API refuses chat retrieval when the current user has no Library document rows. Full per-document Chroma filtering still requires adding `user_id` / `document_id` metadata to chunks and passing filters through dense, BM25, reranking, and agent-tool retrieval.
@@ -283,6 +292,14 @@ Schema managed via **Alembic**. `migrate_to_head()` called on every `create_app(
 | POST | `/api/data/reset` | strict signed bearer + local mode | `{scope, status:"completed", deleted:{...15 counts}}` |
 | GET | `/api/models/tool-check` | none | `{tool_capable, model, note}` |
 | GET | `/api/models/ping` | none | `{ok, model, latency_ms, note}` |
+| GET | `/api/eval/experiments` | signed JWT + local mode | Frozen experiment summaries from the Registry |
+| GET | `/api/eval/runs` | signed JWT + local mode | Historical Learning Run list |
+| GET | `/api/eval/runs/{run_id}` | signed JWT + local mode | Run detail, CandidateArtifact, ScoreSets |
+| POST | `/api/eval/runs/stream` | signed JWT + local mode + matching frozen model | Attached SSE for one Learning Run; single-worker |
+| POST | `/api/eval/runs/{run_id}/cancel` | signed JWT + local mode | Cooperative cancel of the attached Run |
+| POST | `/api/eval/runs/{run_id}/rescore/stream` | signed JWT + local mode | Append a historical ScoreSet for a frozen Candidate |
+| POST | `/api/eval/score-sets/{score_set_id}/cancel` | signed JWT + local mode | Cancel an attached re-score |
+| GET | `/api/eval/compare` | signed JWT + local mode | Controlled case delta; ignores prompt-axis and bookkeeping fields |
 
 All AI-bearing routes read **BYOK headers** (see §8) per request. Learning-data routes authenticate with JWT Bearer through `require_existing_user` (valid signed token **and** an existing user row; no `"default-user"` fallback). Data summary/reset use `require_signed_user` (valid signed token; user row may be absent for factory-reset retry) and never fall back to `"default-user"`.
 

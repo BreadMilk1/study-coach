@@ -55,6 +55,6 @@ _Avoid_: Quality failure, bad answer
 _Avoid_: A/B test, side-by-side view, improvement
 
 **Regression Suite**:
-一组冻结、人工确认 expected behavior 的定向 cases，用于检测特定 AI 行为变化；它不是总体学习效果或统计显著性的证明。
+一组冻结、人工确认 expected behavior 的定向 cases，用于检测特定 AI 行为变化；它不是总体学习效果或统计显著性的证明。Regression 可以是同一 scorer 上的 verdict/score 变差，也可以是声明轴上的 deterministic finding 变化加上语料外常识。LLM judge 解析失败必须保持 inconclusive。Fresh clone 使用 committed curated fixture 作为演示种子；本机 raw `output/` 不进 Git。
 _Avoid_: Benchmark, comprehensive evaluation, golden truth
 

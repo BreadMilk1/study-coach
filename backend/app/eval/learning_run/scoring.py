@@ -55,7 +55,7 @@ _FINDING_CODES = frozenset(
     }
 )
 _FINDING_SEVERITIES = frozenset({"critical", "noncritical"})
-_NUMBER_RE = re.compile(r"\[(\d+)\]")
+_NUMBER_RE = re.compile(r"\[N?(\d+)\]", re.IGNORECASE)
 _MAX_RUBRIC_BYTES = 64 * 1024
 _MAX_REASONING_CHARS = 8 * 1024
 _MAX_FINDING_MESSAGE_CHARS = 2 * 1024
@@ -510,6 +510,14 @@ def _retrieval_integrity(
     )
 
 
+def _source_list_size(candidate: CandidateArtifact) -> int:
+    context = candidate.formatted_context if isinstance(candidate.formatted_context, str) else ""
+    context_numbers = [int(value) for value in _NUMBER_RE.findall(context)]
+    if context_numbers:
+        return max(context_numbers)
+    return max(len(candidate.citations), len(candidate.exact_evidence), 0)
+
+
 def _citation_integrity(
     *,
     task: TaskCase | CalibrationTaskInput,
@@ -530,17 +538,13 @@ def _citation_integrity(
 
     answer = candidate.answer if isinstance(candidate.answer, str) else ""
     numbers = [int(value) for value in _NUMBER_RE.findall(answer)]
-    first_seen: list[int] = []
-    for number in numbers:
-        if number not in first_seen:
-            first_seen.append(number)
-    expected_numbers = list(range(1, len(citations) + 1))
-    if first_seen != expected_numbers or any(number < 1 or number > len(citations) for number in numbers):
+    source_list_size = _source_list_size(candidate)
+    if any(number < 1 or number > source_list_size for number in numbers):
         findings.append(
             _finding(
                 "citation_invalid",
                 severity=_critical_for_task(task, "citation_invalid"),
-                message="answer citation numbering does not match citation tuple order",
+                message="answer citation numbering does not match the source list",
                 check="citation_number",
             )
         )
@@ -604,11 +608,9 @@ def _refusal_observation(
     if task.case_type != "expected_refusal":
         return ({"applicable": False}, (), False)
     # This is intentionally observable only.  A conservative explicit
-    # refusal expression is required; empty retrieval alone is not enough.
+    # refusal expression is required; retrieved distractors do not hide it.
     answer = candidate.answer if isinstance(candidate.answer, str) else ""
-    observed = not candidate.exact_evidence and not candidate.citations and any(
-        pattern.search(answer) for pattern in _REFUSAL_PATTERNS
-    )
+    observed = any(pattern.search(answer) for pattern in _REFUSAL_PATTERNS)
     if observed:
         return (
             {"applicable": True, "observed": True},
@@ -616,7 +618,7 @@ def _refusal_observation(
                 _finding(
                     "expected_refusal_observed",
                     severity="noncritical",
-                    message="candidate declined with no retrieved evidence",
+                    message="candidate declined the question in the answer text",
                 ),
             ),
             True,

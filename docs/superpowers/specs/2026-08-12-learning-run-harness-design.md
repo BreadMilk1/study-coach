@@ -1,7 +1,7 @@
 # Learning Run Harness — Design Spec
 
 > 日期：2026-08-12
-> 状态：设计已确认；尚未授权代码实现
+> 状态：设计已确认；实现位于 `feat/learning-run-harness`。演示种子是 committed curated fixture，不是 ignored raw output。
 > 目标：让 Study Coach 在技术面试中可证明其对 Agent harness、eval、trace、provenance、budget 和 regression detection 的掌握，而不偏离 AI 学习教练主题。
 
 ## 1. 决策摘要
@@ -24,7 +24,7 @@ Study Coach 将新增一个内置、轻量的 **Learning Run Harness**。第一�
 2. Tutor 实际使用的 evidence 可以核验。
 3. 系统错误与答案质量问题被分开建模。
 4. LLM evaluator 不是唯一真相，且可校准、可替换、可版本化。
-5. Prompt 变化产生的改善和 regression 都会被保留，而不是只展示成功案例。
+5. Prompt 变化产生的改善和 regression 都会被保留，而不是只展示成功案例。Regression 不要求 LLM rubric 先给出 pass/fail：同一 case、同一 scorer version 上 candidate 的 verdict/score 变差，或声明轴上的 deterministic finding 发生方向性变化且 candidate 答案引入语料外常识，都算真实 regression。Malform 的 LLM judge 必须保持 inconclusive，不得放宽 parser 来制造分数。
 
 ### 2.3 诚实声明
 
@@ -328,7 +328,7 @@ Compare 不持久化，由查询派生。MVP 不引入 filesystem blob；先测�
 
 CLI 在一个 SQLite transaction 中验证并导入完整 suite。Registry 决定 expected cases 与 variants；缺失、重复、版本或 checksum 不匹配时整批回滚。MVP 不增加 `eval_suite_executions` 表；只有未来支持 batch resume、partial import 或 UI 启动 suite 时才增加。
 
-Repository 中的 curated demo seed 必须覆盖 12 cases × 2 Prompt variants、expected-refusal、至少一个 regression 和 historical ScoreSets；它不包含 credentials、完整 Base URL、私人输入或 Registry 之外的语料。原始 export 继续 ignored。
+Repository 中的 curated demo seed 必须覆盖 12 cases × 2 Prompt variants、expected-refusal、至少一个 regression 和 historical ScoreSets；它不包含 credentials、完整 Base URL、私人输入或 Registry 之外的语料。原始 export 继续 ignored。Regression 可以是 hybrid-v1 verdict/score 变差，也可以是 expected-refusal 上 v2 观察到拒答、v3 未观察并补了语料外常识。
 
 ## 12. Reset、Privacy 与 Auth
 
@@ -517,7 +517,7 @@ Historical re-score 按钮保留，但主路径只展示已经存在的多个 Sc
 - 12-case 逐案 expected behavior 签核。
 - 真实 tutor-v2/v3 CandidateArtifacts 与 ScoreSets。
 - 从真实 export deterministic 生成的 curated demo seed 能在 fresh temporary SQLite 中原子导入并通过全部 hash checks。
-- 至少一个 expected-refusal 与一个 regression。
+- 至少一个 expected-refusal 与一个 regression（verdict/score 或拒答轴 finding + 语料外常识）。
 - 真实浏览器 route switch、refresh、network disconnect、cancel。
 - 五分钟 demo checklist 或录像。
 
@@ -533,7 +533,7 @@ MVP 只有在以下全部成立时完成：
 2. migration 与 production build 通过。
 3. scorer calibration fixtures 与 12-case suite 相互独立。
 4. suite artifacts 来自真实执行，而非手写演示结果。
-5. 展示并解释 expected-refusal 与至少一个 regression。
+5. 展示并解释 expected-refusal 与至少一个 regression。不得把 LLM rubric parse failure 改写成 Pass。
 6. Run Lab 不显示自相矛盾的 verdict、findings 或 placeholder metrics。
 7. 文档只声明冻结 12-case suite 上的 v2/v3 差异。
 

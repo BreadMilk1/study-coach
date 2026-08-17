@@ -8,8 +8,8 @@
 - **Project shape**: portfolio-grade Exam Coach Agent, refactored from `HKBU_StudyCompanion` and informed by JadeAI engineering patterns.
 - **Backend**: FastAPI + LangGraph + Chroma hybrid retrieval + SQLAlchemy/Alembic + BYOK LLM provider + signed JWT local anonymous identity. Google OAuth remains frozen in backend code and is not surfaced by the frontend.
 - **Agent graph**: memory hydrator → router → Tutor / QuizMaster / Planner (det + agent_loop) → Judge Guard → memory writer.
-- **Frontend**: Vue 3 + Pinia + Tailwind 4 + vue-i18n (en/zh-CN). 8 views: Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings / Onboarding. Mobile responsive (Chat/Quiz/Plan).
-- **Eval evidence**: P2.0 retrieval eval; primary agent-loop matrices P2.2 Plan (396 runs) + P2.3 Quiz (396 runs) = 792; P2.3 no-retriever pilot adds 396, for 1,188 raw runs total.
+- **Frontend**: Vue 3 + Pinia + Tailwind 4 + vue-i18n (en/zh-CN). 9 views: Overview / Chat / Plan / Quiz / Mistake Bank / Library / Settings / Onboarding / Run Lab. Mobile responsive (Chat/Quiz/Plan).
+- **Eval evidence**: P2.0 retrieval eval; primary agent-loop matrices P2.2 Plan (396 runs) + P2.3 Quiz (396 runs) = 792; P2.3 no-retriever pilot adds 396, for 1,188 raw runs total; Learning Run Harness adds a frozen 12-case × 2 prompt suite with a committed curated fixture.
 - **Architecture docs**: ARCHITECTURE.md v2 (Mermaid ER + 6 ADRs + deployment topology + security model).
 - **Deploy**: host-run is the canonical reviewer path; Docker Compose is an alternative mutually exclusive Ollama path (stop host Ollama first — both bind `127.0.0.1:11434`). Cloud deployment is deferred; the retained Fly files are an unverified scaffold.
 - **Verification baseline**: 414 backend tests passing; 155 frontend tests across 30 Vitest files passing (569 total); frontend production build and `docker compose config` passing. Existing Vite >500 kB chunk warning remains accepted. Automated verification re-verified on 2026-08-10; latest full Chrome acceptance completed on 2026-07-31.
@@ -357,6 +357,18 @@ Design approved 2026-07-20; implementation and automated verification are curren
 - [x] P5.4 full Chrome acceptance checkpoint (2026-07-31): startup choice and Esc/backdrop blocking, Continue + same-tab refresh, real Ollama Chat/Quiz/Plan, learning reset with cross-tab acknowledgement and Settings preservation, 49-chunk re-import, Factory reset default restoration and peer-tab reload, old-JWT write refusal/idempotent retry, and concurrent three-tab recovery to exactly one new anonymous user.
 
 **Deferred after P5:** a separate `feat/multi-user-auth` worktree for guest upgrade, Google OAuth, SQL/Chroma ownership, legacy migration, and data-continuity tests.
+
+## Learning Run Harness — current (2026-08-15)
+
+Frozen Tutor Grounded QA harness on `feat/learning-run-harness`. Shares `TutorAttemptEngine` only; evaluation profile disables Judge / Memory / Chat persistence.
+
+- [x] Versioned Registry: 12 TaskCases, tutor-v2/v3, isolated corpus, hybrid-v1/v2 scorers, calibration anchors.
+- [x] Three-table persistence, atomic 12×2 import, historical re-score, controlled compare.
+- [x] Authenticated local-mode eval SSE, single-worker claim, factory reset child-first eval delete.
+- [x] Run Lab list / detail / compare.
+- [x] Committed curated fixture plus fail-closed curator. Raw `output/` stays gitignored.
+
+**Deferred:** background queue / worker, disconnect resume, multi-worker coordinator, custom/private corpus, Plan/Quiz eval, production-fidelity profile, statistical claims about overall learning quality.
 
 ## Out of scope (won't do unless asked)
 

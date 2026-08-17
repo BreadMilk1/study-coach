@@ -9,7 +9,8 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.db.session import session_scope
+from app.db.models import Base
+from app.db.session import make_engine, session_scope
 from app.eval.learning_run.registry import TaskRegistry
 from app.eval.learning_run.repositories import EvalSuiteImportRepository
 
@@ -29,23 +30,43 @@ def parse_jsonl(path: Path) -> list[dict]:
     return records
 
 
-def import_suite(path: Path, *, session: Session | None = None) -> int:
+def import_suite(
+    path: Path,
+    *,
+    session: Session | None = None,
+    database_url: str | None = None,
+) -> int:
     records = parse_jsonl(path)
     registry = TaskRegistry.load_default()
     if session is not None:
         return EvalSuiteImportRepository(session, registry=registry).import_records(records)
+    if database_url:
+        engine = make_engine(database_url)
+        Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            return EvalSuiteImportRepository(db, registry=registry).import_records(records)
     with session_scope() as db:
         return EvalSuiteImportRepository(db, registry=registry).import_records(records)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Import a Learning Run suite JSONL export")
     parser.add_argument("path", nargs="?", type=Path, help="JSONL export path")
+    parser.add_argument(
+        "--database-url",
+        dest="database_url",
+        help="Optional isolated database URL; does not use the process default",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.path is None:
         parser.print_help()
         return 0
-    count = import_suite(args.path)
+    count = import_suite(args.path, database_url=args.database_url)
     print(f"imported {count} runs")
     return 0
 

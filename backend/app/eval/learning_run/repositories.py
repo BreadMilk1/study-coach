@@ -1731,6 +1731,10 @@ class EvalSuiteImportRepository:
                     artifact_input_hash=str(raw_score.get("artifact_input_hash") or run.artifact_hash or ""),
                     status=str(raw_score.get("status") or "completed"),
                     quality_verdict=str(raw_score.get("quality_verdict") or "not_evaluated"),
+                    operational_error_code=raw_score.get("operational_error_code")
+                    or raw_score.get("error_code"),
+                    operational_error_message=raw_score.get("operational_error_message")
+                    or raw_score.get("error_message"),
                     aggregate_scores_json=raw_score.get("aggregate_scores") or raw_score.get("aggregate_scores_json"),
                     findings_json=raw_score.get("findings") or raw_score.get("findings_json"),
                 )
@@ -1749,6 +1753,12 @@ class EvalSuiteImportRepository:
                     status=str(raw_execution.get("status") or "success"),
                     input_hash=str(raw_execution.get("input_hash") or run.artifact_hash or ""),
                     output_json=raw_execution.get("output") or raw_execution.get("output_json"),
+                    operational_error_code=raw_execution.get("operational_error_code")
+                    or raw_execution.get("error_code"),
+                    operational_error_message=raw_execution.get("operational_error_message")
+                    or raw_execution.get("error_message"),
+                    latency_ms=raw_execution.get("latency_ms"),
+                    usage_json=raw_execution.get("usage") or raw_execution.get("usage_json"),
                 )
             )
         return run, score_sets, executions

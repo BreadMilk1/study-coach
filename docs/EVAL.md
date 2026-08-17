@@ -548,3 +548,57 @@ All Pydantic output DTOs use `model_config = ConfigDict(extra="ignore")` for for
 - Design system: `study-coach/design-system/MASTER.md`
 - Sister blog: `study-coach/docs/p3_frontend_productize.md`
 - Final view screenshots: `study-coach/docs/screenshots/p3/{overview,chat,plan,quiz,mistakes,library,settings}.png`
+
+---
+
+# Learning Run Harness — Tutor Prompt Regression
+
+> Frozen 12-case suite. This is not a claim about overall Tutor quality or learning effect.
+
+## Config
+
+| Field | Value |
+|---|---|
+| Date | 2026-08-17 |
+| Experiment | `tutor-prompt-regression-v1` |
+| Axis | `prompt_version` only (`tutor-v2` production vs `tutor-v3` candidate) |
+| Cases | 12 (6 answerable / 3 multi_evidence / 3 expected_refusal) |
+| Provider / model | `ollama` / `llama3.2` (local alias to `gemma4:e4b`, digest `c6eb396dbd59`, tools+thinking; suite runner used `reasoning=False`) |
+| Parameters | temperature 0, top_p 1 |
+| Scorers | `hybrid-v1` at run time; `hybrid-v2` historical re-score |
+| Runtime judge | off |
+| Budget | retrieval 5s / tutor 55s / hybrid scoring 25s / total 90s |
+| Curated fixture | `backend/app/eval/learning_run/fixtures/tutor-prompt-regression-v1.jsonl` |
+| Raw output | `backend/app/eval/learning_run/output/` (gitignored) |
+
+## Hashes (Registry)
+
+Taken from the frozen experiment document, not from a hand-edited export:
+
+- `tutor-v2` prompt: `3686c0120d0b8cb615579b27ea43dc624e8053db763b1559b5e59a4a726fc9a2`
+- `tutor-v3` prompt: `7f0da024e65c7fbf4b0dd8d485ef0bc1e1949b849f56fce10ac0a9eebf440b08`
+- task cases: `90735b9708d6957c6c8ac7cbf5c09c2f6303bdf66ad2496241676a0be3e3ee1b`
+- corpus: `9dd2758d60c8c51f4cbaccc9bacb153cf83b87b11add902787a5f3de404255cf`
+- hybrid-v1 scorer: `41ad3573a3d48503e1f2c6a7404a10b5c37e2c5ede11d289529101101a1e7897`
+
+## Results
+
+Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alias to `gemma4:e4b` (same digest `c6eb396dbd59`). 24 finished Runs (12 × 2), each with `hybrid-v1` and `hybrid-v2` ScoreSets. Metrics were curated from the runner export; they were not hand-edited.
+
+| Prompt | hybrid-v1 pass | hybrid-v1 fail | hybrid-v1 inconclusive | Notes |
+|---|---|---|---|---|
+| tutor-v2 | 0 | 0 | 12 | Rubric `scorer_parse_error` on every cell; no dimension scores |
+| tutor-v3 | 0 | 0 | 12 | Same hybrid-v1 verdict matrix |
+
+- Tutor answers are real `gemma4:e4b` generations. Deterministic citation numbering no longer floors the suite.
+- Refusal observer fired on **v2** for `tgqa-004`, `tgqa-008`, and `tgqa-012` (`I don't know`).
+- On **v3**, `tgqa-008` and `tgqa-012` added a "General Study Knowledge" fill after saying the notes were silent. That is the helpfulness-vs-grounding leak the candidate prompt asked for. The observer did **not** mark `expected_refusal_observed` on those two v3 cells.
+- **Zero hybrid-v1 verdict/score regression.** The directed suite regression is the refusal-axis leak: v2 has `expected_refusal_observed` on `tgqa-008` and `tgqa-012`; v3 does not, and those v3 answers add "General Study Knowledge". That is accepted as a real prompt-axis regression. The LLM rubric parser was not loosened.
+- Empty dimension scores are a scorer parse limit on this model, not a fabricated 0.
+
+## Limits
+
+- Local small-model Hybrid rubric output can be `scorer_parse_error`; the ScoreSet then stays `partial` / `inconclusive` instead of fabricating dimension scores.
+- Evaluation measures one TutorAttempt, not Graph Judge retries.
+- 12 cases are a directed regression suite, not a benchmark of overall study quality.
+- Paid/remote models are not a CI gate.

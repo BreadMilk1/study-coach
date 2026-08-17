@@ -31,7 +31,7 @@
 3. Eval 只能读取隔离 corpus，不触碰 global retriever、Router、runtime Judge、Memory 或 Chat persistence。
 4. CandidateArtifact 单次 finalize；historical re-score 只追加 ScoreSet，单个 ScoreSet 只 terminal finalize 一次；malformed/timeout scorer 不会 fallback Pass。
 5. run、cancel、re-score、compare、single-flight、restart reconciliation、reset/auth/local-mode contracts 都有自动化测试。
-6. Run Lab 三个页面可 build，并用真实生成的历史 artifacts 展示 expected-refusal 与至少一个 regression。
+6. Run Lab 三个页面可 build，并用真实生成的历史 artifacts 展示 expected-refusal 与至少一个 regression。Regression 可以是 hybrid-v1 verdict/score 变差，或 expected-refusal 上 v2 有 `expected_refusal_observed`、v3 没有且答案引入语料外常识。不放宽 LLM rubric parser。
 7. 全量 backend pytest、frontend non-watch Vitest、production build、fresh Alembic migration 全部通过；无法执行的项目明确列为未验证。
 
 ## Task 0: 建立可执行的干净边界
@@ -1377,7 +1377,7 @@ Expected RED: docs/link/fixture contract 尚未全部接入。
 - RunManifest、Prompt/Corpus/artifact hashes。
 - 24 CandidateArtifacts 和对应 ScoreSets。
 - expected-refusal case evidence。
-- 至少一个真实 regression；若没有 regression，诚实展示零 regression，不手工制造，但 Completion Criteria 仍不满足，需要重新评估 `tutor-v3` 作为 demo candidate。
+- 至少一个真实 regression；若没有 verdict/score 变差，允许用声明轴上的 deterministic 拒答 finding + 语料外常识作为 regression。若两者都没有，诚实展示零 regression，不手工制造、不放宽 judge，Completion Criteria 仍不满足，需要重新评估 `tutor-v3` 作为 demo candidate。
 - 同一 frozen Candidate 的 scorer-v1/v2 historical ScoreSets。
 
 真实 raw export 写入 ignored `backend/app/eval/learning_run/output/`，不 commit。`curate_learning_run_fixture.py` 必须 fail closed：验证 24 Runs/Registry IDs/hashes、移除 allowlist 外字段、拒绝 secret patterns 与非 Registry corpus，并以 stable ordering/canonical JSONL 输出。运行：

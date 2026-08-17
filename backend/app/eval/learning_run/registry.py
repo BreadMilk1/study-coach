@@ -400,7 +400,7 @@ class TaskRegistry:
         self.scorers = MappingProxyType(dict(scorers or {scorer.version: scorer}))
         self.scorer_documents = MappingProxyType(dict(scorer_documents or {}))
         self.calibration_candidates = tuple(calibration_candidates)
-        self.calibration_case_ids = tuple(
+        self.calibration_case_ids = frozenset(
             candidate.candidate_id for candidate in self.calibration_candidates
         )
 
@@ -414,6 +414,27 @@ class TaskRegistry:
             return self.prompts[self.experiment.production_default]
         except KeyError as exc:
             raise RegistryError("production_default prompt is not registered") from exc
+
+    @property
+    def task_case_ids(self) -> frozenset[str]:
+        return frozenset(self.task_cases)
+
+    @property
+    def case_type_counts(self) -> dict[str, int]:
+        return {
+            case_type: sum(case.case_type == case_type for case in self.task_cases.values())
+            for case_type in ("answerable", "multi_evidence", "expected_refusal")
+        }
+
+    @property
+    def experiment_axes(self) -> tuple[str, ...]:
+        return self.experiment.experiment_axes
+
+    def prompt(self, version: str) -> PromptDefinition:
+        try:
+            return self.prompts[version]
+        except KeyError as exc:
+            raise RegistryError(f"unknown prompt version: {version}") from exc
 
     @classmethod
     def load_default(cls) -> "TaskRegistry":

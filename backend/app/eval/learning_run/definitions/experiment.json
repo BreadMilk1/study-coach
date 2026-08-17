@@ -2,13 +2,15 @@
   "schema_version": "learning-run-v1",
   "experiment_id": "tutor-prompt-regression-v1",
   "version": "1",
-  "experiment_axes": ["prompt_version"],
+  "experiment_axes": [
+    "prompt_version"
+  ],
   "runtime_judge": false,
   "run_profile": "evaluation",
   "production_default": "tutor-v2",
   "prompt_hashes": {
     "tutor-v2": "3686c0120d0b8cb615579b27ea43dc624e8053db763b1559b5e59a4a726fc9a2",
-    "tutor-v3": "9eb6f06a097cfb88d74797aa8a258a58c5fd49bdcc433abde222dcb0494caefd"
+    "tutor-v3": "7f0da024e65c7fbf4b0dd8d485ef0bc1e1949b849f56fce10ac0a9eebf440b08"
   },
   "task_cases_hash": "90735b9708d6957c6c8ac7cbf5c09c2f6303bdf66ad2496241676a0be3e3ee1b",
   "corpus_hash": "9dd2758d60c8c51f4cbaccc9bacb153cf83b87b11add902787a5f3de404255cf",
@@ -25,30 +27,46 @@
       "prompt_version": "tutor-v2",
       "provider": "ollama",
       "model": "llama3.2",
-      "parameters": {"temperature": 0, "top_p": 1},
+      "parameters": {
+        "temperature": 0,
+        "top_p": 1
+      },
       "retrieval_config_version": "hybrid-rrf-v1",
       "reranker_config_version": "fastembed-bge-v1",
       "chunking_config_version": "fixed-whole-chunk-v1",
       "embedding_config_version": "ollama-nomic-embed-text-v1",
       "corpus_hash": "9dd2758d60c8c51f4cbaccc9bacb153cf83b87b11add902787a5f3de404255cf",
       "scorer_hash": "41ad3573a3d48503e1f2c6a7404a10b5c37e2c5ede11d289529101101a1e7897",
-      "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90},
+      "budget": {
+        "retrieval_preflight_seconds": 5,
+        "tutor_seconds": 55,
+        "hybrid_scoring_seconds": 25,
+        "total_seconds": 90
+      },
       "schema_version": "learning-run-v1"
     },
     "tutor-v3": {
       "prompt_version": "tutor-v3",
       "provider": "ollama",
       "model": "llama3.2",
-      "parameters": {"temperature": 0, "top_p": 1},
+      "parameters": {
+        "temperature": 0,
+        "top_p": 1
+      },
       "retrieval_config_version": "hybrid-rrf-v1",
       "reranker_config_version": "fastembed-bge-v1",
       "chunking_config_version": "fixed-whole-chunk-v1",
       "embedding_config_version": "ollama-nomic-embed-text-v1",
       "corpus_hash": "9dd2758d60c8c51f4cbaccc9bacb153cf83b87b11add902787a5f3de404255cf",
       "scorer_hash": "41ad3573a3d48503e1f2c6a7404a10b5c37e2c5ede11d289529101101a1e7897",
-      "budget": {"retrieval_preflight_seconds": 5, "tutor_seconds": 55, "hybrid_scoring_seconds": 25, "total_seconds": 90},
+      "budget": {
+        "retrieval_preflight_seconds": 5,
+        "tutor_seconds": 55,
+        "hybrid_scoring_seconds": 25,
+        "total_seconds": 90
+      },
       "schema_version": "learning-run-v1"
     }
   },
-  "definition_hash": "d65f9a462e65e76547ab6ff3a4b5ee569863e05bae8e5ff8b9ab232b503f698b"
+  "definition_hash": "323d9ba63091e66ea1624cfe0475cfdf9f4a2d991d4944189fb33b4a9d15a4b9"
 }
