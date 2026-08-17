@@ -5,6 +5,7 @@ import {
   compatibilityBadge,
   deltaCaption,
   displayVerdict,
+  findingDisplay,
   shouldShowScoreDelta,
   usageLabel,
   verdictLabel,
@@ -45,6 +46,17 @@ describe('learning run presentation policy', () => {
     expect(deltaCaption('suite')).toBe('frozen 12-case suite delta')
     expect(canClaimSuiteQuality('case')).toBe(false)
     expect(canClaimSuiteQuality('suite')).toBe(true)
+  })
+
+  it('renders finding codes instead of severity-only labels', () => {
+    expect(findingDisplay({
+      code: 'expected_refusal_observed',
+      severity: 'noncritical',
+      message: 'I don\'t know',
+    })).toBe("expected_refusal_observed · noncritical: I don't know")
+    expect(findingDisplay({ code: 'citation_invalid', severity: 'critical' })).toBe(
+      'citation_invalid · critical',
+    )
   })
 
   it('exposes compatibility badges and unavailable usage', () => {

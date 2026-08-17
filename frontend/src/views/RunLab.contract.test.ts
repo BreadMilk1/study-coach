@@ -50,6 +50,21 @@ describe('Run Lab source contracts', () => {
     expect(lab).toMatch(/v-if="!disabled && runsStore\.error"/)
   })
 
+  it('uses the experiment regression_count instead of fail-verdict length', () => {
+    const lab = readSource('./RunLab.vue')
+    expect(lab).toMatch(/experiment\.value\?\.regression_count/)
+    expect(lab).not.toMatch(/quality_verdict === 'fail'\)\.length/)
+  })
+
+  it('shows finding codes on detail and answers on compare', () => {
+    const panel = readSource('../components/run-lab/RunScorePanel.vue')
+    const compare = readSource('./RunCompare.vue')
+    expect(panel).toContain('findingDisplay')
+    expect(compare).toContain('getRunDetail')
+    expect(compare).toContain('findingDisplay')
+    expect(compare).toContain('answerText')
+  })
+
   it('hides score delta for scorer mismatch and incompatible compares', () => {
     expect(shouldShowScoreDelta({
       compatibility: 'controlled',

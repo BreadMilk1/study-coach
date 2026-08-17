@@ -45,6 +45,7 @@ class ExperimentSummary(StrictModel):
     case_counts: dict[str, int]
     run_profile: str
     budgets: dict[str, int]
+    regression_count: int = 0
 
 
 class ScoreSetSummary(StrictModel):

@@ -51,10 +51,10 @@ Harness、模型、retriever 或 scorer 未能按执行契约完成工作时产�
 _Avoid_: Quality failure, bad answer
 
 **Controlled Comparison**:
-两个 Runs 只在声明的 `experiment_axes` 上不同，且其余控制变量与评分版本兼容时进行的差异比较。
+两个 Runs 只在声明的 `experiment_axes` 上不同，且其余控制变量与评分版本兼容时进行的差异比较。当前持久化 CandidateArtifact 不含 `schema_version`；compare 将缺失值视为 `candidate-artifact-v1`，不得把该字段写进 artifact hash。
 _Avoid_: A/B test, side-by-side view, improvement
 
 **Regression Suite**:
-一组冻结、人工确认 expected behavior 的定向 cases，用于检测特定 AI 行为变化；它不是总体学习效果或统计显著性的证明。Regression 可以是同一 scorer 上的 verdict/score 变差，也可以是声明轴上的 deterministic finding 变化加上语料外常识。LLM judge 解析失败必须保持 inconclusive。Fresh clone 使用 committed curated fixture 作为演示种子；本机 raw `output/` 不进 Git。
+一组冻结、人工确认 expected behavior 的定向 cases，用于检测特定 AI 行为变化；它不是总体学习效果或统计显著性的证明。Regression 可以是同一 scorer 上的 verdict/score 变差，也可以是声明轴上的 deterministic finding 变化加上语料外常识。LLM judge 解析失败必须保持 inconclusive。Run Lab 的 Regressions 计数必须使用与 release contract 相同的 hybrid-v1 pairwise 规则，不能用 fail verdict 条数代替。Fresh clone 使用 committed curated fixture 作为演示种子；本机 raw `output/` 不进 Git。
 _Avoid_: Benchmark, comprehensive evaluation, golden truth
 

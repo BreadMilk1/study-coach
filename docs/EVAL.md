@@ -593,7 +593,7 @@ Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alia
 - Tutor answers are real `gemma4:e4b` generations. Deterministic citation numbering no longer floors the suite.
 - Refusal observer fired on **v2** for `tgqa-004`, `tgqa-008`, and `tgqa-012` (`I don't know`).
 - On **v3**, `tgqa-008` and `tgqa-012` added a "General Study Knowledge" fill after saying the notes were silent. That is the helpfulness-vs-grounding leak the candidate prompt asked for. The observer did **not** mark `expected_refusal_observed` on those two v3 cells.
-- **Zero hybrid-v1 verdict/score regression.** The directed suite regression is the refusal-axis leak: v2 has `expected_refusal_observed` on `tgqa-008` and `tgqa-012`; v3 does not, and those v3 answers add "General Study Knowledge". That is accepted as a real prompt-axis regression. The LLM rubric parser was not loosened.
+- **Zero hybrid-v1 verdict/score regression.** The directed suite regression is the refusal-axis leak: v2 has `expected_refusal_observed` on `tgqa-008` and `tgqa-012`; v3 does not, and those v3 answers add "General Study Knowledge". That is accepted as a real prompt-axis regression. The LLM rubric parser was not loosened. Run Lab `Regressions` must show `2` for this fixture, not `0` fail verdicts.
 - Empty dimension scores are a scorer parse limit on this model, not a fabricated 0.
 
 ## Limits
