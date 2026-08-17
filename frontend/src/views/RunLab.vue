@@ -94,7 +94,10 @@ onMounted(() => {
       <div v-if="disabled" class="rounded-lg border border-warning/40 bg-warning-bg p-4 text-sm mb-6">
         {{ $t('runLab.disabled') }}
       </div>
-      <p v-else-if="error" class="text-sm text-danger mb-6">{{ error }}</p>
+      <p v-if="!disabled && error" class="text-sm text-danger mb-6">{{ error }}</p>
+      <p v-if="!disabled && runsStore.error" class="text-sm text-danger mb-6">
+        {{ runsStore.error.message }}
+      </p>
 
       <section v-if="experiment" class="rounded-lg border border-border bg-surface p-4 mb-6">
         <p class="text-xs uppercase tracking-wider text-fg-dim">{{ $t('runLab.axis') }}</p>
