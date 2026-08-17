@@ -25,6 +25,7 @@ from app.eval.learning_run.repositories import (
     RepositoryNotFoundError,
 )
 from app.eval.learning_run.compare import compare_score_sets
+from app.eval.learning_run.regression import suite_regression_case_ids
 from app.eval.learning_run.service import (
     EvalModelConnection,
     RunRequestError,
@@ -285,8 +286,21 @@ def _execution_detail(row: Any) -> ScorerExecutionDetail:
     )
 
 
+def _suite_regression_count(session: Session, registry: TaskRegistry) -> int:
+    try:
+        runs = EvalRunRepository(session).list_verified()
+        scores = EvalScoreSetRepository(session)
+        score_sets_by_run = {run.id: scores.list_verified(run.id) for run in runs}
+    except (ChecksumMismatchError, EvaluationUnavailableError, RepositoryNotFoundError):
+        return 0
+    return len(suite_regression_case_ids(registry, runs, score_sets_by_run))
+
+
 @eval_router.get("/experiments", response_model=list[ExperimentSummary])
-def list_experiments(request: Request) -> list[ExperimentSummary]:
+def list_experiments(
+    request: Request,
+    session: Session = Depends(get_eval_session),
+) -> list[ExperimentSummary]:
     registry = _registry(request)
     counts: dict[str, int] = {}
     for case in registry.task_cases.values():
@@ -304,6 +318,7 @@ def list_experiments(request: Request) -> list[ExperimentSummary]:
             case_counts=counts,
             run_profile=registry.experiment.run_profile,
             budgets=dict(registry.experiment.budget),
+            regression_count=_suite_regression_count(session, registry),
         )
     ]
 

@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from app.eval.learning_run.compare import compare_score_sets
+
+
+FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "app"
+    / "eval"
+    / "learning_run"
+    / "fixtures"
+    / "tutor-prompt-regression-v1.jsonl"
+)
 
 
 def _side(
@@ -98,6 +111,73 @@ def test_informational_compare_when_undeclared_config_differs():
     assert result["delta"] is None
     assert result["scope"] == "case"
     assert any("undeclared" in reason or "model" in reason for reason in result["reasons"])
+
+
+def test_missing_artifact_cannot_align():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    right["artifact"] = None
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "incompatible"
+    assert "cannot align artifact schema" in result["reasons"]
+
+
+def test_curated_fixture_prompt_axis_pair_is_controlled_without_schema_version():
+    by_pair: dict[tuple[str, str], dict] = {}
+    for raw in FIXTURE_PATH.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        record = json.loads(raw)
+        run = record["run"]
+        by_pair[(run["task_case_id"], run["variant_id"])] = record
+
+    left_record = by_pair[("tgqa-008", "tutor-v2")]
+    right_record = by_pair[("tgqa-008", "tutor-v3")]
+    left_run = left_record["run"]
+    right_run = right_record["run"]
+    assert "schema_version" not in left_run["candidate_artifact"]
+    assert "schema_version" not in right_run["candidate_artifact"]
+    left_score = next(
+        item
+        for item in left_record["score_sets"]
+        if item["scorer_version"] == "hybrid-v1"
+    )
+    right_score = next(
+        item
+        for item in right_record["score_sets"]
+        if item["scorer_version"] == "hybrid-v1"
+    )
+
+    result = compare_score_sets(
+        {
+            "run_id": left_run["id"],
+            "variant_id": left_run["variant_id"],
+            "manifest": left_run["manifest"],
+            "artifact": left_run["candidate_artifact"],
+            "score_set": {
+                "scorer_id": left_score["scorer_id"],
+                "scorer_version": left_score["scorer_version"],
+                "aggregate_scores": left_score["aggregate_scores"],
+            },
+        },
+        {
+            "run_id": right_run["id"],
+            "variant_id": right_run["variant_id"],
+            "manifest": right_run["manifest"],
+            "artifact": right_run["candidate_artifact"],
+            "score_set": {
+                "scorer_id": right_score["scorer_id"],
+                "scorer_version": right_score["scorer_version"],
+                "aggregate_scores": right_score["aggregate_scores"],
+            },
+        },
+    )
+
+    assert result["compatibility"] == "controlled"
+    assert result["rescore_required"] is False
+    assert result["scope"] == "case"
 
 
 def test_incompatible_when_task_or_corpus_or_artifact_schema_cannot_align():

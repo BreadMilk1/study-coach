@@ -124,6 +124,7 @@ export interface ExperimentSummary {
   case_counts: Record<string, number>
   run_profile: string
   budgets: Record<string, number>
+  regression_count: number
 }
 
 export interface ScoreSetSummary {

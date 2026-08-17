@@ -17,6 +17,23 @@ export function findingLabel(severity: 'critical' | 'noncritical'): string {
   return severity === 'critical' ? 'Critical finding' : 'Noncritical finding'
 }
 
+export function findingDisplay(finding: unknown): string {
+  if (finding === null || typeof finding !== 'object') {
+    return String(finding ?? '')
+  }
+  const record = finding as Record<string, unknown>
+  const code = typeof record.code === 'string' ? record.code : ''
+  const severity = record.severity === 'critical' || record.severity === 'noncritical'
+    ? record.severity
+    : ''
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (!code && !severity) {
+    return JSON.stringify(finding)
+  }
+  const head = [code, severity].filter(Boolean).join(' · ')
+  return message ? `${head}: ${message}` : head
+}
+
 export function operationalErrorMessage(code: string | null | undefined): string {
   switch (code) {
     case 'process_interrupted':

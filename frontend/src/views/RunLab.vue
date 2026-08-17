@@ -35,9 +35,7 @@ const filteredRuns = computed(() => {
   return runs.value
 })
 
-const regressionCount = computed(() => (
-  runs.value.filter(run => run.latest_score_set?.quality_verdict === 'fail').length
-))
+const regressionCount = computed(() => experiment.value?.regression_count ?? 0)
 const inconclusiveCount = computed(() => (
   runs.value.filter(run => run.latest_score_set?.quality_verdict === 'inconclusive').length
 ))

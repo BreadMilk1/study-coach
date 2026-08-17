@@ -36,11 +36,14 @@ def _manifest(side: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+CANDIDATE_ARTIFACT_SCHEMA = "candidate-artifact-v1"
+
+
 def _artifact_schema(side: Mapping[str, Any]) -> str:
     artifact = side.get("artifact")
     if not isinstance(artifact, Mapping):
         return ""
-    return str(artifact.get("schema_version") or "")
+    return str(artifact.get("schema_version") or CANDIDATE_ARTIFACT_SCHEMA)
 
 
 def _score_set(side: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -146,4 +149,4 @@ def compare_score_sets(
     }
 
 
-__all__ = ["compare_score_sets"]
+__all__ = ["CANDIDATE_ARTIFACT_SCHEMA", "compare_score_sets"]

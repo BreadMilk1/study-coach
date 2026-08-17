@@ -730,6 +730,60 @@ def test_eval_get_lists_and_detail_are_read_only_and_checksum_verified(eval_clie
     missing = client.get("/api/eval/runs/not-found", headers=headers)
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "evaluation_not_found"
+    assert experiments.json()[0]["regression_count"] == 0
+
+
+def test_imported_fixture_compare_is_controlled_and_counts_refusal_regressions(eval_client):
+    from pathlib import Path
+
+    from app.db.session import session_scope
+    from app.eval.learning_run.registry import TaskRegistry
+    from app.eval.learning_run.repositories import EvalSuiteImportRepository
+
+    client, headers, _, _, _ = eval_client
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "app"
+        / "eval"
+        / "learning_run"
+        / "fixtures"
+        / "tutor-prompt-regression-v1.jsonl"
+    )
+    records = [
+        json.loads(line)
+        for line in fixture.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    with session_scope() as session:
+        imported = EvalSuiteImportRepository(
+            session, registry=TaskRegistry.load_default()
+        ).import_records(records)
+    assert imported == 24
+
+    experiments = client.get("/api/eval/experiments", headers=headers)
+    assert experiments.status_code == 200
+    assert experiments.json()[0]["regression_count"] == 2
+
+    runs = client.get("/api/eval/runs", headers=headers)
+    assert runs.status_code == 200
+    left = next(
+        row
+        for row in runs.json()
+        if row["task_case_id"] == "tgqa-008" and row["variant_id"] == "tutor-v2"
+    )
+    right = next(
+        row
+        for row in runs.json()
+        if row["task_case_id"] == "tgqa-008" and row["variant_id"] == "tutor-v3"
+    )
+    compare = client.get(
+        f"/api/eval/compare?left={left['run_id']}&right={right['run_id']}",
+        headers=headers,
+    )
+    assert compare.status_code == 200
+    payload = compare.json()
+    assert payload["compatibility"] == "controlled"
+    assert payload["reasons"] == []
 
 
 def test_rescore_busy_is_http_409_before_stream(eval_client):

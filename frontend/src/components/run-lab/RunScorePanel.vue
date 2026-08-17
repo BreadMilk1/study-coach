@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 import type { QualityVerdict, ScoreSetDetail } from '../../lib/evalContracts'
-import { displayVerdict, findingLabel, verdictLabel } from '../../lib/learningRunPresentation'
+import { displayVerdict, findingDisplay, verdictLabel } from '../../lib/learningRunPresentation'
 
 const props = defineProps<{
   scoreSets: ScoreSetDetail[]
@@ -38,19 +38,15 @@ const shownVerdict = computed<QualityVerdict>(() => displayVerdict({
       </div>
     </dl>
     <h3 class="text-xs uppercase tracking-wider text-fg-dim mb-2">{{ $t('runLab.findings') }}</h3>
-    <ul v-if="Array.isArray(latest?.findings) && latest.findings.length" class="space-y-1 text-sm text-fg-muted mb-6">
-      <li v-for="(finding, index) in latest.findings" :key="index">
-        {{ typeof finding === 'object' && finding && 'severity' in finding
-          ? findingLabel((finding as { severity: 'critical' | 'noncritical' }).severity)
-          : JSON.stringify(finding) }}
-      </li>
-    </ul>
-    <p v-else class="text-sm text-fg-dim mb-6">—</p>
-    <p v-if="baseline" class="text-sm text-fg-muted">{{ baseline }}</p>
-    <ol v-if="scoreSets.length" class="mt-6 space-y-1 text-xs font-mono text-fg-dim">
-      <li v-for="set in scoreSets" :key="set.score_set_id">
+    <div v-for="set in scoreSets" :key="set.score_set_id" class="mb-4">
+      <p class="text-xs font-mono text-fg-dim mb-1">
         {{ set.scorer_version }} · {{ set.status }} · {{ set.quality_verdict }}
-      </li>
-    </ol>
+      </p>
+      <ul v-if="Array.isArray(set.findings) && set.findings.length" class="space-y-1 text-sm text-fg-muted">
+        <li v-for="(finding, index) in set.findings" :key="index">{{ findingDisplay(finding) }}</li>
+      </ul>
+      <p v-else class="text-sm text-fg-dim">—</p>
+    </div>
+    <p v-if="baseline" class="text-sm text-fg-muted">{{ baseline }}</p>
   </section>
 </template>

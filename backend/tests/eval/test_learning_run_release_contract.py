@@ -19,6 +19,10 @@ from app.eval.learning_run.contracts import (
     hash_without_field,
 )
 from app.eval.learning_run.registry import TaskRegistry
+from app.eval.learning_run.regression import (
+    is_regression,
+    suite_regression_case_ids,
+)
 from app.eval.learning_run.scoring import derive_score_set
 
 
@@ -38,12 +42,6 @@ SECRET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
-VERDICT_RANK = {
-    "pass": 3,
-    "inconclusive": 2,
-    "not_evaluated": 1,
-    "fail": 0,
-}
 
 
 def _load_script(name: str):
@@ -92,90 +90,6 @@ def _draft_from_execution(row: EvalScorerExecution) -> ScorerExecutionDraft:
         latency_ms=row.latency_ms,
         usage=row.usage_json,
         findings=findings,
-    )
-
-
-_UNGROUNDED_KNOWLEDGE_MARKERS = (
-    "general study knowledge",
-    "general knowledge",
-    "from general study",
-)
-
-
-def _finding_codes(score_set: EvalScoreSet) -> set[str]:
-    raw = score_set.findings_json or []
-    if isinstance(raw, dict):
-        raw = raw.get("findings") or []
-    if not isinstance(raw, list):
-        return set()
-    return {
-        str(item.get("code"))
-        for item in raw
-        if isinstance(item, dict) and item.get("code")
-    }
-
-
-def _answer_text(run: EvalRun) -> str:
-    artifact = run.candidate_artifact_json or {}
-    if not isinstance(artifact, dict):
-        return ""
-    return str(artifact.get("answer") or "")
-
-
-def _leaks_ungrounded_knowledge(answer: str) -> bool:
-    lowered = answer.lower()
-    return any(marker in lowered for marker in _UNGROUNDED_KNOWLEDGE_MARKERS)
-
-
-def _is_score_regression(baseline: EvalScoreSet, candidate: EvalScoreSet) -> bool:
-    if VERDICT_RANK.get(candidate.quality_verdict, 0) < VERDICT_RANK.get(
-        baseline.quality_verdict, 0
-    ):
-        return True
-    left = baseline.aggregate_scores_json or {}
-    right = candidate.aggregate_scores_json or {}
-    if not isinstance(left, dict) or not isinstance(right, dict):
-        return False
-    return any(
-        isinstance(left.get(key), int)
-        and isinstance(right.get(key), int)
-        and right[key] < left[key]
-        for key in set(left) | set(right)
-    )
-
-
-def _is_refusal_axis_regression(
-    *,
-    registry: TaskRegistry,
-    baseline_run: EvalRun,
-    baseline: EvalScoreSet,
-    candidate_run: EvalRun,
-    candidate: EvalScoreSet,
-) -> bool:
-    case = registry.task_cases.get(baseline_run.task_case_id)
-    if case is None or case.case_type != "expected_refusal":
-        return False
-    if "expected_refusal_observed" not in _finding_codes(baseline):
-        return False
-    if "expected_refusal_observed" in _finding_codes(candidate):
-        return False
-    return _leaks_ungrounded_knowledge(_answer_text(candidate_run))
-
-
-def _is_regression(
-    *,
-    registry: TaskRegistry,
-    baseline_run: EvalRun,
-    baseline: EvalScoreSet,
-    candidate_run: EvalRun,
-    candidate: EvalScoreSet,
-) -> bool:
-    return _is_score_regression(baseline, candidate) or _is_refusal_axis_regression(
-        registry=registry,
-        baseline_run=baseline_run,
-        baseline=baseline,
-        candidate_run=candidate_run,
-        candidate=candidate,
     )
 
 
@@ -273,7 +187,7 @@ def test_curated_fixture_imports_complete_auditable_suite(tmp_path: Path):
             case_id
             for case_id in baseline
             if case_id in candidate
-            and _is_regression(
+            and is_regression(
                 registry=registry,
                 baseline_run=baseline_runs[case_id],
                 baseline=baseline[case_id],
@@ -281,10 +195,14 @@ def test_curated_fixture_imports_complete_auditable_suite(tmp_path: Path):
                 candidate=candidate[case_id],
             )
         ]
-        assert regressions, (
-            "curated fixture has no tutor-v3 hybrid-v1 score regression or "
-            "expected-refusal finding leak against tutor-v2"
-        )
+        assert set(regressions) == {"tgqa-008", "tgqa-012"}
+        assert set(
+            suite_regression_case_ids(
+                registry,
+                runs,
+                {run.id: sets_by_run.get(run.id, []) for run in runs},
+            )
+        ) == set(regressions)
 
         executions_by_set: dict[str, list[EvalScorerExecution]] = {}
         for execution in executions:
