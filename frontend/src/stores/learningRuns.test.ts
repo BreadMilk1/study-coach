@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { watchEffect } from 'vue'
 
 import { memoryStorage } from '../test/memoryStorage'
 import { EvalApiError } from '../lib/evalApi'
@@ -248,6 +249,37 @@ describe('attached learning run store', () => {
     expect(harness.store.canOpenHistoricalFallback()).toBe(true)
     expect(harness.store.openHistoricalFallback('historical-run')).toBe('historical-run')
     expect(harness.store.activeRunId).toBe('live-run')
+  })
+
+  it('makes the historical fallback reactive when a stalled run emits no further events', async () => {
+    vi.useFakeTimers()
+    try {
+      const harness = createStoreHarness()
+      void harness.start()
+      await Promise.resolve()
+      harness.emit(event({
+        schema_version: 'eval-api-v1',
+        type: 'run_created',
+        run_id: 'live-run',
+      }))
+
+      const observed: boolean[] = []
+      const stopWatching = watchEffect(
+        () => { observed.push(harness.store.canOpenHistoricalFallback()) },
+        { flush: 'sync' },
+      )
+      expect(observed).toEqual([false])
+
+      // The stall case the fallback exists for: wall clock advances, the
+      // stream stays silent, so no store mutation can trigger a re-render.
+      harness.advance(HISTORICAL_FALLBACK_MS)
+      await vi.advanceTimersByTimeAsync(HISTORICAL_FALLBACK_MS)
+
+      expect(observed.at(-1)).toBe(true)
+      stopWatching()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('aborts the previous attached stream before a second start', async () => {
