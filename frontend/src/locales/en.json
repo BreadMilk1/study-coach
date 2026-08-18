@@ -149,7 +149,7 @@
     "inconclusive": "Inconclusive",
     "history": "History",
     "filterAll": "All",
-    "filterFail": "Regressions",
+    "filterFail": "Failed",
     "filterInconclusive": "Inconclusive",
     "liveCase": "Case",
     "liveVariant": "Prompt variant",
