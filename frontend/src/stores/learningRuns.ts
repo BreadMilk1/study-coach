@@ -18,6 +18,7 @@ import type {
 import { EvalApiError } from '../lib/evalApi'
 
 export const HISTORICAL_FALLBACK_MS = 30_000
+const FALLBACK_TICK_MS = 1_000
 
 export interface LearningRunDependencies {
   streamRun: typeof streamLearningRun
@@ -69,6 +70,8 @@ export const useLearningRuns = defineStore('learningRuns', {
     connection: null as EvalConnectionSnapshot | null,
     controller: null as AbortController | null,
     startedAt: null as number | null,
+    nowTick: 0,
+    fallbackTimer: null as ReturnType<typeof setInterval> | null,
     generation: 0,
     detail: null as RunDetail | null,
     kind: 'run' as 'run' | 'rescore',
@@ -76,8 +79,32 @@ export const useLearningRuns = defineStore('learningRuns', {
   actions: {
     canOpenHistoricalFallback(): boolean {
       if (this.status !== 'running' || this.startedAt === null) return false
-      const now = dependencies().now ?? Date.now
-      return now() - this.startedAt >= HISTORICAL_FALLBACK_MS
+      // Reading `nowTick` subscribes Vue effects to the ticking clock. A
+      // stalled run emits no events, so nothing else would ever re-evaluate
+      // this predicate and the fallback button would never appear.
+      const now = Math.max(this.nowTick, (dependencies().now ?? Date.now)())
+      return now - this.startedAt >= HISTORICAL_FALLBACK_MS
+    },
+
+    armFallbackTick(): void {
+      this.clearFallbackTick()
+      this.nowTick = this.startedAt ?? 0
+      const timer = setInterval(() => {
+        if (this.status !== 'running') {
+          this.clearFallbackTick()
+          return
+        }
+        this.nowTick = (dependencies().now ?? Date.now)()
+      }, FALLBACK_TICK_MS)
+      // Never hold a Node process (or test run) open for the fallback clock.
+      ;(timer as unknown as { unref?: () => void }).unref?.()
+      this.fallbackTimer = timer
+    },
+
+    clearFallbackTick(): void {
+      if (this.fallbackTimer === null) return
+      clearInterval(this.fallbackTimer)
+      this.fallbackTimer = null
     },
     initialize(overrides: Partial<LearningRunDependencies>): void {
       learningRunDependencies = { ...dependencies(), ...overrides }
@@ -105,6 +132,7 @@ export const useLearningRuns = defineStore('learningRuns', {
       this.connection = connection
       this.controller = controller
       this.startedAt = (dependencies().now ?? Date.now)()
+      this.armFallbackTick()
       this.detail = null
       this.kind = 'run'
 
@@ -150,6 +178,7 @@ export const useLearningRuns = defineStore('learningRuns', {
       this.connection = connection
       this.controller = controller
       this.startedAt = (dependencies().now ?? Date.now)()
+      this.armFallbackTick()
       this.kind = 'rescore'
 
       try {
