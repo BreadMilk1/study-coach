@@ -56,6 +56,16 @@ describe('Run Lab source contracts', () => {
     expect(lab).not.toMatch(/quality_verdict === 'fail'\)\.length/)
   })
 
+  it('does not label the fail-verdict filter with the release-contract regression term', () => {
+    // The header count follows the release contract (hybrid-v1 pairwise rule),
+    // while the filter selects fail verdicts. Sharing one word for both makes
+    // the same page contradict itself.
+    for (const locale of ['../locales/en.json', '../locales/zh-CN.json']) {
+      const runLab = JSON.parse(readSource(locale)).runLab
+      expect(runLab.filterFail).not.toBe(runLab.regressions)
+    }
+  })
+
   it('shows finding codes on detail and answers on compare', () => {
     const panel = readSource('../components/run-lab/RunScorePanel.vue')
     const compare = readSource('./RunCompare.vue')

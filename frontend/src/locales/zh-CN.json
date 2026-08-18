@@ -149,7 +149,7 @@
     "inconclusive": "不确定",
     "history": "历史",
     "filterAll": "全部",
-    "filterFail": "回归",
+    "filterFail": "失败",
     "filterInconclusive": "不确定",
     "liveCase": "Case",
     "liveVariant": "Prompt 变体",
