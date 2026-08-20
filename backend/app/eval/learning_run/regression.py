@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .contracts import is_dimension_score
+
 
 VERDICT_RANK = {
     "pass": 3,
@@ -82,8 +84,8 @@ def is_score_regression(baseline: Any, candidate: Any) -> bool:
     if not isinstance(left, Mapping) or not isinstance(right, Mapping):
         return False
     return any(
-        isinstance(left.get(key), int)
-        and isinstance(right.get(key), int)
+        is_dimension_score(left.get(key))
+        and is_dimension_score(right.get(key))
         and right[key] < left[key]
         for key in set(left) | set(right)
     )

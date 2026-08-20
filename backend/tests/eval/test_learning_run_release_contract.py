@@ -284,3 +284,56 @@ def test_release_docs_and_cli_contracts():
     assert set(registry.prompts) == {"tutor-v2", "tutor-v3"}
     assert registry.experiment.variants["tutor-v2"]["provider"] == "ollama"
     assert registry.experiment.variants["tutor-v2"]["model"] == "llama3.2"
+
+
+def test_regression_and_compare_agree_on_which_scores_are_comparable():
+    """A float-scored scorer must not blind the release contract.
+
+    Today every rubric is an integer 1-5 scale, so `regression.py` reading only
+    `int` and `compare.py` reading `int | float` happen to agree. If a scorer
+    ever averages judges into a float, compare would keep rendering deltas
+    while regression silently stopped counting them -- and regression IS the
+    release contract, so it would go quiet rather than fail. Pin the two
+    readers to one predicate.
+    """
+    from app.eval.learning_run.compare import compare_score_sets
+    from app.eval.learning_run.regression import is_score_regression
+
+    baseline = {"quality_verdict": "pass", "aggregate_scores": {"groundedness": 4.5}}
+    candidate = {"quality_verdict": "pass", "aggregate_scores": {"groundedness": 3.5}}
+
+    assert is_score_regression(baseline, candidate) is True
+
+    def side(run_id: str, variant: str, score: float) -> dict:
+        return {
+            "run_id": run_id,
+            "variant_id": variant,
+            "manifest": {
+                "task_case_id": "tgqa-001",
+                "task_case_version": "1",
+                "prompt_version": variant,
+                "corpus_snapshot_hash": "c" * 64,
+                "experiment_axes": ("prompt_version",),
+            },
+            "artifact": {"schema_version": "candidate-artifact-v1", "answer": "a"},
+            "score_set": {
+                "scorer_id": "hybrid",
+                "scorer_version": "hybrid-v1",
+                "aggregate_scores": {"groundedness": score},
+            },
+        }
+
+    delta = compare_score_sets(
+        side("l", "tutor-v2", 4.5), side("r", "tutor-v3", 3.5)
+    )["delta"]
+    assert delta["groundedness"]["delta"] == -1.0
+
+
+def test_booleans_are_not_read_as_dimension_scores():
+    """`isinstance(True, int)` is True in Python; a bool is not a rubric score."""
+    from app.eval.learning_run.regression import is_score_regression
+
+    baseline = {"quality_verdict": "pass", "aggregate_scores": {"groundedness": True}}
+    candidate = {"quality_verdict": "pass", "aggregate_scores": {"groundedness": False}}
+
+    assert is_score_regression(baseline, candidate) is False
