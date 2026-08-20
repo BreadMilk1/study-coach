@@ -783,7 +783,12 @@ def test_imported_fixture_compare_is_controlled_and_counts_refusal_regressions(e
     assert compare.status_code == 200
     payload = compare.json()
     assert payload["compatibility"] == "controlled"
-    assert payload["reasons"] == []
+    # The committed fixture predates CandidateArtifact `schema_version`, so the
+    # compare infers v1. That stays `controlled`, but is now reported rather
+    # than assumed silently -- and this is the real artifact, not a synthetic one.
+    assert payload["reasons"] == [
+        "artifact schema not declared; assumed candidate-artifact-v1"
+    ]
 
 
 def test_rescore_busy_is_http_409_before_stream(eval_client):
@@ -963,6 +968,36 @@ def test_cancel_endpoint_maps_control_storage_failure_to_sanitized_503(eval_clie
     assert response.json()["detail"] == {
         "code": "evaluation_unavailable",
         "message": "evaluation storage is unavailable",
+    }
+
+
+def test_cancel_endpoint_maps_control_conflict_to_409(eval_client, monkeypatch):
+    """A cancel the repository refuses is a conflict, not a crash.
+
+    `EvalExecutionControlRepository.cancel_run` raises `RepositoryConflictError`
+    for a Run it will not transition. The `eval_runs` CHECK constraints make
+    that branch unreachable today, so this pins the route's contract rather
+    than a live state: `cancel_score_set` already maps the same error to 409,
+    and an unmapped one surfaces as a 500.
+    """
+    client, headers, _, _, _ = eval_client
+    run_id = _seed_running_run(run_id="cancel-conflict", frozen=False)
+
+    from app.eval.learning_run.repositories import RepositoryConflictError
+
+    def conflict(*_args, **_kwargs):
+        raise RepositoryConflictError(f"run cannot be cancelled: {run_id}")
+
+    monkeypatch.setattr(
+        "app.api.eval_routes.EvalExecutionControlRepository.cancel_run",
+        conflict,
+    )
+    response = client.post(f"/api/eval/runs/{run_id}/cancel", headers=headers)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "evaluation_conflict",
+        "message": "evaluation run cannot be cancelled",
     }
 
 

@@ -98,6 +98,23 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def is_dimension_score(value: Any) -> bool:
+    """Whether a stored aggregate-score value is comparable across ScoreSets.
+
+    Shared by `regression.py` and `compare.py` so the two readers of the same
+    numbers cannot drift apart. Every rubric is an integer 1-5 scale today, but
+    a scorer that ever averages judges into a float must not blind regression
+    detection while compare keeps rendering deltas -- regression is the release
+    contract, so divergence there is silence rather than failure.
+
+    `bool` is excluded deliberately: `isinstance(True, int)` is True in Python,
+    and a flag is not a rubric score. Scorer output validation stays stricter
+    still (`scoring.py` accepts only `int` in range); this is the read path.
+    """
+
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _tuple_strings(values: Sequence[str] | None) -> tuple[str, ...]:
     return tuple(str(value) for value in (values or ()))
 

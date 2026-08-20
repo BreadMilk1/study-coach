@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from .contracts import is_dimension_score
+
 
 _ALIGN_FIELDS = (
     "task_case_id",
@@ -39,11 +41,23 @@ def _manifest(side: Mapping[str, Any]) -> Mapping[str, Any]:
 CANDIDATE_ARTIFACT_SCHEMA = "candidate-artifact-v1"
 
 
-def _artifact_schema(side: Mapping[str, Any]) -> str:
+def _artifact_schema(side: Mapping[str, Any]) -> tuple[str, bool]:
+    """Return the artifact schema and whether it had to be inferred.
+
+    A missing `schema_version` is read as v1: imported fixtures predate the
+    field and `CandidateArtifact.to_dict()` still omits it, because writing it
+    would change `artifact_hash`. The inference is reported back so a
+    `controlled` verdict never hides the assumption -- a genuinely newer
+    artifact that simply forgot the field would otherwise compare as v1 with
+    no signal at all.
+    """
     artifact = side.get("artifact")
     if not isinstance(artifact, Mapping):
-        return ""
-    return str(artifact.get("schema_version") or CANDIDATE_ARTIFACT_SCHEMA)
+        return "", False
+    declared = artifact.get("schema_version")
+    if declared:
+        return str(declared), False
+    return CANDIDATE_ARTIFACT_SCHEMA, True
 
 
 def _score_set(side: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -83,16 +97,24 @@ def compare_score_sets(
     right_manifest = _manifest(right)
     reasons: list[str] = []
 
+    left_schema, left_inferred = _artifact_schema(left)
+    right_schema, right_inferred = _artifact_schema(right)
+    # Kept out of `reasons` until the verdict is decided: a non-empty `reasons`
+    # below means incompatible, and an inferred schema is not a blocking reason.
+    notes: list[str] = []
+    if left_inferred or right_inferred:
+        notes.append(f"artifact schema not declared; assumed {CANDIDATE_ARTIFACT_SCHEMA}")
+
     for field in _ALIGN_FIELDS:
         if left_manifest.get(field) != right_manifest.get(field):
             reasons.append(f"cannot align {field}")
-    if _artifact_schema(left) != _artifact_schema(right) or not _artifact_schema(left):
+    if left_schema != right_schema or not left_schema:
         reasons.append("cannot align artifact schema")
 
     if reasons:
         return {
             "compatibility": "incompatible",
-            "reasons": reasons,
+            "reasons": reasons + notes,
             "left": {"run_id": left.get("run_id"), "variant_id": left.get("variant_id")},
             "right": {"run_id": right.get("run_id"), "variant_id": right.get("variant_id")},
             "scorer_bundle": {
@@ -113,6 +135,7 @@ def compare_score_sets(
     undeclared = _undeclared_diffs(left_manifest, right_manifest, axes=axes)
     compatibility = "informational" if undeclared else "controlled"
     reasons.extend(undeclared)
+    reasons.extend(notes)
 
     left_scorer = str(_score_set(left).get("scorer_version") or "")
     right_scorer = str(_score_set(right).get("scorer_version") or "")
@@ -126,7 +149,7 @@ def compare_score_sets(
             for key in sorted(set(left_scores) | set(right_scores)):
                 left_value = left_scores.get(key)
                 right_value = right_scores.get(key)
-                if isinstance(left_value, (int, float)) and isinstance(right_value, (int, float)):
+                if is_dimension_score(left_value) and is_dimension_score(right_value):
                     delta[key] = {
                         "left": left_value,
                         "right": right_value,

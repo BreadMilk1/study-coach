@@ -193,6 +193,37 @@ def test_incompatible_when_task_or_corpus_or_artifact_schema_cannot_align():
     assert result["reasons"]
 
 
+def test_inferred_artifact_schema_is_reported_without_changing_compatibility():
+    """Defaulting a missing `schema_version` must not be silent.
+
+    Imported fixtures predate the field and `to_dict()` deliberately still
+    omits it, because writing it would change `artifact_hash`. Treating the
+    absence as `candidate-artifact-v1` is therefore correct, but a reader
+    seeing `controlled` deserves to know an assumption was applied -- a
+    genuinely v2 artifact that forgot the field would compare as v1.
+    """
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    del left["artifact"]["schema_version"]
+    del right["artifact"]["schema_version"]
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert any("candidate-artifact-v1" in reason for reason in result["reasons"])
+
+
+def test_declared_artifact_schema_reports_no_inference():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["reasons"] == []
+
+
+
 def test_different_scorer_version_requires_rescore_and_hides_score_delta():
     result = compare_score_sets(
         _side(run_id="left", scorer_version="hybrid-v1", score=5),

@@ -391,6 +391,15 @@ def cancel_run(
         return _run_summary(run, score_sets)
     except RepositoryNotFoundError:
         raise _error(404, "evaluation_not_found", "evaluation run was not found") from None
+    except RepositoryConflictError:
+        # Unreachable while the `eval_runs` CHECK constraints hold, but the
+        # repository declares it. Mirrors `cancel_score_set` so a refused
+        # cancel can never surface as a 500.
+        raise _error(
+            409,
+            "evaluation_conflict",
+            "evaluation run cannot be cancelled",
+        ) from None
     except ChecksumMismatchError:
         raise _error(
             500,
