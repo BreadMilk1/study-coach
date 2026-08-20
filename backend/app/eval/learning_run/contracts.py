@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field, is_dataclass
 from types import MappingProxyType
@@ -110,9 +111,25 @@ def is_dimension_score(value: Any) -> bool:
     `bool` is excluded deliberately: `isinstance(True, int)` is True in Python,
     and a flag is not a rubric score. Scorer output validation stays stricter
     still (`scoring.py` accepts only `int` in range); this is the read path.
+
+    Non-finite values are excluded because they reach here unvalidated: suite
+    import parses fixtures with plain `json.loads`, which accepts `NaN` and
+    `Infinity`. A NaN would fail twice over -- every NaN comparison is False,
+    so a real score drop is silently never reported, and Starlette renders with
+    `allow_nan=False`, so a non-finite delta turns `/api/eval/compare` into a
+    500 rather than a comparison.
+
+    Rubric *range* is deliberately not enforced here: the scale is declared per
+    scorer bundle (`rubric.scale`), and this predicate cannot see which bundle
+    produced a value. Hardcoding 1-5 would silently drop every score from a
+    future bundle on a different scale -- the same blindness this function
+    exists to prevent. Range belongs at the import boundary, with the rest of
+    the unvalidated-input checks.
     """
 
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
 
 
 def _tuple_strings(values: Sequence[str] | None) -> tuple[str, ...]:
