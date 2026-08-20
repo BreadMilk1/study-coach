@@ -6,6 +6,7 @@
 
 Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery — all grounded in your materials.
 
+[![CI](https://github.com/BreadMilk1/study-coach/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BreadMilk1/study-coach/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.11-3776ab)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1c3c3c)](https://langchain.com/langgraph)
