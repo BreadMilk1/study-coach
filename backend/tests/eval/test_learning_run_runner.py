@@ -63,11 +63,43 @@ def _candidate(*, evidence: list[dict[str, Any]] | None = None) -> TutorCandidat
     )
 
 
-def _wait_for_controller_state(controller: Any, expected: str) -> bool:
-    for _ in range(5000):
+def _wait_for_controller_state(
+    controller: Any, expected: str, *, timeout: float = 5.0
+) -> bool:
+    """Wait for a background state transition against a deadline.
+
+    `time.sleep` is what makes this correct rather than a slower spin: it
+    releases the GIL so the materializer's cleanup thread can actually be
+    scheduled. A tight pure-Python loop starves that thread on a
+    few-core runner while claiming to wait for it.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if controller.state == expected:
             return True
+        time.sleep(0.005)
     return controller.state == expected
+
+
+def test_wait_for_controller_state_waits_on_a_deadline_not_a_spin_count():
+    """The helper must outlast a background thread that is slower than N reads.
+
+    A fixed spin count is not a synchronisation primitive: on a constrained
+    runner the materializer's cleanup thread is not scheduled within the spin
+    budget, and a tight pure-Python loop holds the GIL against the very thread
+    it is waiting for. This controller becomes idle on the wall clock, so it is
+    unreachable by spinning faster.
+    """
+
+    class LateController:
+        def __init__(self, ready_after_seconds: float) -> None:
+            self._ready_at = time.monotonic() + ready_after_seconds
+
+        @property
+        def state(self) -> str:
+            return "idle" if time.monotonic() >= self._ready_at else "draining"
+
+    assert _wait_for_controller_state(LateController(0.05), "idle")
 
 
 class RecordingLoader:

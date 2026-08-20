@@ -480,6 +480,7 @@ Historical re-score 按钮保留，但主路径只展示已经存在的多个 Sc
 - re-score 不调用 Tutor/retriever且只追加 ScoreSet。
 - suite import 缺失、重复、checksum mismatch 整批回滚。
 - 两个独立 DB connections 配合 barrier/controlled hook，覆盖 run/run、run/rescore、cancel/finalize、reset/run、startup/new-run 两种提交顺序；禁止依赖 sleep。
+- 「禁止依赖 sleep」禁止的是**固定延迟当同步**（`sleep(0.5)` 之后直接断言），不是禁止一切等待。等待背景线程或线程池排空时：优先 `Event.wait(timeout)` / Barrier；当被观测对象只暴露状态属性、没有可等待的原语时，允许**带 deadline 且会让出 GIL** 的轮询。**禁止无 timeout 的忙等**——固定圈数不是同步原语，它既依赖时序又没有安全边际，而且紧循环持有 GIL，反而饿死它正在等待的那个线程。此条由一次真实事故补入：`_wait_for_controller_state` 的 5000 圈忙等在多核开发机上通过、在双核 CI runner 上稳定失败。
 
 ### 17.5 SSE and frontend
 
