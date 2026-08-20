@@ -337,3 +337,52 @@ def test_booleans_are_not_read_as_dimension_scores():
     candidate = {"quality_verdict": "pass", "aggregate_scores": {"groundedness": False}}
 
     assert is_score_regression(baseline, candidate) is False
+
+
+def test_non_finite_scores_are_not_comparable():
+    """NaN and infinities are not scores, however they got into the row.
+
+    The import path parses fixtures with plain `json.loads`, which accepts
+    `NaN` / `Infinity`, and never validates `aggregate_scores`. A NaN reaching
+    the readers is doubly bad: every NaN comparison is False, so a real drop is
+    silently not reported, and Starlette renders responses with
+    `allow_nan=False`, so a non-finite delta turns `/api/eval/compare` into a
+    500 instead of a comparison.
+    """
+    from app.eval.learning_run.contracts import is_dimension_score
+
+    for value in (float("nan"), float("inf"), float("-inf")):
+        assert is_dimension_score(value) is False
+
+
+def test_compare_delta_stays_renderable_when_a_stored_score_is_non_finite():
+    """Mirrors Starlette's renderer: a delta must survive `allow_nan=False`."""
+    import json as _json
+
+    from app.eval.learning_run.compare import compare_score_sets
+
+    def side(run_id: str, variant: str, score) -> dict:
+        return {
+            "run_id": run_id,
+            "variant_id": variant,
+            "manifest": {
+                "task_case_id": "tgqa-001",
+                "task_case_version": "1",
+                "prompt_version": variant,
+                "corpus_snapshot_hash": "c" * 64,
+                "experiment_axes": ("prompt_version",),
+            },
+            "artifact": {"schema_version": "candidate-artifact-v1", "answer": "a"},
+            "score_set": {
+                "scorer_id": "hybrid",
+                "scorer_version": "hybrid-v1",
+                "aggregate_scores": {"groundedness": score},
+            },
+        }
+
+    result = compare_score_sets(
+        side("l", "tutor-v2", 4), side("r", "tutor-v3", float("nan"))
+    )
+
+    assert result["delta"] == {}
+    _json.dumps(result, allow_nan=False)
