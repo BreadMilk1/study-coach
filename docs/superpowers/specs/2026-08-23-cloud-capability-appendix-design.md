@@ -95,13 +95,34 @@ thinking 启用时 `response.content` 是 **block list** 而非字符串，该�
 
 **要求：** eval 包把 provider 响应规范化为三态 `completed` / `truncated` / `failed`，并保留经清洗的原始 finish 元数据。rev 1 写的「非 `stop` 一律记为 failure」是把两套词汇混为一谈，已作废。
 
-### 2.5 凭证隔离
+### 2.5 Thinking token 的取得路径（两套协议，两个字段名）
+
+与 §2.4 的完成状态同类：生成侧与评分侧的 thinking token 字段**路径与名称都不同**，且**都是嵌套的**。
+
+| 侧 | 协议 | 字段路径 | 实测值 |
+|---|---|---|---|
+| Generator（M3） | Anthropic | `usage.output_tokens_details.thinking_tokens` | 309 |
+| Judge（DeepSeek） | OpenAI-compatible | `usage.completion_tokens_details.reasoning_tokens` | 200 |
+
+实测同一次 M3 调用：`output_tokens = 681`，其中 `thinking_tokens = 309`，可见文本 1046 字符。
+
+**要求：**
+
+- 按协议读取上表对应路径，**不得跨协议套用字段名**。
+- **`output_tokens` 不得用作 thinking token 的代理**——它同时包含 thinking 与可见文本。
+- `output_tokens_details` **仅在 thinking 启用时出现**。主轨（`disabled`）该字段缺失是预期行为，不是错误。
+- 字段缺失时记为 **`unavailable`，不得补 `0`**（沿用既有 harness 约定）。
+- **§6 的 protocol probe 必须验证该字段存在**，再进入付费的 appendix 运行。
+
+> 方法论备注：本字段最初被误判为「不存在」，因为探测脚本只扫描了 `usage` 的顶层键。完整 dump 才发现它是嵌套的。**验证嵌套结构时必须 dump 完整对象，不能只列顶层键。**
+
+### 2.6 凭证隔离
 
 实测：显式传入 `base_url` / `api_key` 时，响应模型为 `MiniMax-M3`，未受同名环境变量影响。
 
 **要求：一律显式传参，禁止依赖环境隐式解析。** 运行环境可能存在属于其他工具的同名变量；若实现依赖 ambient env，评测会产出「看起来正常但完全无效」的数据。
 
-### 2.6 DeepSeek
+### 2.7 DeepSeek
 
 | 项 | 实测值 |
 |---|---|
@@ -133,7 +154,7 @@ thinking 启用时 `response.content` 是 **block list** 而非字符串，该�
 1. **空 content 是预算不足导致的截断，不是模型缺陷。**
 2. 关闭 thinking 的 output token 是开启的 **1/89**，分数相同（单样本，不构成质量结论）。
 
-### 2.7 凭证与运行环境
+### 2.8 凭证与运行环境
 
 - **两把独立 key，三个 provider role**：`MINIMAX_API_KEY` 同时服务 M3 生成与 M2.7 judge；`DEEPSEEK_API_KEY` 服务 primary judge。
 - 环境变量可能只在交互式 shell 中可见。**preflight 必须显式验证三个 role 均可用**，不得假设存在。
@@ -408,7 +429,7 @@ smoke 外推若显示任一阶段将超出对应上限，中止并重新评估�
 
 ### 7.2 凭证处理
 
-- 两把 key 只从环境变量读取，服务三个 provider role（§2.7）
+- 两把 key 只从环境变量读取，服务三个 provider role（§2.8）
 - **不进文件、不进 commit、不进日志、不进 artifact**
 - manifest 记录**公开的**规范化 endpoint / region / provider / protocol / model / thinking 配置。base URL 不是秘密，可记录；**key 不可**
 - 不记录原始 thinking 内容到 artifact（可记录长度与 token 数）
