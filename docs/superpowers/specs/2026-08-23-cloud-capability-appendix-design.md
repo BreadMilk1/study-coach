@@ -249,7 +249,8 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 | appendix | **`{"type":"enabled","budget_tokens":1024}`（冻结）** | 60（30/mode，仅 single-turn） | M3 as designed 的真实 agentic 能力 |
 
 - 主轨**显式请求 `disabled`**，不依赖默认值——默认值可能漂移，且端点 fail-open（§2.2）。
-- **appendix 的 treatment 已冻结为 fixed-budget `enabled`，实现者不得改选。** 不采用 `adaptive` 的理由见 §2.2：该端点不校验 `type`，`adaptive` 无法被验证为独立 treatment。报告中一律称为 **fixed-budget thinking appendix**，不得简称「thinking on」。
+- **appendix 的 treatment 已冻结为 fixed-budget `enabled`，实现者不得改选。** 不采用 `adaptive` 的理由见 §2.2：该端点不校验 `type`，`adaptive` 无法被验证为独立 treatment。
+- **冻结的是请求契约，不是服务端行为。** 报告中一律称为 **fixed-budget request profile**，不得简称「thinking on」，更**不得声称服务端已被证明严格执行 1024-token 上限**——我们只验证了请求被接受，没有验证 budget 被遵守。因此每次调用**必须记录实际 `reasoning_tokens`**；若实测值系统性偏离 1024，那是一项观测结果，写入报告，不是失败。
 - 若未来确认该端点真正实现了 adaptive 语义，那是一次**独立的设计变更与重新审批**，不在本 spec 范围内。
 - 两轨共用 `temperature=0.7`（§2.2 实测支持），因此是干净的单变量对比。
 - appendix 需**单独批准**（§7 成本）。若 smoke 显示成本或延迟不可接受，可只跑主 cell，须记录该决定与原因。
@@ -429,6 +430,7 @@ smoke 外推若显示任一阶段将超出对应上限，中止并重新评估�
 - **不得**在 §3.3 修复前产出跨 mode 成本结论。
 - **不得**将 legacy 线分数解释为 answer correctness 或 explanation clarity 的效度（§5.3）。
 - **不得**把四个指标合成单一「总冠军」（§4.2）。
+- **不得**将 `budget_tokens=1024` 表述为服务端已证明执行的上限；只可表述为请求侧配置（§4.3）。
 - **不得**将 M3 的 Anthropic-compatible 可用性表述为官方稳定保证（§2.1）。
 
 ---
