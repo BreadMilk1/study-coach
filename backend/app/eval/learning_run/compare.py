@@ -150,10 +150,19 @@ def compare_score_sets(
                 left_value = left_scores.get(key)
                 right_value = right_scores.get(key)
                 if is_dimension_score(left_value) and is_dimension_score(right_value):
+                    try:
+                        difference = right_value - left_value
+                    except OverflowError:
+                        # Comparable does not imply subtractable. `<` is exact
+                        # for an oversized int, but subtracting it against a
+                        # float coerces to float and overflows. Drop the
+                        # dimension the same way a non-numeric value is
+                        # skipped, rather than failing the whole compare.
+                        continue
                     delta[key] = {
                         "left": left_value,
                         "right": right_value,
-                        "delta": right_value - left_value,
+                        "delta": difference,
                     }
 
     return {

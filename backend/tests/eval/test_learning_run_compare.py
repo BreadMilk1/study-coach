@@ -249,3 +249,27 @@ def test_single_case_copy_cannot_claim_suite_or_general_quality():
     assert result["caption"] == "case delta"
     assert "suite" not in result["caption"]
     assert "quality" not in result["caption"]
+
+
+def test_compare_omits_a_delta_it_cannot_subtract():
+    """Comparable does not imply subtractable.
+
+    `is_dimension_score` answers "can these be compared", and comparison is
+    safe for an oversized int (`10**1000 < 4.5` is False, no raise). Building a
+    delta needs more: `10**1000 - 4.5` coerces the int to float and raises
+    OverflowError, so a mixed pair from the unvalidated import path would turn
+    `/api/eval/compare` into a 500. Drop the dimension instead, the same way a
+    non-numeric value is already skipped.
+    """
+    import json as _json
+
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["score_set"]["aggregate_scores"] = {"groundedness": 4.5}
+    right["score_set"]["aggregate_scores"] = {"groundedness": 10**1000}
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["delta"] == {}
+    _json.dumps(result, allow_nan=False)
