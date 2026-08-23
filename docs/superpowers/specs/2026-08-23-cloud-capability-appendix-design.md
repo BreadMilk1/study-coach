@@ -52,13 +52,21 @@ MiniMax-M3 × { deterministic , agent_loop }
 | `thinking={"type":"enabled","budget_tokens":1024}` | blocks = `['thinking','text','tool_use']`，thinking 1260 字符 |
 | 工具结果回传后的第二轮 | blocks = `['thinking','text']` ← **interleaved thinking 生效** |
 | thinking block 保留在 `AIMessage` 并回传 | ✅ |
-| `temperature=0.7` + thinking | ✅ **被接受**（blocks = `['thinking','text']`，`stop_reason=end_turn`） |
+| `temperature=0.7` + thinking | ✅ **被接受**（`stop_reason=end_turn`） |
+| `thinking={"type":"disabled"}` | blocks = `['text']` |
+| `thinking={"type":"adaptive"}` | 被接受，产生 thinking |
+| **`thinking={"type":"banana"}`（无效值）** | **同样被接受，同样产生 thinking** |
 
-**M3 的 interleaved thinking 在该端点默认关闭，须显式启用。**
+**该端点在 thinking 配置上 fail-open：不校验 `type` 的值，只要不是 `disabled` 就开启 thinking。**
 
-rev 1 曾写「必须显式 `thinking: disabled` 以对齐既有 cell」——方向反了。默认即为关闭；真正的设计问题是要不要开（§4.2）。
+这有两个后果：
 
-rev 1 亦曾写「启用 thinking 时 temperature 须为 1」——**实测证伪**。0.7 被接受，因此 thinking appendix 可与主轨共用 `temperature=0.7`，是**干净的单变量比较**，不存在 rev 1 声称的 confound。
+1. **`adaptive` 在此端点上无法被验证为一个独立 treatment**——它与无效值 `banana` 的接受行为完全相同。硬题上 adaptive（875 thinking 字符）与 fixed-budget（1215）的差异各只有单样本，在 `temperature=0.7` 下无法区分于采样变异。因此 §4.3 冻结在 **`enabled` + 显式 `budget_tokens`**：那是行为可指定、可复现的配置。
+2. **thinking type 写错不会报错，会静默开启 thinking。** §6.2 中「主轨响应仍出现 thinking block 即中止」因此是必需的守卫，不是保守起见。
+
+**M3 的 interleaved thinking 在该端点默认关闭。** rev 1 曾写「必须显式 `thinking: disabled` 以对齐既有 cell」并称方向反了——更准确的表述是：**默认关闭已经过实测确认，但主轨仍必须显式传 `disabled`，以防默认值漂移**（且 fail-open 特性意味着任何非 `disabled` 的笔误都会开启 thinking）。
+
+rev 1 亦曾写「启用 thinking 时 temperature 须为 1」——**实测证伪**。0.7 被接受，因此 thinking appendix 可与主轨共用 `temperature=0.7`，是**干净的单变量比较**。
 
 **agent loop 代码无需修改。** `quiz_master_agent.py` 的 `messages.append(response)` 附加整个 `AIMessage` 对象，已满足 MiniMax 文档「必须完整回传 assistant 消息以保持思维链连续性」的要求。实现者**不得**为「提取纯文本」而改写这一行。
 
@@ -201,7 +209,7 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 | 独立 session | 36 | **72** |
 
 - primary cells：8 → **10**
-- 既有 396 条**已包含** gemma4:e4b 的 thinking appendix（该模型 72 条/mode，其余 42 条/mode）。加入主 cell 后总记录数 **480**；若同时执行 §4.2 appendix，则 **540**。
+- 既有 396 条**已包含** gemma4:e4b 的 thinking appendix（该模型 72 条/mode，其余 42 条/mode）。加入主 cell 后总记录数 **480**；若同时执行 §4.3 appendix，则 **540**。
 
 **统计要求：**
 
@@ -237,11 +245,12 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 
 | 轨 | thinking | 记录数 | 回答什么 |
 |---|---|---|---|
-| 主 cell | 显式 `disabled` | 84 | 与既有 cell 对齐，隔离「能力层」单一变量 |
-| appendix | `enabled` | 60（30/mode，仅 single-turn） | M3 as designed 的真实 agentic 能力 |
+| 主 cell | 显式 `{"type":"disabled"}` | 84 | 与既有 cell 对齐，隔离「能力层」单一变量 |
+| appendix | **`{"type":"enabled","budget_tokens":1024}`（冻结）** | 60（30/mode，仅 single-turn） | M3 as designed 的真实 agentic 能力 |
 
-- 主轨**显式请求 `thinking: disabled`**，不依赖当前默认值（默认值可能变）。
-- appendix 优先使用官方 `adaptive` 模式；若采用固定 `enabled + budget_tokens`，须在报告中称为 **fixed-budget thinking appendix**，不得简称为「thinking on」。
+- 主轨**显式请求 `disabled`**，不依赖默认值——默认值可能漂移，且端点 fail-open（§2.2）。
+- **appendix 的 treatment 已冻结为 fixed-budget `enabled`，实现者不得改选。** 不采用 `adaptive` 的理由见 §2.2：该端点不校验 `type`，`adaptive` 无法被验证为独立 treatment。报告中一律称为 **fixed-budget thinking appendix**，不得简称「thinking on」。
+- 若未来确认该端点真正实现了 adaptive 语义，那是一次**独立的设计变更与重新审批**，不在本 spec 范围内。
 - 两轨共用 `temperature=0.7`（§2.2 实测支持），因此是干净的单变量对比。
 - appendix 需**单独批准**（§7 成本）。若 smoke 显示成本或延迟不可接受，可只跑主 cell，须记录该决定与原因。
 
@@ -278,7 +287,7 @@ retriever 配置（embedding model、chunking、reranker、top_k、retrieval_dep
 | `deepseek-v4-pro`，显式 `thinking: disabled` | **预注册 primary subjective judge** | 新 pair 的主观质量判定 |
 | `MiniMax-M2.7`（云端） | **同厂 sensitivity signal** | 与受测者同家族，**不作为独立证据** |
 
-qwen 不称「clean bridge」：实测 P2.3 既有数据中有 **12 条** local judge 解析失败回退（`app/agent/judge.py:119` 写入明确标记字串 `Judge output parsing failed`，可确定识别；P2.2 为 0 条）。因此「judge 看到完整文本」不等于「旧分数没有 parser confound」。这 12 条须在报告中排除或单独标注。
+qwen 不称「clean bridge」：实测 P2.3 既有数据中有 **12 条** local judge 解析失败回退（`app/agent/judge.py:119` 写入明确标记字串 `Judge output parsing failed`，可确定识别；P2.2 为 0 条）。因此「judge 看到完整文本」不等于「旧分数没有 parser confound」。这 12 条**从聚合分数中排除，同时报告排除数量**（不是二选一）。
 
 **分歧处理：DeepSeek 与 qwen 方向相反时，报告 `judge disagreement / inconclusive`，不得强行采用 DeepSeek。** DeepSeek 不是中立真值，是一个预注册的主观判定者。分歧的判断**只在 `quiz-artifact-v1` 上有意义**——两者必须看到相同输入才可比。
 
@@ -292,7 +301,7 @@ rev 1 的「两条线都评」无法确定调用次数，也无法保证 judge �
 | `quiz-artifact-v1` | 结构化：question / options / answer / explanation / evidence | qwen2.5:7b + deepseek-v4-pro + MiniMax-M2.7 | **仅成功持久化的** GENERATE rows |
 | — | — | quality scorer 标记 `skipped` | 全部 GRADE rows（只验证 session/persistence） |
 
-`quiz-artifact-v1` 的字段**从持久化的 Question 记录读取**，不是从模型输出文本重新解析。缺 Question 或缺 evidence → 记为 **structured artifact failure**，**不得回退到 legacy payload**。
+`quiz-artifact-v1` 的字段**从持久化的 Question 记录读取**，不是从模型输出文本重新解析。缺 Question，或 **evidence 捕获状态缺失** → 记为 **structured artifact failure**，**不得回退到 legacy payload**。注意区分：成功捕获到的 `evidence=[]` 是有效观测（§4.4），不是 failure。
 
 ### 5.3 Construct validity：两条线必须分开
 
