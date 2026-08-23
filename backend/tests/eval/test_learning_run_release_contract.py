@@ -386,3 +386,24 @@ def test_compare_delta_stays_renderable_when_a_stored_score_is_non_finite():
 
     assert result["delta"] == {}
     _json.dumps(result, allow_nan=False)
+
+
+def test_dimension_score_predicate_is_total_for_oversized_ints():
+    """A predicate must answer, not raise.
+
+    `math.isfinite` converts its argument to float first, and
+    `float(10**1000)` raises `OverflowError`. Python ints carry no infinities,
+    so they never need that conversion. This is reachable rather than
+    hypothetical: a fixture line with a long integer literal parses to `int`
+    via `json.loads`, and suite import does not validate `aggregate_scores`.
+
+    Oversized ints answer True, not False. They are exactly comparable, so
+    they are comparable values; rejecting them would be a range check with an
+    arbitrary threshold, and range belongs at the import boundary against the
+    frozen scorer rubric -- not in a reader that cannot see which bundle
+    produced the number.
+    """
+    from app.eval.learning_run.contracts import is_dimension_score
+
+    assert is_dimension_score(10**1000) is True
+    assert is_dimension_score(-(10**1000)) is True

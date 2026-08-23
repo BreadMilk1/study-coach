@@ -127,9 +127,17 @@ def is_dimension_score(value: Any) -> bool:
     the unvalidated-input checks.
     """
 
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         return False
-    return math.isfinite(value)
+    # `int` first, and without `math.isfinite`: that converts to float, and
+    # `float(10**1000)` raises OverflowError. Python ints carry no infinities,
+    # so they are always finite -- and a long integer literal in a fixture
+    # line parses to `int`, so the oversized case is reachable from import.
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
 
 
 def _tuple_strings(values: Sequence[str] | None) -> tuple[str, ...]:
