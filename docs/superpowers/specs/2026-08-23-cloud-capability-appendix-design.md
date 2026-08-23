@@ -72,7 +72,9 @@ raw = getattr(response, "content", "") or ""
 
 thinking 启用时 `response.content` 是 **block list** 而非字符串，该行会取到列表，下游 JSON 解析失效。
 
-**要求：** eval 包提供一个 provider adapter，在进入 deterministic 路径前把 block list 扁平化为文本（丢弃 thinking block，保留 text block）。**`quiz.py` 保持字节级不变。** 若实现者选择让 thinking appendix 只覆盖 agent_loop 一侧，须在报告中声明该缩减及原因。
+**要求：** eval 包提供一个 provider adapter，在进入 deterministic 路径前把 block list 扁平化为文本（丢弃 thinking block，保留 text block）。**`quiz.py` 保持字节级不变。**
+
+**实验形状不得由实现者变更。** appendix 一经批准即为两 mode × 60 条（§4.3）。若 deterministic adapter 无法工作，**中止并重新审批**，不得缩减为 agent-loop-only。
 
 ### 2.4 完成状态的两套词汇
 
@@ -95,10 +97,20 @@ thinking 启用时 `response.content` 是 **block list** 而非字符串，该�
 
 | 项 | 实测值 |
 |---|---|
+| Endpoint | `https://api.deepseek.com`（OpenAI-compatible 协议） |
 | 可用模型 | `deepseek-v4-flash` / `deepseek-v4-pro` / `deepseek-v4-flash-vision-exp` |
 | 凭证 | `DEEPSEEK_API_KEY` |
 | thinking 默认 | **开启** |
-| `thinking={"type":"disabled"}` | 被接受 |
+| 关闭方式（OpenAI SDK） | `extra_body={"thinking": {"type": "disabled"}}` ✅ 实测有效 |
+
+经 OpenAI SDK 实测（同一提示，`max_tokens=300`）：
+
+| 配置 | reasoning 字符 | completion tokens | content |
+|---|---|---|---|
+| 默认 | 253 | 63 | `{"question_quality":4}` |
+| `extra_body` 关闭 thinking | 0 | 7 | `{"question_quality":4}` |
+
+**`thinking` 是非标准参数，OpenAI SDK 下必须经 `extra_body` 传递**，直接作为顶层 kwarg 会被拒绝或忽略。
 
 同一 judge 提示下：
 
@@ -137,7 +149,9 @@ model 字符串含 `/` 时会被解释为目录分隔符，写入失败。
 
 **要求：** provider identity（`provider` / `protocol` / `model` 三字段）与 storage identity（filesystem-safe key 或哈希）分离。
 
-`_run_id(model, mode, thinking, query_id, turn_idx, run_idx)` 将 model 纳入哈希，因此新模型自然产生新 run_id，**既有 396 条的续跑性不受影响**。实现者不得改变既有 Ollama 模型的 run_id 输入。
+`_run_id(model, mode, thinking, query_id, turn_idx, run_idx)` 将 model 纳入哈希，因此新模型自然产生新 run_id，**既有 396 条的续跑性不受影响**。
+
+**新 cloud run ID 的输入应纳入 `provider` / `protocol` / `model` 三者**（避免未来同名模型跨 provider 撞号）；**既有 Ollama 模型的 run_id 算法保持不变**，实现者不得改动。
 
 ### 3.2 两阶段持久化状态机
 
@@ -152,9 +166,20 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 **Phase 2 — Scoring（从 candidate 独立追加）**
 
 - 各 ScorerExecution 从已冻结的 candidate 读取输入，独立追加，可单独重试，**不重新生成**。
-- 每条 ScorerExecution 记录：规范化完成状态（§2.4）、原始响应、usage、模型 ID、thinking 配置、rubric hash。
+- 每条 ScorerExecution 记录（与 §7.2 的保密要求兼容，rev 1 的「保存原始响应」与「不保存 thinking」冲突，已按下表解决）：
+
+  | 字段 | 内容 |
+  |---|---|
+  | sanitized final content / parsed JSON | 完整保存 |
+  | raw response 的 **SHA-256** | 保存哈希，不保存原文 |
+  | block 类型与各自长度 | 保存 |
+  | 规范化完成状态 + 经清洗的 finish metadata（§2.4） | 保存 |
+  | usage（含 cache / reasoning tokens） | 保存 |
+  | 模型 ID、protocol、thinking 配置、rubric hash | 保存 |
+  | **thinking 内容** | **仅保存存在性、长度、token 数** |
+
 - 解析失败、缺维度、异常、`truncated` → 记为 **failure**，不得自动补 3、不得进入分数统计。
-- 显式设置 `max_tokens`；DeepSeek 显式 `thinking: disabled`（成本与确定性选择，非正确性要求）。
+- 显式设置 `max_tokens`；DeepSeek 显式关闭 thinking（成本与确定性选择，非正确性要求）。
 
 ### 3.3 Deterministic usage 记账
 
@@ -185,26 +210,26 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 
 ### 4.2 预注册判定规则
 
-**配对单位：** 36 个 `(query_id, run_idx)` GENERATE session，跨 mode 配对。
+**Cluster 单位：12 个 `query_id`。** 不是 36 个 session——同一 query 的 3 次重复只是采样随机性，彼此相关，不构成独立 cluster。配对在 `(query_id, run_idx)` 上做，bootstrap 按 `query_id` 聚类。
 
-**分别报告四个指标，不合成总分：**
+**四个轴分别预注册方向假设，不使用统一的「区间为正即成立」规则**（rev 1 如此写是错的：quality 与 persistence 越高越好，latency 与 cost 越低越好，方向相反）。
 
-| 指标 | 样本 |
-|---|---|
-| persistence / completion rate | 全部 36 对 |
-| visible quality（`legacy-visible-v1`） | 全部 GENERATE rows |
-| structured quality（`quiz-artifact-v1`） | 仅两侧均成功持久化的配对，**必须同时报告保留率** |
-| latency / cost | 全部（cost 须 §3.3 修复后方可报告） |
+| 轴 | 样本 | 方向假设（agent_loop 相对 deterministic） |
+|---|---|---|
+| persistence / completion rate | 全部 12 query cluster | 更高为优 |
+| visible quality（`legacy-visible-v1`） | 全部 GENERATE rows | 更高为优 |
+| structured quality（`quiz-artifact-v1`） | 仅两侧均成功持久化的配对，**必须同时报告保留率** | 更高为优 |
+| latency / cost | 全部（cost 须 §3.3 修复后方可报告） | **更低**为优 |
 
 保留率是防止成功样本选择偏差的必要条件：若 agent_loop 只在容易的 case 上成功，其 structured quality 会被高估。
 
-**判定：** 对每个指标做 cluster bootstrap（按 session 聚类）。
+**每个轴独立判定**（cluster bootstrap，按 `query_id`）：
 
-- 区间全为正 → 支持「结论在该能力层成立」
-- 区间全为负 → 反驳
-- 跨零，或 judge 方向冲突（§5.1）→ **inconclusive**
+- 区间完全落在该轴假设的有利侧 → 该轴支持
+- 完全落在不利侧 → 该轴反驳
+- 跨零，或 judge 方向冲突（§5.1）→ 该轴 **inconclusive**
 
-**不得**汇总出一个「总冠军」。
+**不得**跨轴汇总出一个「总冠军」。四个轴可以指向不同结论，那本身就是结果。
 
 ### 4.3 Thinking 双轨
 
@@ -226,8 +251,18 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 
 **Corpus 冻结（`_build_default_retriever()` 只是复用 factory，不等于冻结语料）：**
 
-- 运行前后记录并比对 **corpus aggregate hash、chunk count、retriever 配置**；不一致即中止。
-- 使用 eval-side `RecordingRetriever` 包装，捕获两种 mode 实际检索到的 evidence，写入 artifact。
+**Snapshot hash 定义（冻结，不留实现者解释空间）：**
+
+1. 取每个 chunk 的 `chunk_id` / `content` / `source` / `page` 四个字段
+2. 按 `chunk_id` 排序
+3. canonical JSON 序列化 → **SHA-256**
+
+retriever 配置（embedding model、chunking、reranker、top_k、retrieval_depth）**单独 hash**。
+
+- 运行前后各计算一次，两者与 chunk count 必须一致；不一致即中止。
+- 每条 CandidateArtifact **绑定 snapshot hash 与 retriever config hash**。
+- 使用 eval-side `RecordingRetriever` 包装，记录每次检索的 **query、top_k、返回的 evidence**，写入 artifact。
+- **`evidence=[]` 且捕获状态正常，是有效观测**（P2.3 的 no-retriever pilot 已证明空检索本身是信号）。只有**捕获状态缺失**才是 artifact failure。
 
 `quiz_master.py` 与 `quiz_master_agent.py` 本次实验中**字节级不变**——P2.2/P2.3 已守过的边界纪律，保证 A/B 公平。
 
@@ -239,7 +274,7 @@ rev 1 把 candidate-first、judge-only retry、session-atomic resume 列为三�
 
 | Judge | 角色 | 用途 |
 |---|---|---|
-| `qwen2.5:7b`（本地） | **descriptive legacy reference** | 唯一在全部 10 个 cell 都存在；跨 cell 的**描述性**参照 |
+| `qwen2.5:7b`（本地） | **descriptive legacy reference** | 唯一在全部 10 个 cell 上都跑过 `legacy-visible-v1` contract 的 judge；跨 cell 的**描述性**参照 |
 | `deepseek-v4-pro`，显式 `thinking: disabled` | **预注册 primary subjective judge** | 新 pair 的主观质量判定 |
 | `MiniMax-M2.7`（云端） | **同厂 sensitivity signal** | 与受测者同家族，**不作为独立证据** |
 
@@ -272,9 +307,9 @@ Reply with A
 
 **不含答案、不含解释**（P4.5 刻意的防泄漏加固）。而 quiz rubric 五维中有 `answer_correctness` 与 `explanation_clarity`——**五分之二的维度在评一段文本里不存在的东西**。这是 P2.3 既有缺陷，非本次引入。
 
-| 线 | 可比性 | 可宣称 |
+| 线 | 与既有 8 cell 的关系 | 可宣称 |
 |---|---|---|
-| `legacy-visible-v1` | 与既有 8 cell 可比 | 「user-visible quiz prompt quality」，**不得**宣称评了 answer correctness |
+| `legacy-visible-v1` | payload 与 rubric 格式一致，**仅作描述性参照，不构成 Controlled Comparison** | 「user-visible quiz prompt quality」，**不得**宣称评了 answer correctness |
 | `quiz-artifact-v1` | 与既有 cell **不可比** | 五维 rubric 的完整效度 |
 
 **分开报告，不得合成单一数字。**
@@ -350,12 +385,16 @@ rev 1 把 smoke 排在 usage/fail-closed 修复之前，但 smoke 本身要求�
 
 | 阶段 | 上限 |
 |---|---|
-| Protocol probe + smoke | **$1** |
-| 主 cell 84 条 | **$5** |
+| Protocol probe + smoke | 计入主阶段额度，不单列 |
+| 主 cell 84 条（含 probe 与 smoke） | **$5** |
 | thinking appendix（需单独批准） | 额外 **$5** |
 | **combined hard cap** | **$10** |
 
+rev 1 的 `$1 + $5 + $5 = $11` 与 `$10` cap 自相矛盾，已修正：probe 与 smoke 计入主阶段的 $5 之内。
+
 smoke 外推若显示任一阶段将超出对应上限，中止并重新评估，不得「先跑看看」。
+
+**每次付费调用前检查剩余额度**，并以显式 `max_tokens` 约束单次最坏成本。usage 须按 **generator / 各 judge / 每次调用**分别记录，含 cache 与 reasoning tokens。**任一付费调用缺 usage，完整矩阵不得开始。**
 
 ### 7.2 凭证处理
 
@@ -394,8 +433,18 @@ smoke 外推若显示任一阶段将超出对应上限，中止并重新评估�
 5. 新数据写入独立、带版本的 artifact，含 schema version、完整输出与 hash、rubric hash、provider/protocol/model/thinking 配置、corpus fingerprint、实际检索 evidence、usage 与价格快照。
 6. 任何 judge failure 均可从 artifact 区分于真实低分。
 7. 报告明确区分 `legacy-visible-v1` 与 `quiz-artifact-v1` 两条线。
-8. §8.2 的任一禁止宣称均未出现在文档中。
-9. **ROADMAP.md、ARCHITECTURE.md、README.md 中的矩阵规模数字同步更新**（396 → 480 或 540；8 cells → 10）。
+8. §8.2 的任一禁止宣称，**均未作为正向实验结论出现**（引用该禁令并解释理由是允许的）。
+9. **矩阵规模以 additive provenance 记录，不得改写历史数字。** ROADMAP.md / ARCHITECTURE.md / README.md 按下表更新：
+
+   | 层级 | 主 cell 后 | 含 thinking appendix |
+   |---|---|---|
+   | 历史 P2.3（**永久不变**） | 396 | 396 |
+   | + cloud main `+84` → P2.3 family | **480** | 480 |
+   | + optional thinking `+60` | — | **540** |
+   | P2.2 + P2.3 family | **876** | **936** |
+   | 再加 no-retriever pilot（396） | **1,272** | **1,332** |
+
+   写法必须呈现为「396 + 84」而非「396 → 480」，避免实现者理解为覆盖历史数据。
 
 ---
 
@@ -404,9 +453,11 @@ smoke 外推若显示任一阶段将超出对应上限，中止并重新评估�
 运行前后比对，任一变化即为验收失败：
 
 ```
-d60837707b105867574e5298cd10cf6a225414f38f31a187cb65b8540868f6ae  p2_2_agent_ablation/output/results.jsonl
-2fba0df1ea6e4e540127a07fb6037e48f14d7a9b6d864594a649341e95523bfd  p2_3_quiz_ablation/output/results.jsonl
-2a64bea2da11eb22603522b7a75ac2caa6c5092ab18f7a49da59191057aaea94  p2_3_quiz_ablation/output/results_no_retriever.jsonl
+d60837707b105867574e5298cd10cf6a225414f38f31a187cb65b8540868f6ae  backend/app/eval/p2_2_agent_ablation/output/results.jsonl
+2fba0df1ea6e4e540127a07fb6037e48f14d7a9b6d864594a649341e95523bfd  backend/app/eval/p2_3_quiz_ablation/output/results.jsonl
+2a64bea2da11eb22603522b7a75ac2caa6c5092ab18f7a49da59191057aaea94  backend/app/eval/p2_3_quiz_ablation/output/results_no_retriever.jsonl
 ```
+
+**这三个文件被 `.gitignore` 忽略，因此上述哈希是本机的 pre/post 运行门禁，不是 clean-clone CI 门禁。** CI 无法验证它们；执行者必须在运行前后各自校验一次并记录结果。
 
 新 cell 数据写入**独立文件**，不追加到上述任一文件。
