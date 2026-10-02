@@ -602,3 +602,13 @@ Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alia
 - Evaluation measures one TutorAttempt, not Graph Judge retries.
 - 12 cases are a directed regression suite, not a benchmark of overall study quality.
 - Paid/remote models are not a CI gate.
+
+## Cloud Capability Foundation — protocol helpers and identity (offline)
+
+This batch adds only the offline foundation that the later cloud-capability harness builds on:
+
+- `backend/app/eval/p2_3_cloud_capability/protocol.py` — response and protocol helpers: `SmokeAbort`, `failure_class_for_exception` (transport vs harness classification), `flatten_text_content`, `normalize_finish_status`, `extract_thinking_tokens`, `extract_usage`, `canonical_json_bytes`, `langchain_response_canonical`, `thinking_char_length`, `finish_raw_from_response` and `raw_usage_from_response`, plus secret-key redaction for provenance fingerprints.
+- `backend/app/eval/p2_3_cloud_capability/identity.py` — the frozen `ProviderIdentity` value object and the deterministic identity algorithm. `cloud_run_id` is a 16-hex-character digest over provider, protocol, model, mode, thinking profile, query id, `turn_idx` and `run_idx`. `storage_key` is the same digest over the same inputs **without** `turn_idx`, prefixed with `s` (so `s` followed by 16 hex characters); it addresses a session rather than a single turn. `recover_run_idx` does not invert either digest: it enumerates candidate run indices in a bounded range, rebuilds the id for each candidate from the row's context (mode, thinking profile, query id and `turn_idx`) and compares it with the recorded `run_id` or `session_storage_key`. An already-present nonnegative integer `run_idx` (excluding booleans) is returned as is. No index is returned when no candidate matches.
+- `backend/app/eval/p2_3_cloud_capability/__init__.py` (empty) with the matching offline unit tests `backend/tests/eval/test_p2_3_cloud_protocol.py` and `backend/tests/eval/test_p2_3_cloud_identity.py`.
+
+Nothing else is part of this batch. The probe, the live harness, the matrix runner, the `--stage` CLI wiring, the budget ledger (v1 or v2), the lifecycle lock, active-attempt selection, evidence snapshots and the summarizer are deliberately **not** delivered here and remain in the planned follow-up batches, each of which is still authorized separately. These are offline unit tests: no provider is called and no real `output/` is touched.
