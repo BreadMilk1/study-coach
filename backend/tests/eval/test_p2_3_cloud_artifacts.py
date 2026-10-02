@@ -1,4 +1,6 @@
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -6,6 +8,7 @@ from app.eval.p2_3_cloud_capability.artifacts import (
     CandidateStore,
     ScoreStore,
     SessionIncomplete,
+    encode_path_segment,
     encode_scorer_id,
     new_candidate,
 )
@@ -541,3 +544,188 @@ def test_invalid_key_rejection_precedes_immutable_check(tmp_path):
     store.commit_session("s1", expected_turns=1)
     with pytest.raises(ValueError, match="unsafe session storage key"):
         store.commit_session("../escape", expected_turns=0)
+
+
+def _scorer_dir(root, run_id: str, scorer_id: str) -> Path:
+    return Path(root) / "executions" / encode_path_segment(run_id) / encode_scorer_id(scorer_id)
+
+
+def _write_score_rows(root, run_id: str, scorer_id: str, files: dict) -> Path:
+    directory = _scorer_dir(root, run_id, scorer_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, payload in files.items():
+        (directory / name).write_text(json.dumps(payload), encoding="utf-8")
+    return directory
+
+
+def _freeze(root) -> dict:
+    frozen = {}
+    for path in sorted(item for item in Path(root).rglob("*") if item.is_file()):
+        stat = path.stat()
+        frozen[path.relative_to(root).as_posix()] = (
+            stat.st_mtime_ns,
+            stat.st_size,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+    return frozen
+
+
+def test_numeric_score_files_are_read_in_integer_order(tmp_path):
+    store = ScoreStore(tmp_path)
+    run_id = "abc123"
+    sid = "quiz-artifact-v1/deepseek-v4-pro"
+    _write_score_rows(
+        tmp_path,
+        run_id,
+        sid,
+        {
+            "9999.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "seq": 9999},
+            "10000.json": {
+                "scorer_id": sid,
+                "status": "failed",
+                "error_code": "structured_artifact_failure",
+                "seq": 10000,
+            },
+        },
+    )
+    before = _freeze(tmp_path)
+
+    rows = store.load_appended(run_id, sid)
+    assert [row["seq"] for row in rows] == [9999, 10000]
+
+    selected = store.selected(run_id, sid)
+    assert selected is not None
+    assert selected["seq"] == 10000
+    assert store.needs_retry(run_id, sid) is False
+    assert _freeze(tmp_path) == before
+
+
+def test_numeric_order_drives_success_and_skipped_priority(tmp_path):
+    store = ScoreStore(tmp_path)
+    run_id = "abc123"
+
+    success_sid = "quiz-artifact-v1/success-case"
+    _write_score_rows(
+        tmp_path,
+        run_id,
+        success_sid,
+        {
+            "9999.json": {"scorer_id": success_sid, "status": "success", "seq": 9999},
+            "10000.json": {"scorer_id": success_sid, "status": "success", "seq": 10000},
+        },
+    )
+    success = store.selected(run_id, success_sid)
+    assert success is not None
+    assert success["seq"] == 9999
+    assert store.needs_retry(run_id, success_sid) is False
+
+    skipped_sid = "quiz-artifact-v1/skipped-case"
+    _write_score_rows(
+        tmp_path,
+        run_id,
+        skipped_sid,
+        {
+            "9999.json": {"scorer_id": skipped_sid, "status": "skipped", "seq": 9999},
+            "10000.json": {"scorer_id": skipped_sid, "status": "skipped", "seq": 10000},
+        },
+    )
+    skipped = store.selected(run_id, skipped_sid)
+    assert skipped is not None
+    assert skipped["seq"] == 9999
+    assert store.needs_retry(run_id, skipped_sid) is False
+
+
+def test_non_numeric_score_files_keep_their_slot_and_skip_rules(tmp_path):
+    store = ScoreStore(tmp_path)
+    run_id = "abc123"
+    sid = "quiz-artifact-v1/mixed-case"
+    directory = _write_score_rows(
+        tmp_path,
+        run_id,
+        sid,
+        {
+            "10000.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "10000"},
+            "2note.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "2note"},
+            "9999.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "9999"},
+            "aaaa.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "aaaa"},
+            "bbbb.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "bbbb"},
+            "١.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "unicode-decimal"},
+        },
+    )
+    (directory / "cccc.json").write_text("{not json", encoding="utf-8")
+    (directory / "dddd.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    (directory / "eeee.json.tmp").write_text(json.dumps({"name": "tmp"}), encoding="utf-8")
+    before = _freeze(tmp_path)
+
+    rows = store.load_appended(run_id, sid)
+
+    # Lexicographic slots are 10000, 2note, 9999, aaaa, bbbb, cccc, dddd, ١. Only the two
+    # numeric slots move (integer order: 9999 before 10000); 2note, the non-ASCII decimal
+    # stem ١ (isdecimal but not isascii, so not numeric) and the ASCII names keep their
+    # original slots, and the unparsable or non-Mapping files stay skipped.
+    assert [row["name"] for row in rows] == [
+        "9999",
+        "2note",
+        "10000",
+        "aaaa",
+        "bbbb",
+        "unicode-decimal",
+    ]
+    assert _freeze(tmp_path) == before
+
+
+def test_same_integer_ordinal_keeps_lexicographic_order_without_dedup(tmp_path):
+    store = ScoreStore(tmp_path)
+    run_id = "abc123"
+    sid = "quiz-artifact-v1/tie-case"
+    _write_score_rows(
+        tmp_path,
+        run_id,
+        sid,
+        {
+            "0007.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "0007"},
+            "7.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "7"},
+            "0008.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "name": "0008"},
+        },
+    )
+
+    rows = store.load_appended(run_id, sid)
+
+    assert [row["name"] for row in rows] == ["0007", "7", "0008"]
+
+
+def test_legacy_file_is_read_only_and_cross_boundary_append_creates_10001(tmp_path):
+    store = ScoreStore(tmp_path)
+    run_id = "abc123"
+    sid = "quiz-artifact-v1/deepseek-v4-pro"
+    legacy_path = tmp_path / f"{run_id}.json"
+    legacy_path.write_text(
+        json.dumps([{"scorer_id": sid, "status": "failed", "error_code": "parse", "source": "legacy"}]),
+        encoding="utf-8",
+    )
+    directory = _write_score_rows(
+        tmp_path,
+        run_id,
+        sid,
+        {
+            "9999.json": {"scorer_id": sid, "status": "failed", "error_code": "parse", "source": "9999"},
+            "10000.json": {
+                "scorer_id": sid,
+                "status": "failed",
+                "error_code": "structured_artifact_failure",
+                "source": "10000",
+            },
+        },
+    )
+    legacy_before = legacy_path.read_bytes()
+    lower_before = (directory / "9999.json").read_bytes()
+    upper_before = (directory / "10000.json").read_bytes()
+
+    appended = store.append(run_id, {"scorer_id": sid, "status": "failed", "error_code": "parse"})
+
+    assert appended.name == "10001.json"
+    assert legacy_path.read_bytes() == legacy_before
+    assert (directory / "9999.json").read_bytes() == lower_before
+    assert (directory / "10000.json").read_bytes() == upper_before
+    history = store.history(run_id, sid)
+    assert [row.get("source") for row in history] == ["legacy", "9999", "10000", None]
