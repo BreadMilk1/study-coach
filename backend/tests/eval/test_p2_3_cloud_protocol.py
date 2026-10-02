@@ -182,6 +182,57 @@ def test_only_secret_keys_are_dropped_and_input_is_not_mutated():
     assert "keep" in canonical_json_bytes(payload).decode("utf-8")
 
 
+def test_camel_case_api_key_fields_are_redacted_through_canonical_bytes():
+    keys = ("apiKey", "APIKey", "APIKEY", "serviceApiKey", "serviceAPIKey", "x-api-key", "x_api_key")
+    response = _Response(
+        content=[
+            {
+                "type": "tool_use",
+                "id": "1",
+                "name": "search",
+                "input": {key: _SENTINEL for key in keys},
+            }
+        ],
+        tool_calls=[{"id": "1", "name": "search", "input": {key: _SENTINEL for key in keys}}],
+        usage_metadata=None,
+        response_metadata={
+            "headers": {key: _SENTINEL for key in keys},
+            "usage": {key: _SENTINEL for key in keys},
+        },
+    )
+    rendered = _rendered(response)
+    assert _SENTINEL not in rendered
+
+
+def test_api_key_lookalike_keys_and_values_are_kept():
+    metadata = {
+        "apiKeyHint": "keep-hint",
+        "apiKeyId": "keep-id",
+        "myapikeything": "keep-other",
+        "note": _SENTINEL,
+        "headers": {"apiKeyHint": "keep-header-hint", "X-Request-ID": "keep-request-id"},
+    }
+    response = _Response(
+        content=[{"type": "text", "text": _SENTINEL}],
+        tool_calls=None,
+        usage_metadata=None,
+        response_metadata=metadata,
+    )
+    before = copy.deepcopy(response.__dict__)
+
+    payload = langchain_response_canonical(response)
+    rendered = canonical_json_bytes(payload).decode("utf-8")
+
+    assert response.__dict__ == before
+    assert payload["response_metadata"]["apiKeyHint"] == "keep-hint"
+    assert payload["response_metadata"]["apiKeyId"] == "keep-id"
+    assert payload["response_metadata"]["myapikeything"] == "keep-other"
+    assert payload["content"][0]["text"] == _SENTINEL
+    assert rendered.count(_SENTINEL) == 2
+    assert "keep-header-hint" in rendered
+    assert "keep-request-id" in rendered
+
+
 def _usage_response(source: str, raw: dict):
     if source == "usage_metadata":
         return _Response(usage_metadata=raw, response_metadata={})

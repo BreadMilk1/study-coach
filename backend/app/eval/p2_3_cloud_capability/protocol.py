@@ -169,10 +169,14 @@ _SECRET_KEYS = frozenset({"api_key", "authorization", "secret", "password"})
 
 
 def _is_secret_key(key: str) -> bool:
-    # Header names arrive in every case style; normalise "-" to "_" before matching so
-    # x-api-key matches the same rule as x_api_key. Retained key names are untouched.
+    # Header names arrive in every case style; normalise case and "-" before matching so
+    # x-api-key follows the same rule as x_api_key. Retained key names are untouched.
     normalized = key.lower().replace("-", "_")
-    return normalized in _SECRET_KEYS or normalized.endswith("_api_key")
+    if normalized in _SECRET_KEYS or normalized.endswith("_api_key"):
+        return True
+    # camelCase and acronym forms (apiKey, APIKey, serviceApiKey) collapse to one
+    # separator-free suffix. A lower/upper boundary regex would miss APIKey.
+    return normalized.replace("_", "").endswith("apikey")
 
 
 def _jsonable_fingerprint(value: Any) -> Any:
