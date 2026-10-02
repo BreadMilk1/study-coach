@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from typing import Any, Literal, Mapping
 
 
@@ -31,20 +32,48 @@ _TRANSPORT_TYPE_NAMES = frozenset({
 })
 
 
+_NETWORK_OS_ERROR_TYPES = (TimeoutError, ConnectionError, socket.gaierror, socket.herror)
+_HARNESS_LOCAL_TYPES = (
+    AttributeError,
+    FileNotFoundError,
+    PermissionError,
+    IsADirectoryError,
+    NotADirectoryError,
+    FileExistsError,
+)
+
+
 def failure_class_for_exception(exc: BaseException) -> str:
+    """Classify a failure as transport, harness or model.
+
+    The whole cause/context chain is walked (cycle-guarded) before deciding, because a
+    provider wrapper can hide either a local failure or a network failure. Explicit local
+    evidence wins over network evidence, and network evidence wins over a bare OSError.
+    """
     current: BaseException | None = exc
     seen: set[int] = set()
     names: list[str] = []
+    local_evidence = False
+    network_evidence = False
+    os_error = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (TimeoutError, ConnectionError, OSError)):
-            return "transport"
-        if isinstance(current, AttributeError):
-            return "harness"
+        if isinstance(current, _HARNESS_LOCAL_TYPES):
+            local_evidence = True
+        elif isinstance(current, OSError):
+            os_error = True
+            if isinstance(current, _NETWORK_OS_ERROR_TYPES):
+                network_evidence = True
         names.append(type(current).__name__)
         current = current.__cause__ or current.__context__
     if any(name in _TRANSPORT_TYPE_NAMES for name in names):
+        network_evidence = True
+    if local_evidence:
+        return "harness"
+    if network_evidence:
         return "transport"
+    if os_error:
+        return "harness"
     return "model"
 
 
@@ -126,7 +155,7 @@ def extract_usage(response: Any) -> dict[str, int] | None:
         output_tokens = source.get("output_tokens", source.get("completion_tokens"))
         total_tokens = source.get("total_tokens")
         if type(input_tokens) is int and type(output_tokens) is int and input_tokens >= 0 and output_tokens >= 0:
-            if type(total_tokens) is not int:
+            if type(total_tokens) is not int or total_tokens < 0:
                 total_tokens = input_tokens + output_tokens
             return {
                 "input_tokens": input_tokens,
@@ -140,8 +169,10 @@ _SECRET_KEYS = frozenset({"api_key", "authorization", "secret", "password"})
 
 
 def _is_secret_key(key: str) -> bool:
-    lowered = key.lower()
-    return lowered in _SECRET_KEYS or lowered.endswith("_api_key")
+    # Header names arrive in every case style; normalise "-" to "_" before matching so
+    # x-api-key matches the same rule as x_api_key. Retained key names are untouched.
+    normalized = key.lower().replace("-", "_")
+    return normalized in _SECRET_KEYS or normalized.endswith("_api_key")
 
 
 def _jsonable_fingerprint(value: Any) -> Any:
