@@ -277,8 +277,27 @@ class ScoreStore:
         directory = self._scorer_dir(run_id, scorer_id)
         if not directory.is_dir():
             return []
+        listed = sorted(directory.glob("*.json"))
+        numeric_slots = [
+            index
+            for index, path in enumerate(listed)
+            if path.stem.isascii() and path.stem.isdecimal()
+        ]
+        if numeric_slots:
+            # Append files carrying a numeric stem must be read in integer order, so
+            # 9999 precedes 10000. Only the numeric slots move; every other file keeps
+            # its lexicographic position, and equal ordinals keep their original order
+            # without being deduplicated.
+            ranked = sorted(
+                (listed[index] for index in numeric_slots),
+                key=lambda path: int(path.stem),
+            )
+            reordered = list(listed)
+            for slot, path in zip(numeric_slots, ranked):
+                reordered[slot] = path
+            listed = reordered
         rows: list[dict[str, Any]] = []
-        for path in sorted(directory.glob("*.json")):
+        for path in listed:
             if path.name.endswith(".tmp"):
                 continue
             try:
