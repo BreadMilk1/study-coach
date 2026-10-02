@@ -74,11 +74,18 @@ DEFAULT_IDENTITY = ProviderIdentity(provider="minimax", protocol="anthropic", mo
 
 
 def _turn_idx_for_run_id(row: Mapping[str, Any]) -> int | None:
-    """turn_idx is only needed for the run_id path; an unusable value skips that path."""
-    try:
-        return int(row.get("turn_idx") or 0)
-    except (TypeError, ValueError, OverflowError):
-        return None
+    """turn_idx is only needed for the run_id path.
+
+    A missing field keeps the historical default of 0. A present value that is not an
+    exact non-boolean integer (None, floats, numeric strings, lists, ...) skips the
+    run_id path instead of being coerced, so it cannot outrank a valid session key.
+    """
+    if "turn_idx" not in row:
+        return 0
+    value = row.get("turn_idx")
+    if type(value) is int:
+        return value
+    return None
 
 
 def recover_run_idx(row: Mapping[str, Any], *, identity: ProviderIdentity | None = None, max_runs: int = 3) -> int | None:

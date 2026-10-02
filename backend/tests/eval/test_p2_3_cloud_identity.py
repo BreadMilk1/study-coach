@@ -184,6 +184,60 @@ def test_recover_run_idx_returns_none_when_only_the_run_id_path_is_usable():
     }) is None
 
 
+def _turn_one_conflict(turn_idx_value):
+    """run_id(turn=1, run=2) competes with session_storage_key(run=1) in one context."""
+    ident = _identity()
+    return {
+        "run_id": cloud_run_id(ident, "agent_loop", "disabled", "quiz_hyde", 1, 2),
+        "session_storage_key": storage_key(
+            ident, mode="agent_loop", thinking_profile="disabled", query_id="quiz_hyde", run_idx=1
+        ),
+        "mode": "agent_loop",
+        "thinking_profile": "disabled",
+        "query_id": "quiz_hyde",
+        "turn_idx": turn_idx_value,
+    }
+
+
+def _turn_zero_conflict(turn_idx_value):
+    """run_id(turn=0, run=2) competes with session_storage_key(run=1) in one context."""
+    ident = _identity()
+    return {
+        "run_id": cloud_run_id(ident, "agent_loop", "disabled", "quiz_hyde", 0, 2),
+        "session_storage_key": storage_key(
+            ident, mode="agent_loop", thinking_profile="disabled", query_id="quiz_hyde", run_idx=1
+        ),
+        "mode": "agent_loop",
+        "thinking_profile": "disabled",
+        "query_id": "quiz_hyde",
+        "turn_idx": turn_idx_value,
+    }
+
+
+def test_recover_run_idx_rejects_non_integer_turn_idx_type():
+    for invalid in (1.5, 1.0, True, "1"):
+        assert recover_run_idx(_turn_one_conflict(invalid)) == 1, invalid
+
+
+def test_recover_run_idx_ignores_falsy_invalid_turn_idx_for_turn_zero_records():
+    for invalid in (False, None, "", [], {}):
+        assert recover_run_idx(_turn_zero_conflict(invalid)) == 1, invalid
+
+
+def test_recover_run_idx_keeps_exact_integer_turn_idx_priority():
+    assert recover_run_idx(_turn_one_conflict(1)) == 2
+
+
+def test_recover_run_idx_returns_none_for_non_integer_turn_idx_without_session_key():
+    assert recover_run_idx({
+        "run_id": cloud_run_id(_identity(), "agent_loop", "disabled", "quiz_hyde", 1, 2),
+        "mode": "agent_loop",
+        "thinking_profile": "disabled",
+        "query_id": "quiz_hyde",
+        "turn_idx": 2.5,
+    }) is None
+
+
 def test_recover_run_idx_keeps_run_id_priority_and_existing_index_behavior():
     ident = _identity()
     run_id = cloud_run_id(ident, "agent_loop", "disabled", "quiz_hyde", 1, 2)
