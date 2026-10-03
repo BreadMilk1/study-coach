@@ -26,6 +26,7 @@ backend/*.db.*
 
 # Eval outputs
 backend/app/eval/**/output/
+backend/app/eval/p2_3_cloud_capability/.output.cloud-capability.lifecycle.lock
 
 # Frontend build / deps
 frontend/node_modules/
