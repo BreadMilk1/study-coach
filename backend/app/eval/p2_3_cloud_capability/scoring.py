@@ -67,7 +67,9 @@ def _as_mapping(payload: Any) -> Mapping[str, Any] | None:
     if isinstance(payload, str):
         try:
             parsed = json.loads(payload)
-        except json.JSONDecodeError:
+        except ValueError:
+            # JSONDecodeError is a ValueError; the integer-digit-limit guard in
+            # json.loads also raises a bare ValueError for over-long literals.
             return None
         return parsed if isinstance(parsed, Mapping) else None
     return None
@@ -106,13 +108,13 @@ def rubric_hash() -> str:
 
 
 def format_quiz_judge_prompt(*, question: str, answer: str, context: str) -> str:
-    def _escape(value: str) -> str:
-        return str(value).replace("{", "{{").replace("}", "}}")
-
+    # Parameter text is substituted as-is: .format does not re-format the values,
+    # so literal braces in question/answer/context survive unchanged while the
+    # rubric template's own escaped {{...}} example still renders.
     return load_quiz_rubric().format(
-        question=_escape(question),
-        answer=_escape(answer),
-        context=_escape(context),
+        question=str(question),
+        answer=str(answer),
+        context=str(context),
     )
 
 
@@ -249,15 +251,18 @@ async def _score_one(
         parsed = validate_quiz_judge_payload(text)
         think_stripped = bool(meta.get("think_stripped"))
     protocol = getattr(judge, "protocol", "openai_compatible")
-    stop = None
-    metadata = getattr(response, "response_metadata", None) or {}
+    # Each protocol has exactly one completion field: reading the other protocol's
+    # field would let a stray backup value mask a truncation or failure.
+    metadata = getattr(response, "response_metadata", None)
+    raw_stop: str | None = None
     if isinstance(metadata, Mapping):
-        stop = metadata.get("stop_reason") or metadata.get("finish_reason")
-    finish = normalize_finish_status(protocol=protocol, raw_stop=stop)
-    if finish == "failed" and stop in {"stop", "end_turn"}:
-        finish = "completed"
-    if parsed is not None and finish == "failed" and stop is None:
-        finish = "completed"
+        if protocol == "openai_compatible":
+            raw_stop = metadata.get("finish_reason")
+        elif protocol == "anthropic":
+            raw_stop = metadata.get("stop_reason")
+    if type(raw_stop) is not str:
+        raw_stop = None
+    finish = normalize_finish_status(protocol=protocol, raw_stop=raw_stop)
     usage = extract_usage(response)
     fields = dict(
         scorer_id=scorer_id,
@@ -274,7 +279,10 @@ async def _score_one(
         },
         rubric_hash=applied_hash,
     )
-    if parsed is None:
+    # A row is accepted only when the payload validates AND the protocol reports a
+    # normal completion. Everything else is a retryable `parse` failure that keeps
+    # the normalised finish_status and the response evidence in `fields`.
+    if parsed is None or finish != "completed":
         return _exec(
             status="failed",
             error_code="parse",

@@ -141,7 +141,10 @@ async def test_judge_exception_is_failure_not_crash():
 
             payload = {d: 4 for d in QUIZ_DIMENSIONS}
             payload["reasoning"] = "ok"
-            return AIMessage(content=json.dumps(payload))
+            return AIMessage(
+                content=json.dumps(payload),
+                response_metadata={"finish_reason": "stop"},
+            )
 
     execs = await score_candidate(
         candidate={
@@ -451,7 +454,10 @@ def _recording_judges(calls):
 
         async def ainvoke(self, messages, **kwargs):
             calls.append(self.key)
-            return AIMessage(content=json.dumps(_valid_rubric()))
+            return AIMessage(
+                content=json.dumps(_valid_rubric()),
+                response_metadata={"finish_reason": "stop"},
+            )
 
     return {"qwen": Judge("qwen"), "deepseek": Judge("deepseek"), "m27": Judge("m27")}
 
@@ -510,7 +516,10 @@ async def test_abort_from_a_later_judge_stops_the_remaining_one():
 
         async def ainvoke(self, messages, **kwargs):
             calls.append("qwen")
-            return AIMessage(content=json.dumps(_valid_rubric()))
+            return AIMessage(
+                content=json.dumps(_valid_rubric()),
+                response_metadata={"finish_reason": "stop"},
+            )
 
     class AbortingJudge:
         model = "deepseek-v4-pro"
@@ -715,7 +724,10 @@ async def test_huge_int_judge_payload_is_a_parse_failure_and_later_judges_contin
 
         async def ainvoke(self, messages, **kwargs):
             calls.append(self.model)
-            return AIMessage(content=json.dumps(_valid_rubric()))
+            return AIMessage(
+                content=json.dumps(_valid_rubric()),
+                response_metadata={"finish_reason": "stop"},
+            )
 
     execs = await score_candidate(
         candidate=dict(_PERSISTED_CANDIDATE),
@@ -739,3 +751,394 @@ async def test_huge_int_judge_payload_is_a_parse_failure_and_later_judges_contin
     assert artifact_qwen["failure_class"] == "model"
     assert artifact_deepseek["status"] == "success"
     assert artifact_m27["status"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# PR #14 review fixes: strict completion acceptance (P1), over-long JSON
+# integer literals (P2) and literal braces in prompt parameters (P2).
+# ---------------------------------------------------------------------------
+
+_LEGACY_ID = "legacy-visible-v1/qwen2.5:7b"
+
+
+def _judge_returning(content, *, protocol, metadata, key="qwen"):
+    class Judge:
+        model = key
+        thinking_config = {"type": "disabled"}
+
+        def __init__(self):
+            self.protocol = protocol
+
+        async def ainvoke(self, messages, **kwargs):
+            return AIMessage(content=content, response_metadata=dict(metadata))
+
+    return Judge()
+
+
+async def _legacy_row(protocol, metadata, *, content=None):
+    execs = await score_candidate(
+        candidate=dict(_PERSISTED_CANDIDATE),
+        judges={
+            "qwen": _judge_returning(
+                json.dumps(_valid_rubric()) if content is None else content,
+                protocol=protocol,
+                metadata=metadata,
+            ),
+            "deepseek": None,
+            "m27": None,
+        },
+        scorer_ids=[_LEGACY_ID],
+    )
+    assert [e["scorer_id"] for e in execs] == [_LEGACY_ID]
+    return execs[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol, metadata",
+    [
+        ("openai_compatible", {"finish_reason": "stop"}),
+        ("anthropic", {"stop_reason": "end_turn"}),
+    ],
+    ids=["openai_compatible", "anthropic"],
+)
+async def test_protocol_main_field_completed_is_success(protocol, metadata):
+    row = await _legacy_row(protocol, metadata)
+    assert row["status"] == "success"
+    assert row["finish_status"] == "completed"
+    assert row["output"] is not None
+    assert row["error_code"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol, metadata, expected_finish",
+    [
+        ("openai_compatible", {"finish_reason": "length"}, "truncated"),
+        ("openai_compatible", {"finish_reason": "content_filter"}, "failed"),
+        ("openai_compatible", {"finish_reason": None}, "failed"),
+        ("openai_compatible", {}, "failed"),
+        ("anthropic", {"stop_reason": "max_tokens"}, "truncated"),
+        ("anthropic", {"stop_reason": "refusal"}, "failed"),
+        ("anthropic", {"stop_reason": None}, "failed"),
+        ("anthropic", {}, "failed"),
+    ],
+    ids=[
+        "openai-truncated",
+        "openai-unknown",
+        "openai-empty",
+        "openai-missing",
+        "anthropic-truncated",
+        "anthropic-unknown",
+        "anthropic-empty",
+        "anthropic-missing",
+    ],
+)
+async def test_valid_payload_without_completed_status_is_a_parse_failure(
+    protocol, metadata, expected_finish
+):
+    row = await _legacy_row(protocol, metadata)
+    assert row["status"] == "failed"
+    assert row["error_code"] == "parse"
+    assert row["failure_class"] == "model"
+    assert row["output"] is None
+    # the actual normalised status and the raw-response evidence are kept
+    assert row["finish_status"] == expected_finish
+    assert row["raw_response_sha256"]
+    assert row["blocks"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol, metadata",
+    [
+        ("openai_compatible", {"stop_reason": "end_turn"}),
+        ("anthropic", {"finish_reason": "stop"}),
+    ],
+    ids=["openai-with-anthropic-field", "anthropic-with-openai-field"],
+)
+async def test_backup_finish_field_alone_does_not_complete(protocol, metadata):
+    row = await _legacy_row(protocol, metadata)
+    assert row["status"] == "failed"
+    assert row["error_code"] == "parse"
+    assert row["failure_class"] == "model"
+    assert row["output"] is None
+    assert row["finish_status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol, metadata, expected_status, expected_finish",
+    [
+        (
+            "openai_compatible",
+            {"finish_reason": "stop", "stop_reason": "max_tokens"},
+            "success",
+            "completed",
+        ),
+        (
+            "openai_compatible",
+            {"finish_reason": "length", "stop_reason": "end_turn"},
+            "failed",
+            "truncated",
+        ),
+        (
+            "anthropic",
+            {"stop_reason": "end_turn", "finish_reason": "length"},
+            "success",
+            "completed",
+        ),
+        (
+            "anthropic",
+            {"stop_reason": "max_tokens", "finish_reason": "stop"},
+            "failed",
+            "truncated",
+        ),
+    ],
+    ids=[
+        "openai-main-field-wins",
+        "openai-backup-cannot-rescue",
+        "anthropic-main-field-wins",
+        "anthropic-backup-cannot-rescue",
+    ],
+)
+async def test_conflicting_finish_fields_follow_the_protocol_main_field(
+    protocol, metadata, expected_status, expected_finish
+):
+    row = await _legacy_row(protocol, metadata)
+    assert row["status"] == expected_status
+    assert row["finish_status"] == expected_finish
+    if expected_status == "failed":
+        assert row["error_code"] == "parse"
+        assert row["failure_class"] == "model"
+        assert row["output"] is None
+
+
+@pytest.mark.asyncio
+async def test_truncated_row_keeps_evidence_and_later_judges_continue():
+    calls: list[str] = []
+
+    class CountingJudge:
+        def __init__(self, key, finish_reason):
+            self.model = key
+            self.protocol = "openai_compatible"
+            self.thinking_config = {"type": "disabled"}
+            self._finish_reason = finish_reason
+
+        async def ainvoke(self, messages, **kwargs):
+            calls.append(self.model)
+            return AIMessage(
+                content=json.dumps(_valid_rubric()),
+                response_metadata={"finish_reason": self._finish_reason},
+                usage_metadata={"input_tokens": 4, "output_tokens": 5, "total_tokens": 9},
+            )
+
+    execs = await score_candidate(
+        candidate=dict(_PERSISTED_CANDIDATE),
+        judges={
+            "qwen": CountingJudge("qwen", "length"),
+            "deepseek": CountingJudge("deepseek", "stop"),
+            "m27": CountingJudge("m27", "stop"),
+        },
+    )
+    assert [e["scorer_id"] for e in execs] == _CANONICAL_SCORER_ORDER
+    assert calls == ["qwen", "qwen", "deepseek", "m27"]
+    legacy, artifact_qwen, artifact_deepseek, artifact_m27 = execs
+    for row in (legacy, artifact_qwen):
+        assert row["status"] == "failed"
+        assert row["error_code"] == "parse"
+        assert row["failure_class"] == "model"
+        assert row["output"] is None
+        assert row["finish_status"] == "truncated"
+        assert row["raw_response_sha256"]
+        assert row["usage"] == {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9}
+        assert row["blocks"]
+        assert row["model"] == "qwen"
+        assert row["protocol"] == "openai_compatible"
+        assert row["thinking"] is not None
+        assert row["rubric_hash"]
+    assert artifact_deepseek["status"] == "success"
+    assert artifact_m27["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_parse_failures_are_retryable_and_success_is_terminal(tmp_path):
+    from app.eval.p2_3_cloud_capability.artifacts import ScoreStore
+
+    store = ScoreStore(tmp_path / "scores")
+    run_id = "run-pr14-strict-completion"
+
+    def judges(finish_reason):
+        class Judge:
+            model = "qwen2.5:7b"
+            protocol = "openai_compatible"
+            thinking_config = {"type": "disabled"}
+
+            async def ainvoke(self, messages, **kwargs):
+                return AIMessage(
+                    content=json.dumps(_valid_rubric()),
+                    response_metadata={"finish_reason": finish_reason},
+                )
+
+        return {"qwen": Judge(), "deepseek": Judge(), "m27": Judge()}
+
+    truncated = await score_candidate(
+        candidate=dict(_PERSISTED_CANDIDATE), judges=judges("length")
+    )
+    assert [row["error_code"] for row in truncated] == ["parse"] * 4
+    for row in truncated:
+        store.append(run_id, row)
+    for row in truncated:
+        assert store.selected(run_id, row["scorer_id"])["status"] == "failed"
+        assert store.needs_retry(run_id, row["scorer_id"]) is True
+
+    completed = await score_candidate(
+        candidate=dict(_PERSISTED_CANDIDATE), judges=judges("stop")
+    )
+    assert [row["status"] for row in completed] == ["success"] * 4
+    for row in completed:
+        store.append(run_id, row)
+    for row in completed:
+        assert store.selected(run_id, row["scorer_id"])["status"] == "success"
+        assert store.needs_retry(run_id, row["scorer_id"]) is False
+
+
+_OVER_LONG_DIGITS = "9" * 5000
+
+
+def _json_with_dimension_literal(literal: str) -> str:
+    return (
+        '{"question_quality": '
+        + literal
+        + ', "option_plausibility": 4, "answer_correctness": 4, '
+        '"explanation_clarity": 4, "difficulty_calibration": 4, "reasoning": "ok"}'
+    )
+
+
+@pytest.mark.parametrize(
+    "literal", [_OVER_LONG_DIGITS, "-" + _OVER_LONG_DIGITS], ids=["positive", "negative"]
+)
+def test_over_long_json_integer_literal_is_rejected_without_raising(literal):
+    import sys
+
+    assert len(_OVER_LONG_DIGITS) > sys.get_int_max_str_digits()
+    payload = _json_with_dimension_literal(literal)
+    with pytest.raises(ValueError):
+        json.loads(payload)  # the JSON parse limit this guard has to absorb
+    assert validate_quiz_judge_payload(payload) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "literal", [_OVER_LONG_DIGITS, "-" + _OVER_LONG_DIGITS], ids=["positive", "negative"]
+)
+async def test_over_long_literal_from_a_judge_is_a_parse_failure_and_later_judges_continue(
+    literal,
+):
+    calls: list[str] = []
+    over_long = _json_with_dimension_literal(literal)
+
+    class OverLongJudge:
+        model = "qwen2.5:7b"
+        protocol = "openai_compatible"
+
+        async def ainvoke(self, messages, **kwargs):
+            calls.append("qwen")
+            # finish_reason is a normal completion, so the failure comes from the payload
+            return AIMessage(
+                content=over_long, response_metadata={"finish_reason": "stop"}
+            )
+
+    class OkJudge:
+        def __init__(self, key):
+            self.model = key
+            self.protocol = "openai_compatible"
+
+        async def ainvoke(self, messages, **kwargs):
+            calls.append(self.model)
+            return AIMessage(
+                content=json.dumps(_valid_rubric()),
+                response_metadata={"finish_reason": "stop"},
+            )
+
+    execs = await score_candidate(
+        candidate=dict(_PERSISTED_CANDIDATE),
+        judges={
+            "qwen": OverLongJudge(),
+            "deepseek": OkJudge("deepseek"),
+            "m27": OkJudge("m27"),
+        },
+    )
+    assert [e["scorer_id"] for e in execs] == _CANONICAL_SCORER_ORDER
+    assert calls == ["qwen", "qwen", "deepseek", "m27"]
+    legacy, artifact_qwen, artifact_deepseek, artifact_m27 = execs
+    for row in (legacy, artifact_qwen):
+        assert row["status"] == "failed"
+        assert row["error_code"] == "parse"
+        assert row["failure_class"] == "model"
+        assert row["output"] is None
+    assert artifact_deepseek["status"] == "success"
+    assert artifact_m27["status"] == "success"
+
+
+def test_format_quiz_judge_prompt_keeps_literal_braces_in_parameters():
+    from app.eval.p2_3_cloud_capability.scoring import format_quiz_judge_prompt
+
+    question = 'Return JSON like {"a": 1} and reuse {question} verbatim.'
+    answer = 'def f(x):\n    return {"k": x}  # {answer} and {{kept}}'
+    context = 'Payload {"question_quality": 5}; keep {context} and {{double}}.'
+    prompt = format_quiz_judge_prompt(question=question, answer=answer, context=context)
+    assert question in prompt
+    assert answer in prompt
+    assert context in prompt
+    # the rubric's own escaped JSON example still renders with single braces
+    assert '{\n    "question_quality": <1-5>,' in prompt
+
+
+@pytest.mark.asyncio
+async def test_artifact_prompt_keeps_literal_braces_from_question_and_context():
+    seen: list[str] = []
+
+    class Judge:
+        model = "deepseek-v4-pro"
+        protocol = "openai_compatible"
+        thinking_config = {"type": "disabled"}
+
+        async def ainvoke(self, messages, **kwargs):
+            seen.append(messages[0].content)
+            return AIMessage(
+                content=json.dumps(_valid_rubric()),
+                response_metadata={"finish_reason": "stop"},
+            )
+
+    question_prompt = 'Give JSON {"a": 1} and reuse {question} verbatim.'
+    explanation = 'explanation with {"k": 1}, {answer} and {{double}}'
+    evidence = 'evidence {"e": 2} with {context} and {{double}}'
+    execs = await score_candidate(
+        candidate={
+            "quiz_action": "generate",
+            "query_id": "brace_literal",
+            "final_text": "📝 Quiz on HyDE:\nQ\nA) a\nB) b",
+            "question": {
+                "prompt": question_prompt,
+                "options": ["A) a", "B) b"],
+                "answer": "A",
+                "explanation": explanation,
+            },
+            "question_persisted": True,
+            "retrieval_captures": [
+                {
+                    "capture_status": "ok",
+                    "evidence": [{"source": "n.txt", "page": 1, "content": evidence}],
+                }
+            ],
+        },
+        judges={"qwen": None, "deepseek": Judge(), "m27": None},
+        scorer_ids=["quiz-artifact-v1/deepseek-v4-pro"],
+    )
+    assert execs[0]["status"] == "success"
+    prompt = seen[0]
+    assert question_prompt in prompt
+    assert explanation in prompt
+    assert evidence in prompt
+    assert '{\n    "question_quality": <1-5>,' in prompt
