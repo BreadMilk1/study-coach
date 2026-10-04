@@ -727,3 +727,44 @@ This round is Mac-executed evidence, reported separately from the DeepSeek self-
 All three commands exited 0 and no test was skipped. Mac also verified the loaded module paths, `git diff --check` on the tracked change and a whitespace check over the untracked files. Across the test run, the appendix source tree's HEAD, its dirty set of 32 entries and its Git index were unchanged, as were the real `output/` set (339 files) with its bytes, sizes and mtimes and the `ledger` / `main.ok` hashes; the release tree itself also showed no new cache or project changes across the run. This acceptance covers this offline budget ledger batch only and authorizes no provider or real-artifact operation.
 
 This batch does not publish anything and no historical acceptance number above is changed.
+
+## Cloud Capability Scoring — offline candidate-scoring contract
+
+This batch moves the offline candidate scoring module out of the appendix worktree together with its direct tests. It moves no consumer: the live harness, generator, matrix, probe, selection, recover, snapshot, experiment runners and `--stage` CLI stay in the appendix tree.
+
+- `backend/app/eval/p2_3_cloud_capability/scoring.py` — moved from the appendix source (original SHA-256 `38c7bd63784675b9a65d6e3f7a1e74f63d796df3004d60c79b25692e34ae7330`) with one minimal numeric-boundary fix applied in this round; the fixed file's SHA-256 is `0df2aa9717f29d1fba9c433ce5d665a676b36719a71727d88f34b21e86743162`. The fix adds a raw-value 1..5 range check in `validate_quiz_judge_payload` before `float(raw)`, so an exact integer such as `10**400` is refused as invalid instead of raising `OverflowError`; the type restriction, the finite-value check, the normal score arithmetic and every other public behaviour are unchanged.
+- `backend/tests/eval/test_p2_3_cloud_scoring.py` — moved from the appendix copy (source SHA-256 `560a59e982218ec18c84d0b5191af3121a8eb74ec89b7a49bae94f262560bbe5`). All 18 original test functions and their assertions are preserved unchanged — the diff against the appendix copy contains no deletions — and the file now holds 31 test functions / 37 collected cases: the added coverage is abort propagation and `scorer_ids` selection (10 functions / 13 cases) plus the numeric-boundary cases above (3 functions / 6 cases).
+- The module imports the release modules main already publishes — `app/eval/p2_3_cloud_capability/protocol.py` (SHA-256 `bd392a612c3a82ec3a7e5962bfdc34c9bf3377e0fa8a7dafff93dae693a65a5a`), `app/eval/p2_3_cloud_capability/budget.py` (SHA-256 `cf58e78f9402b6d0f5c7920cffa56129eee130f8c00dc8abe32706093c825691`) and `app/agent/judge.py`; no appendix copy of any of them was moved or used to overwrite them.
+
+### Public behaviour
+
+- `score_candidate(candidate=..., judges=..., scorer_ids=None)` returns scorer execution rows in a fixed canonical order: `legacy-visible-v1/qwen2.5:7b`, then `quiz-artifact-v1/qwen2.5:7b`, `quiz-artifact-v1/deepseek-v4-pro` and `quiz-artifact-v1/MiniMax-M2.7`. These historical scorer and model IDs are kept exactly as they are; no newer coding-executor model name is substituted.
+- `scorer_ids=None` scores the full set. A subset selects only those rows and keeps the canonical order regardless of the input order; duplicate IDs collapse to one row and one judge call; an empty list selects nothing and returns `[]`; unknown IDs are silently ignored (the pre-existing behaviour), and a known/unknown mix keeps only the known rows.
+- An unselected scorer never reaches its judge: only selected scorers call `ainvoke`. One judge instance can serve two rows (the `qwen` judge serves the legacy visible row and the artifact `qwen` row). Exactly four judge calls across three judge objects happen only for a valid persisted candidate with ok captures, full `scorer_ids` selection, all three judge objects present and no mid-run abort.
+- `quiz_action="grade"` stays a set of `skipped` quality rows and calls no judge.
+- Helpers moved with the module: `RecordingJudgeLLM`, `prepare_judge_content` and `validate_quiz_judge_payload` (the `{}` fail-closed rule and finite 1..5 dimension rule), `format_quiz_judge_prompt`, `rubric_hash`, `evidence_context`, `expected_scorer_ids` and `QUALITY_SCORER_IDS`.
+
+### Abort versus ordinary failure
+
+- `SmokeAbort`, `BudgetExceeded`, `MissingUsage` and `BudgetLedgerCorrupt` raised by a judge are **not** converted into failed rows: they propagate unchanged (the same exception object) and stop the remaining judges, so a batch cannot continue past an abort.
+- Any other exception raised while calling the judge becomes a normal `failed` execution row — this conversion is scoped to the judge-call stage and is not a promise that every exception raised anywhere in the module is converted: `error_code` is the exception class name and `failure_class` comes from the published protocol classifier (`model` / `transport` / `harness`). A missing judge is `missing_judge`, a payload that parses as JSON but fails validation (including an out-of-range or non-finite dimension) is `parse`, and a missing or invalid structured artifact is `structured_artifact_failure`.
+
+### Side effects and scope
+
+- The module only reads the quiz rubric through `app.agent.judge.load_quiz_rubric()`. It never creates a provider or client, writes no score file, score store or budget ledger, and touches no real `output/` tree; it does call the judge objects the caller passes in. With fake judges that stays in memory, while a real judge supplied by a caller may make network calls, so a live provider call is possible only through the caller and is not authorized by this batch.
+- No consumer or CLI is wired here (live harness, generator, matrix, probe, selection, recover, snapshot, `run_eval` all remain in the appendix tree). This batch delivers no writer coverage and no lifecycle-lock coverage, does not complete GATE E, does not approve R2-C2, and authorizes no real isolate, recovery, settlement, unlock, ledger upgrade or snapshot operation.
+- All coverage uses fake judges, in-memory payloads and locally constructed candidates; no real provider, ledger, lock, marker or evidence file is read or written.
+
+### Tests (DeepSeek self-test; not a Mac acceptance verdict)
+
+Command shape `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH= <borrowed python> -B -m pytest -q -p no:cacheprovider ... -rs`, run in this release worktree's `backend/` on the borrowed Python 3.11.15 (rootdir `.../cloud-capability-scoring-release/backend`, configfile `pyproject.toml`). The loaded `app.agent.judge`, `app.eval.p2_3_cloud_capability.scoring`, `...protocol` and `...budget` modules were verified to come from this release worktree.
+
+| Command | Result |
+|---|---|
+| `tests/eval/test_p2_3_cloud_scoring.py` | exit 0, **37 passed** (18 moved + 13 abort/scorer_ids + 6 boundary), 0 failed, 0 skipped |
+| the eight `tests/eval/test_p2_3_cloud_*.py` files | exit 0, **222 passed** |
+| full backend suite | exit 0, **1076 passed**, 0 skipped |
+
+Boundary fix RED→GREEN (DeepSeek self-test, not a Mac verdict): the six boundary cases were added first and run against the unfixed module, where they failed 6 / 31 passed — every failure was `OverflowError: int too large to convert to float` at `scoring.py:88` (`value = float(raw)`) — and they pass after the minimal fix shown above (37 passed). No other case or public behaviour is asserted as changed.
+
+This batch does not publish anything and no historical acceptance number above is changed.
