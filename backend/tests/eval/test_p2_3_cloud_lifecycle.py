@@ -803,3 +803,158 @@ def test_hold_process_timeout_failure_reaps_child(tmp_path, monkeypatch, child):
     finally:
         for proc in created:
             _reap(proc)
+
+
+class _OsOpenFlipShim:
+    """Replaces os inside lifecycle only; atomically repoints the alias to B
+    right after the lock file has been opened, then delegates everything else."""
+
+    def __init__(self, real_os, lock_path, alias, b_dir, temp_link, state):
+        self._real = real_os
+        self._lock_path = lock_path
+        self._alias = alias
+        self._b_dir = b_dir
+        self._temp_link = temp_link
+        self.state = state
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def open(self, path, flags, mode=0o644):
+        fd = self._real.open(path, flags, mode)
+        if not self.state["flipped"] and Path(path) == self._lock_path:
+            self._temp_link.symlink_to(self._b_dir, target_is_directory=True)
+            self._real.replace(self._temp_link, self._alias)
+            self.state["flipped"] = True
+        return fd
+
+
+_PROBE_LOCK_CHILD = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from app.eval.p2_3_cloud_capability.lifecycle import LifecycleBusy, acquire
+try:
+    lease = acquire(Path(sys.argv[2]))
+    lease.release()
+    print('GOT')
+except LifecycleBusy:
+    print('BUSY')
+"""
+
+
+def test_acquire_binds_lease_to_canonical_target_at_selection(tmp_path, monkeypatch):
+    import app.eval.p2_3_cloud_capability.lifecycle as life
+
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(a_dir, target_is_directory=True)
+
+    # every expected value is precomputed before any injection and without
+    # going through the helpers under test
+    a_resolved = a_dir.resolve()
+    b_resolved = b_dir.resolve()
+    a_lock = a_resolved.parent / f".{a_resolved.name}.cloud-capability.lifecycle.lock"
+
+    state = {"flipped": False}
+    shim = _OsOpenFlipShim(os, a_lock, alias, b_dir, tmp_path / "switch-target", state)
+    monkeypatch.setattr(life, "os", shim)
+    lease = life.acquire(alias)
+    try:
+        assert state["flipped"] is True
+        assert lease.output_dir == a_resolved
+        lease.check(a_dir)
+        with pytest.raises(life.LifecycleLeaseInvalid):
+            lease.check(alias)
+        busy = subprocess.run(
+            [sys.executable, "-c", _PROBE_LOCK_CHILD, str(_BACKEND), str(a_dir)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert busy.stdout.strip() == "BUSY", busy.stderr
+        got = subprocess.run(
+            [sys.executable, "-c", _PROBE_LOCK_CHILD, str(_BACKEND), str(b_dir)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert got.stdout.strip() == "GOT", got.stderr
+    finally:
+        lease.release()
+    again = life.acquire(a_dir)
+    try:
+        assert again.output_dir == a_resolved
+    finally:
+        again.release()
+
+
+def test_acquire_resolves_exactly_once(tmp_path, monkeypatch):
+    import app.eval.p2_3_cloud_capability.lifecycle as life
+
+    out = tmp_path / "out"
+    out.mkdir()
+    alias = tmp_path / "alias-once"
+    alias.symlink_to(out, target_is_directory=True)
+
+    real_resolve = Path.resolve
+    state = {"counting": False, "n": 0}
+
+    def counting_resolve(self, *args, **kwargs):
+        if state["counting"]:
+            state["n"] += 1
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+
+    state["counting"] = True
+    try:
+        lease = life.acquire(alias)
+    finally:
+        state["counting"] = False
+    try:
+        assert state["n"] == 1
+        assert lease.output_dir == real_resolve(alias)
+    finally:
+        lease.release()
+
+
+def test_lock_path_for_accepts_path_and_str_equally(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    alias = tmp_path / "alias-name"
+    alias.symlink_to(out, target_is_directory=True)
+    canonical = out.resolve()
+    assert lock_path_for(alias) == lock_path_for(out)
+    assert lock_path_for(str(alias)) == lock_path_for(str(out))
+    assert (
+        lock_path_for(out)
+        == canonical.parent / f".{canonical.name}.cloud-capability.lifecycle.lock"
+    )
+
+
+def test_missing_fcntl_fails_closed_before_any_resolution(tmp_path, monkeypatch):
+    import app.eval.p2_3_cloud_capability.lifecycle as life
+
+    out = tmp_path / "ready"
+    out.mkdir()
+    monkeypatch.setattr(life, "fcntl", None)
+    real_resolve = Path.resolve
+    state = {"counting": False, "n": 0}
+
+    def counting_resolve(self, *args, **kwargs):
+        if state["counting"]:
+            state["n"] += 1
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+    state["counting"] = True
+    try:
+        with pytest.raises(life.LifecycleUnavailable):
+            life.acquire(out)
+    finally:
+        state["counting"] = False
+    assert state["n"] == 0

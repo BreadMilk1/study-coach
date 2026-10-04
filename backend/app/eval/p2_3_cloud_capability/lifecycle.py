@@ -93,18 +93,22 @@ class LifecycleLease:
             raise failed from first_error
 
 
-def lock_path_for(output_dir: Path | str) -> Path:
-    resolved = Path(output_dir).resolve()
+def _lock_path_for_resolved(resolved: Path) -> Path:
     parent = resolved.parent
     if not parent.is_dir():
         raise LifecycleUnavailable("lifecycle_unavailable")
     return parent / f".{resolved.name}.cloud-capability.lifecycle.lock"
 
 
+def lock_path_for(output_dir: Path | str) -> Path:
+    return _lock_path_for_resolved(Path(output_dir).resolve())
+
+
 def acquire(output_dir: Path | str) -> LifecycleLease:
     if fcntl is None:
         raise LifecycleUnavailable("lifecycle_unavailable")
-    path = lock_path_for(output_dir)
+    resolved = Path(output_dir).resolve()
+    path = _lock_path_for_resolved(resolved)
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     except OSError as exc:
@@ -124,7 +128,7 @@ def acquire(output_dir: Path | str) -> LifecycleLease:
         if close_error is not None:
             refused.add_note(_cleanup_note("close", close_error))
         raise refused from exc
-    return LifecycleLease(Path(output_dir).resolve(), fd)
+    return LifecycleLease(resolved, fd)
 
 
 class hold:
