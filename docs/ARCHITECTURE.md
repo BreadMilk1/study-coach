@@ -313,15 +313,17 @@ All AI-bearing routes read **BYOK headers** (see §8) per request. Learning-data
 
 | Header | Required | Default | Notes |
 |--------|----------|---------|-------|
-| `x-provider` | no | `ollama` | `openai` / `anthropic` / `google_genai` / `ollama` |
+| `x-provider` | no | `ollama` | `openai` / `anthropic` / `google_genai` / `ollama`; `gemini` is accepted as an alias of `google_genai` |
 | `x-model` | no | `gemma3:4b` | provider-specific model id |
-| `x-api-key` | unless ollama | — | never persisted server-side |
-| `x-base-url` | no | provider default | self-hosted / proxy |
+| `x-api-key` | unless ollama | — | received per request; never persisted server-side |
+| `x-base-url` | no | provider default | self-hosted / proxy; must be paired with the target provider's key and model |
 | `x-judge-model` | no | same as `x-model` | different model for Judge Guard |
 | `x-planner-mode` | no | `deterministic` | `deterministic` or `agent_loop` |
 | `x-quiz-mode` | no | `deterministic` | `deterministic` or `agent_loop` |
 
 Tool-call detection: `GET /api/models/tool-check` probes model with dummy `ping` tool. `GET /api/models/ping` tests connectivity. Results cached per-model in `localStorage`.
+
+All four adapters (Ollama, Anthropic, OpenAI, Google Gemini) ship as runtime dependencies in `backend/uv.lock`; Ollama stays the default. Gemini is pinned to the API-key Developer API (`vertexai=False`), so an ambient `GOOGLE_GENAI_USE_VERTEXAI` cannot switch it to the Vertex AI backend. Provider evidence in this repository is limited to the frozen runtime install, offline adapter construction and mock-HTTP request contracts (`backend/tests/llm/test_provider.py`); no real key is used, so live authentication, official service availability and production reliability are not verified here.
 
 ---
 
@@ -404,7 +406,7 @@ Focused balanced-backlog Chrome acceptance (2026-08-10) covered only real PDF up
 |---------|---------------|
 | Auth | Shipped frontend auto-provisions an anonymous signed JWT. Identity-mutating auth POST routes participate in the lifecycle shared lease. Google OAuth/upgrade routes and columns remain frozen in backend code, with no frontend login runtime or delivered account continuity. |
 | Data lifecycle | Summary/reset require strict signed bearer auth; reset defaults off and supported local-mode configurations bind the backend to loopback. The shipped Compose configuration enforces that binding; no request-IP enforcement is promised. |
-| API key storage | `x-api-key` never logged or persisted server-side; frontend `localStorage` (demo scope) |
+| API key storage | `x-api-key` is received per request and not persisted server-side; frontend `localStorage` (demo scope). Redaction is limited to the documented error boundary — no guarantee is made for every log, SDK, proxy or monitoring layer. |
 | CORS | FastAPI `CORSMiddleware` — frontend origin only |
 | SQL injection | SQLAlchemy ORM (parameterized queries) |
 | Document upload | PDF file limit 25 MiB (`MAX_UPLOAD_BYTES`); whole multipart request cap `MAX_UPLOAD_REQUEST_BYTES` (= file limit + 64 KiB overhead) enforced by pure ASGI middleware **before** multipart spool; `.pdf` extension whitelist; `%PDF` magic-byte check; chunked read; stable `4xx` (`415`/`400`/`413`); per-request temp file cleaned on failure and cancellation |
