@@ -22,7 +22,7 @@ from app.agent.quiz_master_agent import (
     build_quiz_master_agent,
     _infer_quiz_action,
 )
-from app.db.models import Base
+from app.db.models import Base, Question
 from app.db.repositories import (
     GoalRepository,
     QuestionRepository,
@@ -317,3 +317,70 @@ def test_infer_quiz_action_always_returns_generate():
     assert _infer_quiz_action(trace) == "generate"
     trace.record_tool_call("persist_quiz_question", {}, '{"question_id":"q"}', error=False)
     assert _infer_quiz_action(trace) == "generate"
+
+
+# --- Batch A: LLM error detail boundary ------------------------------------
+
+_MARKER = "SECRET_OPAQUE_MARKER_7f3a"
+_SAFE_CONNECTION = "ConnectionRefusedError: Could not connect to the model service."
+
+
+class MarkerCrashingLLM:
+    """Fails the first LLM call with an opaque, detail-bearing exception."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def bind_tools(self, _tools):
+        return self
+
+    async def ainvoke(self, messages, **_kwargs):
+        self.calls += 1
+        raise ConnectionRefusedError(
+            f"[Errno 61] Connection refused to ollama at "
+            f"http://127.0.0.1:11434/api/chat?api_key=sk-live-{_MARKER}"
+        )
+
+
+async def test_llm_failure_detail_is_projected_in_internal_and_public_trace(
+    session, monkeypatch
+):
+    from app.agent import quiz_master_agent as quiz_agent_mod
+
+    events: list[dict] = []
+    monkeypatch.setattr(quiz_agent_mod, "get_stream_writer", lambda: events.append)
+
+    user = UserRepository(session).get_or_create("fp-loop-marker")
+    question_repo = QuestionRepository(session)
+    llm = MarkerCrashingLLM()
+    agent = build_quiz_master_agent(
+        llm=llm,
+        topic_repo=TopicRepository(session),
+        question_repo=question_repo,
+        goal_repo=GoalRepository(session),
+    )
+
+    result = await agent({
+        "messages": [HumanMessage(content="quiz me on HyDE")],
+        "user_id": user.id,
+    })
+
+    # One LLM call, clean degrade, no gradeable question persisted.
+    assert llm.calls == 1
+    assert result["degraded"] is True
+    assert result.get("active_quiz_question_id") is None
+    assert session.query(Question).count() == 0
+
+    internal = result["agent_trace"]
+    assert internal["exit_reason"] == "llm_call_failed"
+    assert internal["llm_error"] == _SAFE_CONNECTION
+    assert internal["total_iterations"] == 0
+
+    public = [e for e in events if e.get("type") == "agent_run"]
+    assert len(public) == 1
+    assert public[0]["run"]["node"] == "quiz"
+    assert public[0]["run"]["exit_reason"] == "llm_call_failed"
+    assert public[0]["run"]["llm_error"] == _SAFE_CONNECTION
+
+    assert _MARKER not in json.dumps(result, default=str)
+    assert _MARKER not in json.dumps(events, default=str)

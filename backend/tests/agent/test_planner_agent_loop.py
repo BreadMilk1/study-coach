@@ -14,6 +14,7 @@ Tests:
   7. plan_action inference fallback: generate when zero tools called
   8. _extract_topic regression — closes a P2.1-⑤i loose end
 """
+import json
 from datetime import datetime
 
 import pytest
@@ -298,3 +299,69 @@ async def test_extract_topic_strips_mindmap_suffix_without_corrupting_english():
     assert _extract_topic_for_agent_prompt("帮我做学习计划 on HyDE 画脑图") == "HyDE"
     assert _extract_topic_for_agent_prompt("plan on BM25?") == "BM25"
     assert _extract_topic_for_agent_prompt("帮我做学习计划 on HyDE！") == "HyDE"
+
+
+# --- Batch A: LLM error detail boundary ------------------------------------
+
+_MARKER = "SECRET_OPAQUE_MARKER_7f3a"
+_SAFE_CONNECTION = "ConnectionError: Could not connect to the model service."
+
+
+class MarkerCrashingLLM:
+    """Fails the first LLM call with an opaque, detail-bearing exception."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def bind_tools(self, _tools):
+        return self
+
+    async def ainvoke(self, messages, **_kwargs):
+        self.calls += 1
+        raise ConnectionError(
+            f"POST http://127.0.0.1:11434/api/chat failed: "
+            f"Authorization: Bearer sk-live-{_MARKER}"
+        )
+
+
+async def test_llm_failure_detail_is_projected_in_internal_and_public_trace(
+    session, monkeypatch
+):
+    from app.agent import planner_agent as planner_agent_mod
+
+    events: list[dict] = []
+    monkeypatch.setattr(planner_agent_mod, "get_stream_writer", lambda: events.append)
+
+    user = UserRepository(session).get_or_create("fp-loop-marker")
+    goal_repo = GoalRepository(session)
+    goal_repo.create(user_id=user.id, title="G")
+    llm = MarkerCrashingLLM()
+    agent = _build(session, llm)
+
+    update = await agent({
+        "messages": [HumanMessage(content="plan on something")],
+        "user_id": user.id,
+    })
+
+    # One LLM call, clean degrade, unchanged business fallback text.
+    assert llm.calls == 1
+    assert update["degraded"] is True
+    # The loop never reached a confirmed persist → no active plan id.
+    assert "active_plan_id" not in update
+
+    internal = update["agent_trace"]
+    assert internal["exit_reason"] == "llm_call_failed"
+    assert internal["llm_error"] == _SAFE_CONNECTION
+    assert internal["total_iterations"] == 0
+
+    public = [e for e in events if e.get("type") == "agent_run"]
+    assert len(public) == 1
+    assert public[0]["run"]["exit_reason"] == "llm_call_failed"
+    assert public[0]["run"]["llm_error"] == _SAFE_CONNECTION
+
+    assert _MARKER not in json.dumps(update, default=str)
+    assert _MARKER not in json.dumps(events, default=str)
+
+    # The failing LLM never reached a persist tool → no plan side effect.
+    active = goal_repo.list_active_for_user(user.id)
+    assert PlanRepository(session).get_by_goal(active[0].id) is None

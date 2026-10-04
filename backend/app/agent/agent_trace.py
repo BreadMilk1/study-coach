@@ -17,6 +17,8 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 
+from app.llm.errors import normalize_llm_error
+
 
 def _compact_json(value: dict, *, limit: int = 200) -> str:
     raw = json.dumps(value or {}, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -101,9 +103,15 @@ class AgentTrace:
     def record_budget_exhaustion(self, max_iter: int) -> None:
         self.exit_reason = "budget_exhausted"
 
-    def record_llm_error(self, exc: str) -> None:
+    def record_llm_error(self, exc: object) -> None:
+        """Record an LLM failure as fixed safe text.
+
+        Accepts the actual exception (preferred) or a legacy pre-formatted
+        string. Only fixed category text is stored — never the exception
+        object, its message or any other detail.
+        """
         self.exit_reason = "llm_call_failed"
-        self.llm_error = exc
+        self.llm_error = normalize_llm_error(exc)
 
     def tool_names_called(self) -> list[str]:
         return [tc.name for tc in self.tool_calls if not tc.error]
@@ -160,7 +168,9 @@ class AgentTrace:
             "output_tokens": sum(it.output_tokens for it in self.iterations),
             "wall_time_s": time.monotonic() - self.t_start,
             "exit_reason": self.exit_reason,
-            "llm_error": self.llm_error,
+            # Re-project on the way out so traces built or mutated outside
+            # record_llm_error cannot leak a raw legacy detail.
+            "llm_error": normalize_llm_error(self.llm_error),
         }
 
     def serialize_public(self, *, node: str, mode: str = "agent_loop") -> dict:
@@ -175,7 +185,9 @@ class AgentTrace:
             "output_tokens": sum(it.output_tokens for it in self.iterations),
             "wall_time_s": time.monotonic() - self.t_start,
             "exit_reason": self.exit_reason,
-            "llm_error": self.llm_error,
+            # Same projection as serialize(): this payload is what reaches SSE
+            # clients and chat history.
+            "llm_error": normalize_llm_error(self.llm_error),
             "tool_calls": [
                 {
                     "name": tc.name,
