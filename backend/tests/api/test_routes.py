@@ -1245,3 +1245,565 @@ def test_public_route_is_available_during_reset(app, client, monkeypatch, path):
         )
 
     assert response.status_code == 200
+
+
+# --- Batch A: LLM error detail boundary ------------------------------------
+
+_MARKER = "SECRET_OPAQUE_MARKER_7f3a"
+_SAFE_CONNECTION = "ConnectionError: Could not connect to the model service."
+_SAFE_AUTH = "AuthenticationError: Model authentication failed."
+_SAFE_RATE_LIMIT = "RateLimitError: The model service rate limit was reached."
+
+_CHAT_HEADERS = {
+    "x-fingerprint": "fp-1",
+    "x-provider": "ollama",
+    "x-model": "gemma3:4b",
+}
+
+
+def _raw_agent_run(llm_error: str | None) -> dict:
+    """A `serialize_public()`-shaped run as a pre-fix emitter would send it."""
+    return {
+        "node": "planner",
+        "mode": "agent_loop",
+        "total_iterations": 0,
+        "total_tool_calls": 0,
+        "tool_call_breakdown": {},
+        "tool_errors": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "wall_time_s": 0.01,
+        "exit_reason": "llm_call_failed",
+        "llm_error": llm_error,
+        "tool_calls": [],
+    }
+
+
+def _read_sse_events(resp) -> list[dict]:
+    return [json.loads(line[6:]) for line in resp.iter_lines() if line.startswith("data: ")]
+
+
+def _rich_agent_run(llm_error: str | None) -> dict:
+    """A non-trivial but valid `serialize_public()` run.
+
+    Non-zero counters, tokens and a tool breakdown make the cross-boundary
+    assertion meaningful: only `llm_error` may change.
+    """
+    return {
+        "node": "quiz",
+        "mode": "agent_loop",
+        "total_iterations": 3,
+        "total_tool_calls": 2,
+        "tool_call_breakdown": {"retriever_search": 1, "persist_quiz_question": 1},
+        "tool_errors": 1,
+        "input_tokens": 412,
+        "output_tokens": 137,
+        "wall_time_s": 1.25,
+        "exit_reason": "llm_call_failed",
+        "llm_error": llm_error,
+        "tool_calls": [
+            {
+                "name": "retriever_search",
+                "error": False,
+                "args_preview": '{"query":"HyDE","top_k":3}',
+                "output_preview": "3 chunks",
+            },
+            {
+                "name": "persist_quiz_question",
+                "error": True,
+                "args_preview": '{"topic":"HyDE"}',
+                "output_preview": "Error calling persist_quiz_question: invalid options",
+            },
+        ],
+    }
+
+
+def test_ping_note_is_safe_when_model_factory_raises(client, monkeypatch):
+    def boom(_config):
+        raise ConnectionError(
+            f"cannot reach http://127.0.0.1:11434/api/chat?token={_MARKER}"
+        )
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", boom)
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["model"] == "gemma3:4b"
+    assert isinstance(body["latency_ms"], (int, float))
+    assert body["note"] == f"Failed: {_SAFE_CONNECTION}"
+    assert _MARKER not in response.text
+
+
+def test_ping_note_is_safe_when_ainvoke_raises_sdk_style_error(client, monkeypatch):
+    # Class *name* only: Batch A never imports a provider SDK.
+    synthetic_auth_error = type("AuthenticationError", (Exception,), {})
+
+    class FailingModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            raise synthetic_auth_error(
+                f"Incorrect API key provided: sk-live-{_MARKER}. "
+                f'{{"api_key": "sk-live-{_MARKER}"}}'
+            )
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: FailingModel())
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["note"] == f"Failed: {_SAFE_AUTH}"
+    assert _MARKER not in response.text
+
+
+def test_ping_success_contract_is_unchanged(client, monkeypatch):
+    class PongModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(content="pong")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: PongModel())
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["model"] == "gemma3:4b"
+    assert body["note"].startswith("Connected — responded in")
+    assert body["note"].endswith("ms")
+
+
+def test_ping_empty_response_keeps_legacy_success_behavior(client, monkeypatch):
+    """Deliberately NOT fixed in Batch A: an empty ping response still reports
+    ok=True. Pinned so the later batch that changes it must update this test on
+    purpose instead of shifting the contract silently."""
+
+    class EmptyModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(content="")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: EmptyModel())
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_chat_projects_raw_agent_run_before_sse_and_persistence(app, client):
+    from sqlalchemy import text
+
+    from app.api.deps import get_graph
+    from app.db.session import session_scope
+
+    raw = f"AuthenticationError: Incorrect API key provided: sk-live-{_MARKER}"
+    chunk = {"type": "agent_run", "run": _rich_agent_run(raw)}
+    # Full-fidelity snapshot: the graph chunk must come back byte-identical.
+    chunk_snapshot = json.dumps(chunk, sort_keys=True)
+    expected = _rich_agent_run(_SAFE_AUTH)
+
+    class RawAgentRunGraph:
+        async def astream(self, _input_state, **_kwargs):
+            yield {"type": "citations", "citations": []}
+            yield {"type": "token", "text": "done"}
+            yield chunk
+
+    app.dependency_overrides[get_graph] = lambda: RawAgentRunGraph()
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "plan on HyDE", "session_id": "batch-a-sse"},
+        headers=_CHAT_HEADERS,
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    session_id = next(e["session_id"] for e in events if e["type"] == "session")
+    sse_run = next(e["run"] for e in events if e["type"] == "agent_run")
+    # Only llm_error is replaced; counters, tokens, breakdown, tool previews and
+    # the rest of the envelope are identical to the input.
+    assert sse_run == expected
+    assert sse_run["total_iterations"] == 3
+    assert sse_run["total_tool_calls"] == 2
+    assert sse_run["tool_call_breakdown"] == {
+        "retriever_search": 1,
+        "persist_quiz_question": 1,
+    }
+    assert sse_run["tool_errors"] == 1
+    assert sse_run["input_tokens"] == 412
+    assert sse_run["output_tokens"] == 137
+    assert sse_run["exit_reason"] == "llm_call_failed"
+    assert sse_run["llm_error"] == _SAFE_AUTH
+    assert _MARKER not in json.dumps(events)
+
+    # The graph-emitted chunk is not mutated in place.
+    assert json.dumps(chunk, sort_keys=True) == chunk_snapshot
+    assert chunk["run"]["llm_error"] == raw
+
+    with session_scope() as db:
+        stored = db.execute(
+            text(
+                "SELECT tool_calls_json FROM messages "
+                "WHERE session_id = :sid AND role = 'assistant'"
+            ),
+            {"sid": session_id},
+        ).scalar()
+
+    assert stored is not None
+    assert _MARKER not in stored
+    assert json.loads(stored)["agent_run"] == expected
+
+    history = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_CHAT_HEADERS,
+    )
+    assert history.status_code == 200
+    assistant = history.json()["messages"][-1]
+    assert assistant["content"] == "done"
+    assert assistant["agent_run"] == expected
+    assert _MARKER not in history.text
+
+
+def test_history_projects_legacy_raw_llm_error_without_rewriting_the_sql_row(app, client):
+    from sqlalchemy import text
+
+    from app.db.repositories import (
+        ChatSessionRepository,
+        CitationRepository,
+        MessageRepository,
+    )
+    from app.db.session import session_scope
+
+    raw = f"RateLimitError: Rate limit reached for org-abc; Bearer sk-live-{_MARKER}"
+    envelope = {
+        "schema": "assistant_artifacts.v1",
+        "citations": [{"chunk_id": "legacy:1:0", "source": "legacy.pdf", "page": 5}],
+        "agent_run": _raw_agent_run(raw),
+        "quiz_question_id": "legacy-question-id",
+    }
+
+    with session_scope() as db:
+        ChatSessionRepository(db).create(user_id="default-user", chat_id="batch-a-legacy")
+        message = MessageRepository(db).create(
+            session_id="batch-a-legacy",
+            role="assistant",
+            content="legacy answer",
+            tool_calls_json=envelope,
+        )
+        message_id = message.id
+        CitationRepository(db).bulk_create_for_message(
+            message_id=message_id,
+            citations=[{
+                "chunk_id": "legacy:1:0",
+                "page": 5,
+                "span_start": 0,
+                "span_end": 4,
+            }],
+        )
+
+    with session_scope() as db:
+        before = db.execute(
+            text("SELECT tool_calls_json FROM messages WHERE id = :mid"),
+            {"mid": message_id},
+        ).scalar()
+
+    assert before is not None
+    assert _MARKER in before  # the raw detail really is in the stored row
+
+    response = client.get(
+        "/api/chat/sessions/batch-a-legacy/messages",
+        headers=_CHAT_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assistant = response.json()["messages"][0]
+    assert assistant["content"] == "legacy answer"
+    assert assistant["agent_run"]["exit_reason"] == "llm_call_failed"
+    assert assistant["agent_run"]["llm_error"] == _SAFE_RATE_LIMIT
+    assert assistant["citations"][0]["chunk_id"] == "legacy:1:0"
+    assert assistant["citations"][0]["source"] == "legacy.pdf"
+    assert assistant["citations"][0]["page"] == 5
+    assert assistant["quiz_question_id"] == "legacy-question-id"
+    assert _MARKER not in response.text
+
+    with session_scope() as db:
+        after = db.execute(
+            text("SELECT tool_calls_json FROM messages WHERE id = :mid"),
+            {"mid": message_id},
+        ).scalar()
+
+    # Read-only projection: history never rewrites the stored original.
+    assert after == before
+
+
+def test_history_legacy_and_missing_agent_run_semantics_are_preserved(app, client):
+    from app.db.repositories import (
+        ChatSessionRepository,
+        CitationRepository,
+        MessageRepository,
+    )
+    from app.db.session import session_scope
+
+    run_without_error_key = _raw_agent_run(None)
+    del run_without_error_key["llm_error"]
+    run_without_error_key["exit_reason"] = "natural_stop"
+
+    with session_scope() as db:
+        ChatSessionRepository(db).create(user_id="default-user", chat_id="batch-a-compat")
+        legacy_message = MessageRepository(db).create(
+            session_id="batch-a-compat",
+            role="assistant",
+            content="legacy citation list",
+            tool_calls_json=[{"chunk_id": "c:1:0", "source": "s.pdf"}],
+        )
+        # Citations are returned from the SQL `citations` table; the envelope
+        # only carried the legacy source metadata.
+        CitationRepository(db).bulk_create_for_message(
+            message_id=legacy_message.id,
+            citations=[{
+                "chunk_id": "c:1:0",
+                "page": 2,
+                "span_start": 0,
+                "span_end": 4,
+            }],
+        )
+        MessageRepository(db).create(
+            session_id="batch-a-compat",
+            role="assistant",
+            content="null agent run",
+            tool_calls_json={
+                "schema": "assistant_artifacts.v1",
+                "citations": [],
+                "agent_run": None,
+            },
+        )
+        MessageRepository(db).create(
+            session_id="batch-a-compat",
+            role="assistant",
+            content="run without llm_error key",
+            tool_calls_json={
+                "schema": "assistant_artifacts.v1",
+                "citations": [],
+                "agent_run": run_without_error_key,
+            },
+        )
+        MessageRepository(db).create(
+            session_id="batch-a-compat",
+            role="assistant",
+            content="invalid agent run",
+            tool_calls_json={
+                "schema": "assistant_artifacts.v1",
+                "citations": [],
+                "agent_run": "not-a-dict",
+            },
+        )
+
+    response = client.get(
+        "/api/chat/sessions/batch-a-compat/messages",
+        headers=_CHAT_HEADERS,
+    )
+
+    assert response.status_code == 200
+    by_content = {m["content"]: m for m in response.json()["messages"]}
+    assert set(by_content) == {
+        "legacy citation list",
+        "null agent run",
+        "run without llm_error key",
+        "invalid agent run",
+    }
+    # Plain legacy citation list keeps its citations and has no agent_run.
+    legacy_citation = by_content["legacy citation list"]["citations"][0]
+    assert legacy_citation["chunk_id"] == "c:1:0"
+    assert legacy_citation["page"] == 2
+    assert legacy_citation["source"] == "s.pdf"
+    assert by_content["legacy citation list"]["agent_run"] is None
+    assert by_content["legacy citation list"]["quiz_question_id"] is None
+    # null / invalid run keep the existing None handling.
+    assert by_content["null agent run"]["agent_run"] is None
+    assert by_content["invalid agent run"]["agent_run"] is None
+    # A run that predates llm_error stays valid and reports None.
+    assert by_content["run without llm_error key"]["agent_run"]["exit_reason"] == "natural_stop"
+    assert by_content["run without llm_error key"]["agent_run"]["llm_error"] is None
+
+
+def test_history_projection_keeps_session_ownership_isolation(app, client):
+    from app.db.repositories import ChatSessionRepository, MessageRepository
+    from app.db.session import session_scope
+
+    with session_scope() as db:
+        ensure_user(db, "batch-a-other-user")
+        ChatSessionRepository(db).create(
+            user_id="batch-a-other-user",
+            chat_id="batch-a-other-session",
+        )
+        MessageRepository(db).create(
+            session_id="batch-a-other-session",
+            role="assistant",
+            content="other user answer",
+            tool_calls_json={
+                "schema": "assistant_artifacts.v1",
+                "citations": [],
+                "agent_run": _raw_agent_run(f"AuthenticationError: sk-live-{_MARKER}"),
+            },
+        )
+
+    response = client.get(
+        "/api/chat/sessions/batch-a-other-session/messages",
+        headers=_CHAT_HEADERS,
+    )
+
+    assert response.status_code == 404
+    assert "other user answer" not in response.text
+    assert _MARKER not in response.text
+
+
+_INVALID_RUNS = [
+    pytest.param(
+        f"AuthenticationError: Incorrect API key provided: sk-live-{_MARKER}",
+        id="string-run",
+    ),
+    pytest.param(
+        [{"llm_error": f"ConnectionError: {_MARKER}"}],
+        id="list-run",
+    ),
+]
+
+
+@pytest.mark.parametrize("invalid_run", _INVALID_RUNS)
+def test_chat_collapses_invalid_agent_run_to_none_across_all_boundaries(
+    app, client, invalid_run
+):
+    """A malformed `agent_run` event must not skip the SSE projection.
+
+    The invalid value collapses to None on the wire, in the persisted envelope
+    and in history — the same handling the persistence path already used.
+    """
+    from sqlalchemy import text
+
+    from app.api.deps import get_graph
+    from app.db.session import session_scope
+
+    chunk = {"type": "agent_run", "run": invalid_run}
+    snapshot = json.dumps(chunk, sort_keys=True)
+
+    class InvalidRunGraph:
+        async def astream(self, _input_state, **_kwargs):
+            yield {"type": "citations", "citations": []}
+            yield {"type": "token", "text": "done"}
+            yield chunk
+
+    app.dependency_overrides[get_graph] = lambda: InvalidRunGraph()
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "plan on HyDE", "session_id": "batch-a-invalid-run"},
+        headers=_CHAT_HEADERS,
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    session_id = next(e["session_id"] for e in events if e["type"] == "session")
+    run_event = next(e for e in events if e["type"] == "agent_run")
+    # The run field stays explicit on the wire and is None, never the raw value.
+    assert "run" in run_event
+    assert run_event["run"] is None
+    assert _MARKER not in json.dumps(events)
+
+    # The graph-emitted chunk keeps its original value.
+    assert json.dumps(chunk, sort_keys=True) == snapshot
+
+    with session_scope() as db:
+        stored = db.execute(
+            text(
+                "SELECT tool_calls_json FROM messages "
+                "WHERE session_id = :sid AND role = 'assistant'"
+            ),
+            {"sid": session_id},
+        ).scalar()
+
+    assert stored is not None
+    assert _MARKER not in stored
+    assert json.loads(stored)["agent_run"] is None
+
+    history = client.get(
+        f"/api/chat/sessions/{session_id}/messages",
+        headers=_CHAT_HEADERS,
+    )
+    assert history.status_code == 200
+    assert history.json()["messages"][-1]["agent_run"] is None
+    assert _MARKER not in history.text
+
+
+def test_chat_agent_run_event_shapes_and_order_are_preserved(app, client):
+    """Compatibility control for the projection rewrite.
+
+    - an `agent_run` event without a `run` field must not gain one
+    - an explicit `run: None` stays None
+    - non-agent_run events pass through unchanged
+    - relative event order is unchanged
+    """
+    from app.api.deps import get_graph
+
+    chunks = [
+        {"type": "citations", "citations": []},
+        {"type": "trace", "stage": "router"},
+        {"type": "agent_run"},
+        {"type": "agent_run", "run": None},
+        {"type": "token", "text": "done"},
+        {"type": "quiz_question", "question_id": "q-1"},
+    ]
+    snapshot = json.dumps(chunks, sort_keys=True)
+
+    class MixedEventGraph:
+        async def astream(self, _input_state, **_kwargs):
+            for item in chunks:
+                yield item
+
+    app.dependency_overrides[get_graph] = lambda: MixedEventGraph()
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "hi", "session_id": "batch-a-shapes"},
+        headers=_CHAT_HEADERS,
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    assert [e["type"] for e in events] == [
+        "session",
+        "citations",
+        "trace",
+        "agent_run",
+        "agent_run",
+        "token",
+        "quiz_question",
+        "done",
+    ]
+    run_events = [e for e in events if e["type"] == "agent_run"]
+    assert "run" not in run_events[0]
+    assert run_events[1]["run"] is None
+    assert events[1] == {"type": "citations", "citations": []}
+    assert events[2] == {"type": "trace", "stage": "router"}
+    assert events[5] == {"type": "token", "text": "done"}
+    assert events[6] == {"type": "quiz_question", "question_id": "q-1"}
+
+    # No graph chunk was mutated in place.
+    assert json.dumps(chunks, sort_keys=True) == snapshot

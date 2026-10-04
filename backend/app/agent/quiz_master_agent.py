@@ -355,7 +355,9 @@ def build_quiz_master_agent(
             try:
                 response = await llm_with_tools.ainvoke(messages)
             except Exception as exc:
-                trace.record_llm_error(f"{type(exc).__name__}: {exc}")
+                # Pass the exception itself: AgentTrace projects it to fixed
+                # safe category text instead of interpolating its detail.
+                trace.record_llm_error(exc)
                 return _format_degrade_output(writer, trace, "llm_call_failed")
 
             messages.append(response)

@@ -22,6 +22,7 @@ from app.db.repositories import (
     PlanRepository,
 )
 from app.db.session import get_session
+from app.llm.errors import normalize_llm_error
 from app.llm.provider import LLMConfig
 
 from .deps import (
@@ -353,7 +354,9 @@ async def ping_model(
             ok=False,
             model=llm_config.model,
             latency_ms=latency_ms,
-            note=f"Failed: {type(exc).__name__} — {exc}",
+            # Fixed category text only — the provider's raw message never
+            # reaches the client (Batch A boundary).
+            note=f"Failed: {normalize_llm_error(exc)}",
         )
 
 
@@ -508,6 +511,38 @@ def _get_or_create_chat_session(
 _ASSISTANT_ARTIFACTS_SCHEMA = "assistant_artifacts.v1"
 
 
+def _project_agent_run(run) -> dict | None:
+    """Return a projected shallow copy of a valid agent_run dict.
+
+    Only `llm_error` is normalized; every other field is passed through
+    unchanged. The incoming mapping is never mutated — it may still be owned by
+    a graph chunk or by a persisted JSON document. Invalid runs collapse to
+    None (the existing handling).
+    """
+    if not isinstance(run, dict):
+        return None
+    projected = dict(run)
+    if "llm_error" in projected:
+        projected["llm_error"] = normalize_llm_error(projected["llm_error"])
+    return projected
+
+
+def _project_agent_run_chunk(chunk):
+    """Project an `agent_run` SSE chunk before it leaves the API boundary.
+
+    An event that never carried a `run` field keeps its exact shape (no field is
+    invented). When `run` is present it is always replaced by the projection:
+    a valid dict is shallow-copied with only `llm_error` normalized, and an
+    invalid non-dict value collapses to None exactly like the persistence and
+    history paths — the raw value is never forwarded.
+    """
+    if not isinstance(chunk, dict) or chunk.get("type") != "agent_run":
+        return chunk
+    if "run" not in chunk:
+        return chunk
+    return {**chunk, "run": _project_agent_run(chunk.get("run"))}
+
+
 def _assistant_artifacts(
     *,
     citations: list[dict],
@@ -517,7 +552,9 @@ def _assistant_artifacts(
     payload = {
         "schema": _ASSISTANT_ARTIFACTS_SCHEMA,
         "citations": list(citations or []),
-        "agent_run": agent_run,
+        # New persistence input: project again so a raw run can never be
+        # written, whatever path handed it to us.
+        "agent_run": _project_agent_run(agent_run),
     }
     if quiz_question_id is not None:
         payload["quiz_question_id"] = quiz_question_id
@@ -535,8 +572,9 @@ def _extract_artifact_citations(raw) -> list[dict]:
 
 def _extract_artifact_agent_run(raw) -> dict | None:
     if isinstance(raw, dict) and raw.get("schema") == _ASSISTANT_ARTIFACTS_SCHEMA:
-        run = raw.get("agent_run")
-        return run if isinstance(run, dict) else None
+        # Read-only projection: history rows written before this boundary are
+        # returned safely without ever rewriting the stored original.
+        return _project_agent_run(raw.get("agent_run"))
     return None
 
 
@@ -642,14 +680,14 @@ async def chat(
         }
         warning_yielded = False
         async for chunk in graph.astream(input_state, stream_mode="custom", config=config):
-            yield _sse(chunk)
+            # Project before yielding: the raw chunk must not reach the client.
+            yield _sse(_project_agent_run_chunk(chunk))
             if chunk.get("type") == "token":
                 assistant_parts.append(chunk.get("text", ""))
             elif chunk.get("type") == "citations":
                 assistant_citations = chunk.get("citations") or []
             elif chunk.get("type") == "agent_run":
-                run = chunk.get("run")
-                assistant_agent_run = run if isinstance(run, dict) else None
+                assistant_agent_run = _project_agent_run(chunk.get("run"))
             elif chunk.get("type") == "quiz_question":
                 qid = chunk.get("question_id")
                 if isinstance(qid, str) and qid:

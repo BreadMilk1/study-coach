@@ -6,6 +6,7 @@ the serialize() shape is contractual. These tests pin:
   - serialize() emits all expected keys with correct types/counts
   - exit_reason transitions: natural_stop / budget_exhausted / llm_call_failed
 """
+import json
 import time
 
 from langchain_core.messages import AIMessage
@@ -178,3 +179,76 @@ def test_serialize_public_does_not_leak_truncated_retriever_text():
 
     assert out["tool_calls"][0]["output_preview"] == "retriever chunks"
     assert "source text" not in out["tool_calls"][0]["output_preview"]
+
+
+# --- Batch A: LLM error detail boundary ------------------------------------
+
+_MARKER = "SECRET_OPAQUE_MARKER_7f3a"
+_SAFE_CONNECTION = "ConnectionError: Could not connect to the model service."
+_SAFE_AUTH = "AuthenticationError: Model authentication failed."
+_SAFE_GENERIC = "LLMError: Model request failed."
+
+
+def test_record_llm_error_accepts_exception_object_and_drops_detail():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.record_iteration(_ai(), iteration=0)
+    trace.record_tool_call("retriever_search", {"query": "HyDE"}, "[]", error=False)
+
+    trace.record_llm_error(ConnectionError(f"ollama unreachable {_MARKER}"))
+
+    # Entry point stores safe text, not the exception object or its detail.
+    assert trace.llm_error == _SAFE_CONNECTION
+    out = trace.serialize()
+    assert out["exit_reason"] == "llm_call_failed"
+    assert out["llm_error"] == _SAFE_CONNECTION
+    assert _MARKER not in out["llm_error"]
+    # Counters are untouched by the error path.
+    assert out["total_iterations"] == 1
+    assert out["total_tool_calls"] == 1
+    assert out["tool_call_breakdown"] == {"retriever_search": 1}
+
+
+def test_record_llm_error_accepts_legacy_string_and_drops_detail():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.record_llm_error(
+        f"AuthenticationError: Incorrect API key provided: sk-live-{_MARKER}"
+    )
+
+    out = trace.serialize()
+    assert out["exit_reason"] == "llm_call_failed"
+    assert out["llm_error"] == _SAFE_AUTH
+    assert _MARKER not in json.dumps(out)
+
+
+def test_record_llm_error_keeps_none_field_none():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.record_llm_error(None)
+
+    out = trace.serialize()
+    assert out["exit_reason"] == "llm_call_failed"
+    assert out["llm_error"] is None
+
+
+def test_serialize_paths_project_raw_llm_error_assigned_outside_the_entry_point():
+    """Hand-built or rehydrated traces that bypass record_llm_error must still
+    not leak raw detail through either serialization path."""
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.exit_reason = "llm_call_failed"
+    trace.llm_error = f"SyntheticSecretError: Bearer sk-live-{_MARKER}"
+
+    internal = trace.serialize()
+    public = trace.serialize_public(node="planner")
+
+    assert internal["llm_error"] == _SAFE_GENERIC
+    assert public["llm_error"] == _SAFE_GENERIC
+    assert _MARKER not in json.dumps(internal)
+    assert _MARKER not in json.dumps(public)
+
+
+def test_serialize_paths_keep_already_safe_text_idempotent():
+    trace = AgentTrace(t_start=time.monotonic())
+    trace.exit_reason = "llm_call_failed"
+    trace.llm_error = _SAFE_CONNECTION
+
+    assert trace.serialize()["llm_error"] == _SAFE_CONNECTION
+    assert trace.serialize_public(node="quiz")["llm_error"] == _SAFE_CONNECTION
