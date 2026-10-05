@@ -98,7 +98,7 @@ See `docs/EVAL.md`, `docs/DEMO.md`, and `docs/adr/0001-share-tutor-attempt-not-p
 
 ### BYOK Multi-Model
 
-- **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers, never persisted server-side
+- **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers; API keys are not persisted as application configuration
 - **Reviewer demo pairing** — host-run path uses `gemma4:e4b` for chat (tool-calling) with a distinct Judge such as `qwen2.5:7b` to avoid same-model self-preference warnings
 - **Cross-model Judge** — `x-judge-model` header mitigates self-preference bias (empirical delta: 0.20–0.40)
 - **Tool-call detection** — Settings Connection / Tool Call checks plus `GET /api/models/tool-check`; agent-loop stays locked to deterministic when unsupported
@@ -312,7 +312,7 @@ study-coach/
 |--------|---------|-------|
 | `x-provider` | `ollama` | `openai` / `anthropic` / `google_genai`; `gemini` is accepted as an alias |
 | `x-model` | `gemma3:4b` | Provider-specific model ID; portfolio / agent-loop demo prefers `gemma4:e4b` |
-| `x-api-key` | — | Required for cloud providers; received per request, never persisted server-side |
+| `x-api-key` | — | Required for cloud providers; received per request, not persisted as application configuration |
 | `x-base-url` | — | Custom endpoint / proxy; must be paired with the target provider's key and model |
 | `x-judge-model` | same as `x-model` | Distinct Judge model; demo prefers `qwen2.5:7b` to avoid same-model bias warnings |
 | `x-planner-mode` | `deterministic` | `deterministic` or `agent_loop` |

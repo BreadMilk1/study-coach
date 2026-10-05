@@ -139,10 +139,10 @@ Run Lab is local-mode only. Evaluation execution is **single-worker**: one attac
 
 **Context:** Users switch between local Ollama models and cloud providers (OpenAI, Anthropic, Gemini). A server-wide `OPENAI_API_KEY` env var would lock all users to one provider.
 
-**Decision:** Per-request HTTP headers (`x-provider`, `x-model`, `x-api-key`, `x-base-url`, `x-judge-model`, `x-planner-mode`, `x-quiz-mode`). `init_chat_model()` called fresh per request. Frontend stores API keys in `localStorage`, sent via headers (never persisted server-side).
+**Decision:** Per-request HTTP headers (`x-provider`, `x-model`, `x-api-key`, `x-base-url`, `x-judge-model`, `x-planner-mode`, `x-quiz-mode`). `init_chat_model()` called fresh per request. Frontend stores API keys in `localStorage`, sent via headers (not persisted as application configuration).
 
 **Consequences:**
-- Stateless: no server-side API key storage, no per-user provider configuration in DB
+- Stateless: API keys are not persisted as application configuration; no per-user provider configuration in DB
 - Multi-model per session: judge can use a different model (`x-judge-model`) than the generator, mitigating self-preference bias (P2.1-② empirical: same-model bias delta ~0.20-0.40)
 - Every request re-initializes the model object — acceptable for demo scale (~100ms overhead)
 - `x-planner-mode` / `x-quiz-mode` extend the pattern for mode dispatch (ADR 3)
@@ -315,7 +315,7 @@ All AI-bearing routes read **BYOK headers** (see §8) per request. Learning-data
 |--------|----------|---------|-------|
 | `x-provider` | no | `ollama` | `openai` / `anthropic` / `google_genai` / `ollama`; `gemini` is accepted as an alias of `google_genai` |
 | `x-model` | no | `gemma3:4b` | provider-specific model id |
-| `x-api-key` | unless ollama | — | received per request; never persisted server-side |
+| `x-api-key` | unless ollama | — | received per request; not persisted as application configuration |
 | `x-base-url` | no | provider default | self-hosted / proxy; must be paired with the target provider's key and model |
 | `x-judge-model` | no | same as `x-model` | different model for Judge Guard |
 | `x-planner-mode` | no | `deterministic` | `deterministic` or `agent_loop` |
@@ -406,7 +406,7 @@ Focused balanced-backlog Chrome acceptance (2026-08-10) covered only real PDF up
 |---------|---------------|
 | Auth | Shipped frontend auto-provisions an anonymous signed JWT. Identity-mutating auth POST routes participate in the lifecycle shared lease. Google OAuth/upgrade routes and columns remain frozen in backend code, with no frontend login runtime or delivered account continuity. |
 | Data lifecycle | Summary/reset require strict signed bearer auth; reset defaults off and supported local-mode configurations bind the backend to loopback. The shipped Compose configuration enforces that binding; no request-IP enforcement is promised. |
-| API key storage | `x-api-key` is received per request and not persisted server-side; frontend `localStorage` (demo scope). Redaction is limited to the documented error boundary — no guarantee is made for every log, SDK, proxy or monitoring layer. |
+| API key storage | `x-api-key` is received per request and not persisted as application configuration; frontend `localStorage` (demo scope). Redaction is limited to the documented error boundary — no guarantee is made for every log, SDK, proxy or monitoring layer. |
 | CORS | FastAPI `CORSMiddleware` — frontend origin only |
 | SQL injection | SQLAlchemy ORM (parameterized queries) |
 | Document upload | PDF file limit 25 MiB (`MAX_UPLOAD_BYTES`); whole multipart request cap `MAX_UPLOAD_REQUEST_BYTES` (= file limit + 64 KiB overhead) enforced by pure ASGI middleware **before** multipart spool; `.pdf` extension whitelist; `%PDF` magic-byte check; chunked read; stable `4xx` (`415`/`400`/`413`); per-request temp file cleaned on failure and cancellation |
