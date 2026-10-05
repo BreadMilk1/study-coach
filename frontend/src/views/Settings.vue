@@ -84,7 +84,7 @@ async function runToolCheck() {
   <div class="p-8 h-full overflow-y-auto">
     <h2 class="text-xl font-semibold mb-4">Settings</h2>
     <p class="text-white/60 text-sm mb-6">
-      Bring-your-own-key. API key is stored in your browser localStorage; the server never sees nor persists it.
+      Bring-your-own-key. Your API key is stored in this browser's localStorage and sent to the Study Coach backend for requests to the configured provider.
     </p>
     <p class="text-white/60 text-sm mb-6">{{ $t('settings.localFirst') }}</p>
     <div class="space-y-4">

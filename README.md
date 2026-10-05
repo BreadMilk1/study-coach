@@ -98,11 +98,13 @@ See `docs/EVAL.md`, `docs/DEMO.md`, and `docs/adr/0001-share-tutor-attempt-not-p
 
 ### BYOK Multi-Model
 
-- **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers, never persisted server-side
+- **Per-request provider switching** — `x-provider` / `x-model` / `x-api-key` headers; API keys are not persisted as application configuration
 - **Reviewer demo pairing** — host-run path uses `gemma4:e4b` for chat (tool-calling) with a distinct Judge such as `qwen2.5:7b` to avoid same-model self-preference warnings
 - **Cross-model Judge** — `x-judge-model` header mitigates self-preference bias (empirical delta: 0.20–0.40)
 - **Tool-call detection** — Settings Connection / Tool Call checks plus `GET /api/models/tool-check`; agent-loop stays locked to deterministic when unsupported
-- **Supported providers**: Ollama (local), OpenAI, Anthropic, Google Gemini
+- **Supported providers**: Ollama (local, default), OpenAI, Anthropic, Google Gemini — all four LangChain adapters ship as runtime dependencies
+- **Gemini backend** — pinned to the API-key Developer API (`vertexai=False`); an ambient `GOOGLE_GENAI_USE_VERTEXAI` cannot switch it to Vertex AI
+- **Provider verification scope** — runtime install (`uv.lock`, `uv sync --frozen --no-dev`), offline adapter construction and mock-HTTP request contracts (`backend/tests/llm/test_provider.py`) are covered; no real key is used, so live authentication, official service availability and production reliability are not verified
 
 ### Frontend
 
@@ -186,7 +188,7 @@ pnpm build              # typecheck + production build
 | `STUDY_COACH_LOCAL_MODE` | No | `0` | Enables the instance-wide reset API only when set to `1`; keep disabled outside a loopback-only local deployment |
 | `CHROMA_PATH` | No | `./chroma_data` | Persistent Chroma directory; Docker Compose uses `/app/data/chroma` |
 
-Cloud BYOK (OpenAI / Anthropic / Gemini) is configured **per-request** via the frontend Settings panel — no server-side API keys needed.
+Cloud BYOK (OpenAI / Anthropic / Gemini) is configured **per-request** via the frontend Settings panel — the key is sent with each request and the application does not persist it as configuration. This is not a guarantee that every log, SDK, proxy or monitoring layer drops credentials; see the security model in `docs/ARCHITECTURE.md`. A custom `x-base-url` must be paired with the target provider's key and model.
 
 ### Local-first product boundary
 
@@ -308,10 +310,10 @@ study-coach/
 
 | Header | Default | Notes |
 |--------|---------|-------|
-| `x-provider` | `ollama` | `openai` / `anthropic` / `google_genai` |
+| `x-provider` | `ollama` | `openai` / `anthropic` / `google_genai`; `gemini` is accepted as an alias |
 | `x-model` | `gemma3:4b` | Provider-specific model ID; portfolio / agent-loop demo prefers `gemma4:e4b` |
-| `x-api-key` | — | Required for cloud providers; never persisted server-side |
-| `x-base-url` | — | Custom endpoint / proxy |
+| `x-api-key` | — | Required for cloud providers; received per request, not persisted as application configuration |
+| `x-base-url` | — | Custom endpoint / proxy; must be paired with the target provider's key and model |
 | `x-judge-model` | same as `x-model` | Distinct Judge model; demo prefers `qwen2.5:7b` to avoid same-model bias warnings |
 | `x-planner-mode` | `deterministic` | `deterministic` or `agent_loop` |
 | `x-quiz-mode` | `deterministic` | `deterministic` or `agent_loop` |
