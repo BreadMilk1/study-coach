@@ -467,3 +467,279 @@ def test_production_v2_prompt_template_is_byte_for_byte_compatible():
         == expected_prompt
     )
     assert build_prompt("What is RRF?", [CHUNK_A, CHUNK_B]).encode("utf-8") == expected_prompt
+
+
+# ---------------------------------------------------------------------------
+# Batch C — content-block text boundary (strict per-chunk extraction + no-body
+# generation failure).
+# ---------------------------------------------------------------------------
+
+# Batch C publishes these as fixed, payload-free rejection text. The literals
+# are duplicated on purpose: a consumer bug must stay observable even when the
+# shared helper module is absent.
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
+
+
+class BlockStreamingLLM:
+    """Streams one chunk per content value; a chunk may be text blocks or a list."""
+
+    def __init__(self, contents: list, *, usage: dict | None = None, usage_index: int | None = None):
+        self.contents = list(contents)
+        self.usage = usage
+        self.usage_index = usage_index
+        self.prompts: list[str] = []
+
+    async def astream(self, messages, **_kwargs):
+        self.prompts.append(messages[-1].content if messages else "")
+        for index, content in enumerate(self.contents):
+            chunk = AIMessageChunk(content=content)
+            attach = self.usage_index if self.usage_index is not None else index
+            if self.usage is not None and index == attach:
+                chunk.usage_metadata = dict(self.usage)
+            yield chunk
+
+
+def _completed_generation_events(sink) -> list[dict]:
+    return [
+        event
+        for event in sink.of_type("trace")
+        if event.get("step") == "generation" and event.get("status") == "completed"
+    ]
+
+
+def _failed_generation_events(sink) -> list[dict]:
+    return [
+        event
+        for event in sink.of_type("trace")
+        if event.get("step") == "generation" and event.get("status") == "failed"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_extracts_text_blocks_and_streams_str_tokens():
+    sink = RecordingSink()
+    llm = BlockStreamingLLM(
+        [
+            [{"type": "thinking", "thinking": _SENTINEL}],
+            [{"type": "text", "text": "Reciprocal "}, "rank "],
+            [{"type": "text", "text": "fusion [1]."}],
+        ]
+    )
+
+    candidate = await TutorAttemptEngine().answer(
+        question="What is RRF?",
+        retriever=FakeRetriever([CHUNK_A, CHUNK_B]),
+        llm=llm,
+        prompt_template=TutorPromptTemplate.production_v2(),
+        event_sink=sink,
+        attempt_config=TutorAttemptConfig.production_default(),
+    )
+
+    tokens = sink.of_type("token")
+    # One token per chunk that carries text; blocks inside a chunk concatenate.
+    assert [event["text"] for event in tokens] == ["Reciprocal rank ", "fusion [1]."]
+    assert all(isinstance(event["text"], str) for event in tokens)
+    assert candidate.answer == "Reciprocal rank fusion [1]."
+    assert _SENTINEL not in candidate.answer
+    assert candidate.citations == build_citations([CHUNK_A, CHUNK_B])
+    assert candidate.evidence == [CHUNK_A, CHUNK_B]
+    assert len(_completed_generation_events(sink)) == 1
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_does_not_fail_early_on_text_free_chunks():
+    sink = RecordingSink()
+    llm = BlockStreamingLLM(
+        [
+            [],
+            [{"type": "reasoning", "text": _SENTINEL}],
+            [{"type": "text", "text": ""}],
+            [{"type": "text", "text": "answer"}],
+        ]
+    )
+
+    candidate = await TutorAttemptEngine().answer(
+        question="What is RRF?",
+        retriever=FakeRetriever([CHUNK_A]),
+        llm=llm,
+        prompt_template=TutorPromptTemplate.production_v2(),
+        event_sink=sink,
+        attempt_config=TutorAttemptConfig.production_default(),
+    )
+
+    assert [event["text"] for event in sink.of_type("token")] == ["answer"]
+    assert candidate.answer == "answer"
+    assert len(_completed_generation_events(sink)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_index", [0, 1, 2])
+async def test_tutor_attempt_keeps_usage_from_text_free_chunks(usage_index):
+    """Usage metadata survives regardless of whether its chunk carried text."""
+    sink = RecordingSink()
+    contents = [
+        [{"type": "thinking", "thinking": _SENTINEL}],
+        [{"type": "text", "text": "answer"}],
+        [{"type": "text", "text": ""}],
+    ]
+    llm = BlockStreamingLLM(
+        contents,
+        usage={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        usage_index=usage_index,
+    )
+
+    candidate = await TutorAttemptEngine().answer(
+        question="What is RRF?",
+        retriever=FakeRetriever([CHUNK_A]),
+        llm=llm,
+        prompt_template=TutorPromptTemplate.production_v2(),
+        event_sink=sink,
+        attempt_config=TutorAttemptConfig.production_default(),
+    )
+
+    assert candidate.usage == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert [event["text"] for event in sink.of_type("token")] == ["answer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "contents",
+    [
+        [],
+        [""],
+        [[]],
+        [[{"type": "thinking", "thinking": _SENTINEL}]],
+        [[{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]],
+        [[{"type": "text", "text": ""}]],
+        [[{"type": "text", "text": " \n "}]],
+        ["   \n\t "],
+    ],
+)
+async def test_tutor_attempt_fails_generation_without_any_body(contents):
+    sink = RecordingSink()
+
+    with pytest.raises(ValueError) as exc_info:
+        await TutorAttemptEngine().answer(
+            question="What is RRF?",
+            retriever=FakeRetriever([CHUNK_A]),
+            llm=BlockStreamingLLM(contents),
+            prompt_template=TutorPromptTemplate.production_v2(),
+            event_sink=sink,
+            attempt_config=TutorAttemptConfig.production_default(),
+        )
+
+    assert str(exc_info.value) == _EMPTY_CONTENT_MESSAGE
+    assert _SENTINEL not in str(exc_info.value)
+    assert _completed_generation_events(sink) == []
+    assert [
+        event["error"] for event in _failed_generation_events(sink)
+    ] == ["ValueError"]
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_skips_tokens_for_chunks_with_no_text():
+    sink = RecordingSink()
+    llm = BlockStreamingLLM(
+        [
+            [],
+            [""],
+            [{"type": "tool_result", "text": _SENTINEL}],
+        ]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await TutorAttemptEngine().answer(
+            question="What is RRF?",
+            retriever=FakeRetriever([CHUNK_A]),
+            llm=llm,
+            prompt_template=TutorPromptTemplate.production_v2(),
+            event_sink=sink,
+            attempt_config=TutorAttemptConfig.production_default(),
+        )
+
+    assert str(exc_info.value) == _EMPTY_CONTENT_MESSAGE
+    assert sink.of_type("token") == []
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_preserves_whitespace_tokens_and_still_fails_without_body():
+    """Whitespace is part of the streamed text, not a body: it is forwarded
+    unchanged and the completed response still has no usable answer."""
+    sink = RecordingSink()
+    llm = BlockStreamingLLM([["  "], [{"type": "text", "text": "\n"}]])
+
+    with pytest.raises(ValueError) as exc_info:
+        await TutorAttemptEngine().answer(
+            question="What is RRF?",
+            retriever=FakeRetriever([CHUNK_A]),
+            llm=llm,
+            prompt_template=TutorPromptTemplate.production_v2(),
+            event_sink=sink,
+            attempt_config=TutorAttemptConfig.production_default(),
+        )
+
+    assert str(exc_info.value) == _EMPTY_CONTENT_MESSAGE
+    assert [event["text"] for event in sink.of_type("token")] == ["  ", "\n"]
+    assert _completed_generation_events(sink) == []
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_fails_on_malformed_chunk_after_tokens_without_candidate():
+    """Already-sent tokens cannot be withdrawn; the attempt still must not
+    produce a Candidate or a completed generation trace."""
+    sink = RecordingSink()
+    llm = BlockStreamingLLM(
+        [
+            [{"type": "text", "text": "Hello "}],
+            [{"type": "unknown_vendor_block", "text": _SENTINEL}],
+            [{"type": "text", "text": "world"}],
+        ]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await TutorAttemptEngine().answer(
+            question="What is RRF?",
+            retriever=FakeRetriever([CHUNK_A]),
+            llm=llm,
+            prompt_template=TutorPromptTemplate.production_v2(),
+            event_sink=sink,
+            attempt_config=TutorAttemptConfig.production_default(),
+        )
+
+    assert str(exc_info.value) == _MALFORMED_CONTENT_MESSAGE
+    assert _SENTINEL not in str(exc_info.value)
+    # The token that already reached the client stays; the late one never does.
+    assert [event["text"] for event in sink.of_type("token")] == ["Hello "]
+    assert _completed_generation_events(sink) == []
+    assert [event["error"] for event in _failed_generation_events(sink)] == ["ValueError"]
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_rejects_malformed_chunk_before_any_token():
+    sink = RecordingSink()
+    llm = BlockStreamingLLM([[{"type": "non_standard", "value": _SENTINEL}]])
+
+    with pytest.raises(ValueError) as exc_info:
+        await TutorAttemptEngine().answer(
+            question="What is RRF?",
+            retriever=FakeRetriever([CHUNK_A]),
+            llm=llm,
+            prompt_template=TutorPromptTemplate.production_v2(),
+            event_sink=sink,
+            attempt_config=TutorAttemptConfig.production_default(),
+        )
+
+    assert str(exc_info.value) == _MALFORMED_CONTENT_MESSAGE
+    assert not sink.of_type("token")
+    assert _completed_generation_events(sink) == []
+    # Retrieval already completed: the rejection belongs to the generation stage.
+    assert any(
+        event.get("step") == "retrieval" and event.get("status") == "completed"
+        for event in sink.of_type("trace")
+    )

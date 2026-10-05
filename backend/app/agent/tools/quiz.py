@@ -15,6 +15,7 @@ from app.db.repositories import (
     MistakeRepository,
     QuestionRepository,
 )
+from app.llm.content import require_text
 from app.srs.sm2 import next_schedule
 
 from .schemas import GradeOut, MasteryOut, MistakeOut, QuizOut, QuizQuestion
@@ -148,7 +149,9 @@ async def generate_quiz(
         context_section=_format_context_section(context_chunks),
     )
     response = await llm.ainvoke([HumanMessage(content=prompt)])
-    raw = getattr(response, "content", "") or ""
+    # Strict text boundary: a malformed or body-less response fails here,
+    # before the JSON parser and before any Question row is created.
+    raw = require_text(getattr(response, "content", ""))
     parsed = _parse_quiz_json(raw)
 
     questions: list[QuizQuestion] = []

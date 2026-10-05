@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessageChunk
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
@@ -175,7 +176,13 @@ def session():
         yield db_session
 
 
-def _connection(*, scorer_llm=None, fingerprint: str = "a" * 64, tutor_provider: str | None = None):
+def _connection(
+    *,
+    scorer_llm=None,
+    fingerprint: str = "a" * 64,
+    tutor_provider: str | None = None,
+    tutor_llm=None,
+):
     EvalModelConnection, _, _, _, _ = _service_api()
     controls = REGISTRY.experiment.variants["tutor-v3"]
     scorer_config = dict(SCORER.model_config)
@@ -186,7 +193,7 @@ def _connection(*, scorer_llm=None, fingerprint: str = "a" * 64, tutor_provider:
         tutor_provider=tutor_provider or controls["provider"],
         tutor_model=controls["model"],
         tutor_parameters=dict(controls["parameters"]),
-        tutor_llm=FakeTutorLLM(),
+        tutor_llm=tutor_llm or FakeTutorLLM(),
         scorer_provider=scorer_config["provider"],
         scorer_model=scorer_config["model"],
         scorer_parameters=scorer_parameters,
@@ -1059,3 +1066,244 @@ async def test_zero_retrieval_is_successful_candidate_with_quality_finding_not_o
     assert result.run.outcome == "success"
     assert result.score_set.quality_verdict == "fail"
     assert any(item["code"] == "retrieval_empty" for item in result.score_set.findings_json)
+
+
+# ---------------------------------------------------------------------------
+# Batch C — a real TutorRunner + real TutorAttemptEngine behind the RunService,
+# with a tmp SQLite database and a fake scorer.
+# ---------------------------------------------------------------------------
+
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
+
+_CORPUS_CHUNK = {
+    "chunk_id": "tgqa-c01-rrf",
+    "content": "Reciprocal rank fusion combines ranked lists.",
+    "source": "learning-run-notes.md",
+    "page": 1,
+    "score": 0.9,
+}
+_CANDIDATE_ANSWER = "Reciprocal rank fusion combines ranked lists [1]."
+
+
+class _RealPathRetriever:
+    def __init__(self, chunks: list[dict]):
+        self.chunks = list(chunks)
+        self.queries: list[tuple[str, int]] = []
+
+    def search(self, query: str, top_k: int = 5) -> list[dict]:
+        self.queries.append((query, top_k))
+        return list(self.chunks[:top_k])
+
+    def close(self) -> None:
+        return None
+
+
+class RealPathLoader:
+    """Fake isolated loader; the Attempt itself is the real engine."""
+
+    def __init__(self, chunks: list[dict] | None = None):
+        self.snapshots: list = []
+        self.retriever = _RealPathRetriever(chunks or [dict(_CORPUS_CHUNK)])
+
+    def load(self, *, snapshot, stop=None, deadline=None):
+        del stop, deadline
+        self.snapshots.append(snapshot)
+        return self.retriever
+
+
+class BlockChunkTutorLLM:
+    """One streaming chunk per element; content may be blocks or a bare string."""
+
+    def __init__(self, contents: list, *, usage: dict | None = None):
+        self.contents = list(contents)
+        self.usage = usage
+        self.astream_calls = 0
+
+    async def astream(self, messages, **_kwargs):
+        self.astream_calls += 1
+        for index, content in enumerate(self.contents):
+            chunk = AIMessageChunk(content=content)
+            if self.usage is not None and index == len(self.contents) - 1:
+                chunk.usage_metadata = dict(self.usage)
+            yield chunk
+
+
+def _real_runner(loader):
+    from app.agent.tutor_attempt import TutorAttemptEngine
+    from app.eval.learning_run.corpus import CorpusMaterializerController
+    from app.eval.learning_run.runner import TutorRunner
+
+    controller = CorpusMaterializerController(loader)
+    runner = TutorRunner(
+        corpus_loader=loader,
+        attempt_engine=TutorAttemptEngine(),
+        materializer_controller=controller,
+    )
+    return runner, controller
+
+
+@pytest.mark.asyncio
+async def test_real_attempt_service_freezes_verifiable_candidate_and_scores_once(session):
+    loader = RealPathLoader()
+    runner, controller = _real_runner(loader)
+    scorer_llm = FakeScorerLLM()
+    service = _service(session, runner, scorer_llm=scorer_llm)
+    llm = BlockChunkTutorLLM(
+        [
+            [{"type": "thinking", "thinking": _SENTINEL}],
+            [{"type": "text", "text": "Reciprocal rank fusion "}, "combines ranked lists [1]."],
+        ],
+        usage={"input_tokens": 4, "output_tokens": 8, "total_tokens": 12},
+    )
+    events: list[dict] = []
+
+    try:
+        result = await service.run(
+            experiment_id="tutor-prompt-regression-v1",
+            task_case_id="tgqa-001",
+            variant_id="tutor-v3",
+            run_profile="evaluation",
+            connection=_connection(scorer_llm=scorer_llm, tutor_llm=llm),
+            events=events,
+        )
+    finally:
+        controller.shutdown(wait=False)
+
+    assert len(loader.snapshots) == 1
+    assert llm.astream_calls == 1, "evaluation profile must run exactly one Attempt"
+    assert loader.retriever.queries == [(ANSWERABLE.question, 5)]
+
+    assert result.run.lifecycle == "finished"
+    assert result.run.outcome == "success"
+    assert result.run.artifact_hash == canonical_hash(result.run.candidate_artifact_json)
+
+    artifact_payload = result.run.candidate_artifact_json
+    assert artifact_payload["answer"] == _CANDIDATE_ANSWER
+    assert artifact_payload["citations"] == [
+        {
+            "chunk_id": "tgqa-c01-rrf",
+            "source": "learning-run-notes.md",
+            "page": 1,
+            "span_start": 0,
+            "span_end": len(_CORPUS_CHUNK["content"]),
+        }
+    ]
+    assert [chunk["chunk_id"] for chunk in artifact_payload["exact_evidence"]] == [
+        "tgqa-c01-rrf"
+    ]
+    assert artifact_payload["usage"] == {
+        "input_tokens": 4,
+        "output_tokens": 8,
+        "total_tokens": 12,
+    }
+    assert artifact_payload["budget"]
+    assert artifact_payload["trace"]
+    assert _SENTINEL not in json.dumps(artifact_payload)
+
+    assert result.score_set is not None
+    assert result.score_set.artifact_input_hash == result.run.artifact_hash
+    executions = EvalScorerExecutionRepository(session).list_verified(result.score_set.id)
+    assert len(executions) == 4
+    assert scorer_llm.calls >= 1
+
+    # Every streamed token is answer text, never a raw block payload.
+    token_events = [event for event in events if event.get("type") == "token"]
+    assert [event["text"] for event in token_events] == [_CANDIDATE_ANSWER]
+    assert all(isinstance(event["text"], str) for event in token_events)
+
+
+@pytest.mark.asyncio
+async def test_real_attempt_without_usable_body_fails_run_without_candidate_or_scoring(session):
+    loader = RealPathLoader()
+    runner, controller = _real_runner(loader)
+    scorer_llm = FakeScorerLLM()
+    service = _service(session, runner, scorer_llm=scorer_llm)
+    llm = BlockChunkTutorLLM([[{"type": "thinking", "thinking": _SENTINEL}]])
+    events: list[dict] = []
+
+    try:
+        result = await service.run(
+            experiment_id="tutor-prompt-regression-v1",
+            task_case_id="tgqa-001",
+            variant_id="tutor-v3",
+            run_profile="evaluation",
+            connection=_connection(scorer_llm=scorer_llm, tutor_llm=llm),
+            events=events,
+        )
+    finally:
+        controller.shutdown(wait=False)
+
+    final = EvalRunRepository(session).get(result.run.id)
+    assert final.lifecycle == "finished"
+    assert final.outcome == "system_failed"
+    assert final.operational_error_json is not None
+    operational = final.operational_error_json
+    assert operational["code"] == "model_unavailable"
+    assert operational["stage"] == "generation"
+    assert operational["retryable"] is True
+    assert _SENTINEL not in final.operational_error_json
+
+    # No frozen Candidate, no hash, no ScoreSet, and the scorer was never called.
+    assert final.artifact_hash is None
+    assert final.candidate_artifact_json is None
+    assert result.score_set is None
+    assert result.executions == ()
+    assert scorer_llm.calls == 0
+    assert session.scalars(select(EvalRun)).all() == [final]
+
+    # One retrieval and one Attempt happened before the failure.
+    assert len(loader.snapshots) == 1
+    assert llm.astream_calls == 1
+    # No raw block payload reaches the run event stream as token text.
+    assert all(
+        isinstance(event.get("text"), str)
+        for event in events
+        if event.get("type") == "token"
+    )
+    assert _SENTINEL not in json.dumps(events, default=str)
+
+
+@pytest.mark.asyncio
+async def test_real_attempt_malformed_block_fails_run_without_scoring(session):
+    loader = RealPathLoader()
+    runner, controller = _real_runner(loader)
+    scorer_llm = FakeScorerLLM()
+    service = _service(session, runner, scorer_llm=scorer_llm)
+    llm = BlockChunkTutorLLM(
+        [
+            [{"type": "text", "text": "partial "}],
+            [{"type": "non_standard", "value": _SENTINEL}],
+        ]
+    )
+    events: list[dict] = []
+
+    try:
+        result = await service.run(
+            experiment_id="tutor-prompt-regression-v1",
+            task_case_id="tgqa-001",
+            variant_id="tutor-v3",
+            run_profile="evaluation",
+            connection=_connection(scorer_llm=scorer_llm, tutor_llm=llm),
+            events=events,
+        )
+    finally:
+        controller.shutdown(wait=False)
+
+    final = EvalRunRepository(session).get(result.run.id)
+    assert final.outcome == "system_failed"
+    operational = final.operational_error_json
+    assert operational["code"] == "model_unavailable"
+    assert operational["stage"] == "generation"
+    assert _SENTINEL not in final.operational_error_json
+    assert final.artifact_hash is None
+    assert final.candidate_artifact_json is None
+    assert result.score_set is None
+    assert scorer_llm.calls == 0
+    assert all(
+        isinstance(event.get("text"), str)
+        for event in events
+        if event.get("type") == "token"
+    )
+    assert _SENTINEL not in json.dumps(events, default=str)

@@ -8,6 +8,8 @@ from typing import Callable, Literal, Protocol
 
 from langchain_core.messages import HumanMessage
 
+from app.llm.content import EMPTY_CONTENT_MESSAGE, extract_text
+
 from .prompt import TutorPromptTemplate, build_citations, format_context
 
 
@@ -141,7 +143,10 @@ class TutorAttemptEngine:
         async def stream_answer() -> None:
             nonlocal usage
             async for chunk in llm.astream([HumanMessage(content=prompt)]):
-                text = getattr(chunk, "content", "") or ""
+                # Strict text boundary: a malformed chunk fails the generation
+                # from inside the stream task, so it reaches the existing
+                # failed-trace error path instead of a `"".join` TypeError.
+                text = extract_text(getattr(chunk, "content", ""))
                 within_deadline = (
                     generation_deadline is None or loop.time() < generation_deadline
                 )
@@ -196,6 +201,13 @@ class TutorAttemptEngine:
             raise
 
         answer_text = "".join(parts)
+        # A stream that completed without any non-whitespace body is a failed
+        # generation, not an empty successful Candidate. Tokens already sent
+        # cannot be withdrawn, but no candidate and no completed trace follow.
+        if not answer_text.strip():
+            empty_error = ValueError(EMPTY_CONTENT_MESSAGE)
+            failed_trace("generation", empty_error)
+            raise empty_error
         resolved_usage: dict[str, int] | Literal["unavailable"] = (
             usage if usage is not None else "unavailable"
         )

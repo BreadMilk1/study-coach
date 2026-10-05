@@ -20,6 +20,8 @@ from typing import Literal, TypedDict
 
 from langchain_core.messages import HumanMessage
 
+from app.llm.content import require_text
+
 _DIMENSIONS: tuple[str, ...] = (
     # Grounding side
     "relevance",
@@ -163,5 +165,8 @@ async def judge_response(
         question=question, answer=answer, context=context, rubric=rubric
     )
     response = await judge_llm.ainvoke([HumanMessage(content=prompt)])
-    raw = getattr(response, "content", "") or ""
+    # Strict text boundary: a malformed or body-less judge response fails the
+    # call instead of reaching _normalise(None) and minting a 0.6 pass. The
+    # neutral fallback still applies to non-empty text that is not JSON.
+    raw = require_text(getattr(response, "content", ""))
     return _normalise(_extract_json(raw), dims)

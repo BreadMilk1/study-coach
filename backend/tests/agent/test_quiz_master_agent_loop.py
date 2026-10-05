@@ -384,3 +384,114 @@ async def test_llm_failure_detail_is_projected_in_internal_and_public_trace(
 
     assert _MARKER not in json.dumps(result, default=str)
     assert _MARKER not in json.dumps(events, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Batch C — content blocks on tool-call-only turns.
+# ---------------------------------------------------------------------------
+
+
+class RecordingScriptedLLM(ScriptedLLM):
+    """ScriptedLLM that also keeps the exact message list of every call."""
+
+    def __init__(self, responses: list[AIMessage]):
+        super().__init__(responses)
+        self.message_history: list[list] = []
+
+    async def ainvoke(self, messages, **_kwargs):
+        self.message_history.append(list(messages))
+        return await super().ainvoke(messages, **_kwargs)
+
+
+def _block_ai(content, tool_calls=None, input_tokens=10, output_tokens=5):
+    msg = AIMessage(content=content, tool_calls=tool_calls or [])
+    msg.usage_metadata = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+    return msg
+
+
+async def test_tool_call_only_block_messages_keep_raw_arguments_and_identity(session):
+    """Content blocks on tool-call turns must not disturb the real tool loop.
+
+    The intermediate assistant envelopes keep their block content and raw
+    tool-call arguments; success is identified by the persisted question row,
+    and the visible GENERATE text never leaks the answer or explanation.
+    """
+    user = UserRepository(session).get_or_create("fp-loop-blocks")
+    goal_repo = GoalRepository(session)
+    topic_repo = TopicRepository(session)
+    question_repo = QuestionRepository(session)
+
+    search_args = {"query": "HyDE"}
+    persist_args = {
+        "topic": "HyDE",
+        "prompt": "What does HyDE stand for?",
+        "options": ["A) a", "B) b", "C) c", "D) d"],
+        "answer": "B",
+        "explanation": "HyDE = Hypothetical Document Embedding.",
+    }
+    first_blocks = [
+        {"type": "text", "text": "I will search the notes first."},
+        {"type": "thinking", "thinking": "plan the retrieval"},
+    ]
+    second_blocks = [{"type": "text", "text": "Now persist the question."}]
+    final_blocks = [{"type": "text", "text": "UNTRUSTED MODEL FINAL TEXT"}]
+
+    llm = RecordingScriptedLLM([
+        _block_ai(first_blocks,
+                  tool_calls=[{"name": "retriever_search",
+                               "args": search_args, "id": "tc-1"}]),
+        _block_ai(second_blocks,
+                  tool_calls=[{"name": "persist_quiz_question",
+                               "args": persist_args, "id": "tc-2"}]),
+        _block_ai(final_blocks),
+    ])
+
+    agent = build_quiz_master_agent(
+        llm=llm,
+        topic_repo=topic_repo, question_repo=question_repo, goal_repo=goal_repo,
+        retriever=None,
+        now_fn=lambda: datetime(2026, 5, 24),
+    )
+    result = await agent({
+        "messages": [HumanMessage(content="quiz me on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert result["quiz_action"] == "generate"
+    assert result["agent_trace"]["exit_reason"] == "natural_stop"
+    assert result["agent_trace"]["tool_call_breakdown"] == {
+        "retriever_search": 1,
+        "persist_quiz_question": 1,
+    }
+
+    # Result identity is the persisted row, not the model's final prose.
+    question_id = result["active_quiz_question_id"]
+    assert question_id is not None
+    row = session.get(Question, question_id)
+    assert row is not None
+    assert row.prompt == persist_args["prompt"]
+    assert row.answer == persist_args["answer"]
+    assert row.explanation == persist_args["explanation"]
+
+    content = result["messages"][0].content
+    assert isinstance(content, str)
+    assert persist_args["prompt"] in content
+    assert "B) b" in content
+    assert "Reply with A, B, C, or D." in content
+    assert persist_args["explanation"] not in content
+    assert "UNTRUSTED MODEL FINAL TEXT" not in content
+
+    # Raw assistant envelopes (block content + tool_calls) are re-sent verbatim:
+    # the loop must not flatten them through the text boundary helper.
+    second_call = llm.message_history[1]
+    first_ai = next(m for m in second_call if isinstance(m, AIMessage))
+    assert first_ai.content == first_blocks
+    assert first_ai.tool_calls[0]["args"] == search_args
+
+    third_call = llm.message_history[2]
+    tool_messages = [m for m in third_call if isinstance(m, ToolMessage)]
+    assert any(question_id in m.content for m in tool_messages)

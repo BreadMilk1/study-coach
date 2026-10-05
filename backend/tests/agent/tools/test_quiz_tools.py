@@ -6,10 +6,11 @@ Tests grow per tool. Order: update_mastery (DB-only, simplest) → record_mistak
 from datetime import datetime, timedelta
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.agent.quiz_master import build_quiz_master
 from app.agent.tools.quiz import (
     generate_quiz,
     grade_quiz_answer,
@@ -17,7 +18,7 @@ from app.agent.tools.quiz import (
     update_mastery,
 )
 from app.agent.tools.schemas import GradeOut, MasteryOut, MistakeOut, QuizOut
-from app.db.models import Base
+from app.db.models import Base, Question
 from app.db.repositories import (
     GoalRepository,
     MasteryRepository,
@@ -26,6 +27,13 @@ from app.db.repositories import (
     TopicRepository,
     UserRepository,
 )
+
+# Batch C publishes these as fixed, payload-free rejection text. The literals
+# are duplicated on purpose: a consumer bug must stay observable even when the
+# shared helper module is absent.
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
 
 
 @pytest.fixture
@@ -284,3 +292,193 @@ async def test_generate_quiz_without_context_chunks_falls_back_to_ungrounded(ses
     assert llm.last_prompt is not None
     # No source-chunk markers in the prompt
     assert "Hypothetical Document Embedding" not in llm.last_prompt
+
+
+# ---------------------------------------------------------------------------
+# Batch C — content-block text boundary (strict extraction before JSON parse).
+# ---------------------------------------------------------------------------
+
+
+class ContentQuizLLM:
+    """Returns an arbitrary message-content shape for the boundary tests."""
+
+    def __init__(self, content):
+        self.content = content
+        self.last_prompt: str | None = None
+
+    async def ainvoke(self, messages, **_kwargs):
+        self.last_prompt = messages[-1].content if messages else ""
+        return AIMessage(content=self.content)
+
+
+class SourceChunkRetriever:
+    """Minimal retriever so the real QuizMaster persists source_chunks."""
+
+    def __init__(self, chunks: list[dict]):
+        self.chunks = chunks
+
+    def search(self, _query: str, top_k: int = 5) -> list[dict]:
+        return list(self.chunks[:top_k])
+
+
+def _split_json_blocks(payload: str, cuts: tuple[int, ...]) -> list:
+    """Split a JSON payload across text blocks and one bare string element."""
+    parts: list = [{"type": "thinking", "thinking": _SENTINEL}]
+    previous = 0
+    for index, cut in enumerate(cuts):
+        segment = payload[previous:cut]
+        if index == 1:
+            parts.append(segment)
+        else:
+            parts.append({"type": "text", "text": segment})
+        previous = cut
+    parts.append({"type": "text", "text": payload[previous:]})
+    return parts
+
+
+def _question_count(session) -> int:
+    return session.query(Question).count()
+
+
+async def test_generate_quiz_extracts_mixed_text_blocks_before_json_parse(session):
+    _, topic = _seed_user_with_topic(session)
+    questions = QuestionRepository(session)
+    llm = ContentQuizLLM(_split_json_blocks(_ONE_QUESTION_JSON, (25, 60)))
+
+    out = await generate_quiz(
+        topic_id=topic.id,
+        topic_name="HyDE",
+        n=1,
+        llm=llm,
+        question_repo=questions,
+    )
+
+    assert len(out.questions) == 1
+    assert out.questions[0].prompt == "What does HyDE rewrite?"
+    assert out.questions[0].answer == "A"
+    persisted = questions.get_by_id(out.questions[0].id)
+    assert persisted is not None
+    # Non-text payloads never reach the prompt parse or the stored row.
+    assert _SENTINEL not in persisted.prompt
+
+
+async def test_generate_quiz_does_not_consume_text_like_fields_of_skipped_blocks(session):
+    _, topic = _seed_user_with_topic(session)
+    questions = QuestionRepository(session)
+    llm = ContentQuizLLM(
+        [
+            {"type": "reasoning", "text": "ignore me"},
+            {"type": "tool_result", "text": "ignore me too"},
+            {"type": "text", "text": _ONE_QUESTION_JSON},
+        ]
+    )
+
+    out = await generate_quiz(
+        topic_id=topic.id,
+        topic_name="HyDE",
+        n=1,
+        llm=llm,
+        question_repo=questions,
+    )
+
+    assert out.questions[0].answer == "A"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [],
+        "   \n\t ",
+        [{"type": "thinking", "thinking": _SENTINEL}],
+        [{"type": "text", "text": ""}],
+        [{"type": "text", "text": "  "}],
+    ],
+)
+async def test_generate_quiz_rejects_content_without_body_before_creating_question(
+    session, content
+):
+    _, topic = _seed_user_with_topic(session)
+    questions = QuestionRepository(session)
+
+    with pytest.raises(ValueError) as exc_info:
+        await generate_quiz(
+            topic_id=topic.id,
+            topic_name="HyDE",
+            n=1,
+            llm=ContentQuizLLM(content),
+            question_repo=questions,
+        )
+
+    assert str(exc_info.value) == _EMPTY_CONTENT_MESSAGE
+    assert _SENTINEL not in str(exc_info.value)
+    assert _question_count(session) == 0
+
+
+async def test_generate_quiz_rejects_unknown_block_type_without_leaking_payload(session):
+    _, topic = _seed_user_with_topic(session)
+    questions = QuestionRepository(session)
+
+    with pytest.raises(ValueError) as exc_info:
+        await generate_quiz(
+            topic_id=topic.id,
+            topic_name="HyDE",
+            n=1,
+            llm=ContentQuizLLM(
+                [{"type": "text", "text": "["}, {"type": "non_standard", "value": _SENTINEL}]
+            ),
+            question_repo=questions,
+        )
+
+    assert str(exc_info.value) == _MALFORMED_CONTENT_MESSAGE
+    assert _SENTINEL not in str(exc_info.value)
+    assert _question_count(session) == 0
+
+
+async def test_deterministic_quiz_master_keeps_goal_topic_and_source_chunks_on_rejection(
+    session,
+):
+    """A rejected generation happens after goal/topic grounding, not instead of it.
+
+    The Quiz result contract is "no new Question"; it is not a promise that the
+    whole deterministic turn is side-effect free.
+    """
+    user = UserRepository(session).get_or_create("fp-content-blocks")
+    goal_repo = GoalRepository(session)
+    topic_repo = TopicRepository(session)
+    question_repo = QuestionRepository(session)
+    retriever = SourceChunkRetriever(
+        [
+            {
+                "chunk_id": "hyde:p1:0",
+                "content": "HyDE rewrites a query into a hypothetical answer.",
+                "source": "hyde.pdf",
+                "page": 1,
+            }
+        ]
+    )
+    llm = ContentQuizLLM([{"type": "thinking", "thinking": _SENTINEL}])
+    agent = build_quiz_master(
+        llm=llm,
+        topic_repo=topic_repo,
+        question_repo=question_repo,
+        mistake_repo=MistakeRepository(session),
+        mastery_repo=MasteryRepository(session),
+        goal_repo=goal_repo,
+        retriever=retriever,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await agent(
+            {
+                "messages": [HumanMessage(content="quiz me on HyDE")],
+                "user_id": user.id,
+            }
+        )
+
+    assert str(exc_info.value) == _EMPTY_CONTENT_MESSAGE
+    assert _question_count(session) == 0
+    active_goals = goal_repo.list_active_for_user(user.id)
+    assert len(active_goals) == 1
+    topic = topic_repo.get_by_name(goal_id=active_goals[0].id, name="HyDE")
+    assert topic is not None
+    assert topic.source_chunks == ["hyde:p1:0"]

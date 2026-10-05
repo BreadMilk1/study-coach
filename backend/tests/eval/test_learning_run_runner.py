@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessageChunk
 
 from app.agent.tutor_attempt import TutorCandidate
 from app.eval.learning_run.registry import TaskRegistry
@@ -580,3 +581,191 @@ async def test_runner_parent_cancel_handoffs_cleanup_without_waiting_for_search_
     assert raw.close_calls == 1
     assert await asyncio.to_thread(lambda: controller.state == "idle")
     controller.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# Batch C — a real TutorAttemptEngine inside the real TutorRunner, with a fake
+# isolated loader and content-block chunks.
+# ---------------------------------------------------------------------------
+
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
+
+_CORPUS_CHUNK = {
+    "chunk_id": "tgqa-c01-rrf",
+    "content": "Reciprocal rank fusion combines ranked lists.",
+    "source": "learning-run-notes.md",
+    "page": 1,
+    "score": 0.9,
+}
+
+
+class _BlockCorpusRetriever:
+    def __init__(self, chunks: list[dict], closed_event: threading.Event | None = None):
+        self.chunks = list(chunks)
+        self.queries: list[tuple[str, int]] = []
+        self.close_calls = 0
+        self._closed_event = closed_event
+
+    def search(self, query: str, top_k: int = 5) -> list[dict]:
+        self.queries.append((query, top_k))
+        return list(self.chunks[:top_k])
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self._closed_event is not None:
+            self._closed_event.set()
+
+
+class BlockCorpusLoader:
+    """Fake isolated loader serving the real Attempt through its retriever."""
+
+    def __init__(self, chunks: list[dict] | None = None):
+        self.snapshots: list = []
+        self.closed_event = threading.Event()
+        self.retriever = _BlockCorpusRetriever(
+            chunks or [dict(_CORPUS_CHUNK)], self.closed_event
+        )
+
+    def load(self, *, snapshot, stop=None, deadline=None):
+        del stop, deadline
+        self.snapshots.append(snapshot)
+        return self.retriever
+
+
+class BlockChunkLLM:
+    """Streams content-block chunks; one chunk per element."""
+
+    def __init__(self, contents: list, *, usage: dict | None = None):
+        self.contents = list(contents)
+        self.usage = usage
+        self.astream_calls = 0
+        self.prompts: list[str] = []
+
+    async def astream(self, messages, **_kwargs):
+        self.astream_calls += 1
+        self.prompts.append(messages[-1].content if messages else "")
+        for index, content in enumerate(self.contents):
+            chunk = AIMessageChunk(content=content)
+            if self.usage is not None and index == len(self.contents) - 1:
+                chunk.usage_metadata = dict(self.usage)
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_real_attempt_extracts_text_blocks_once_with_the_frozen_prompt():
+    TutorRunner, _, _ = _runner_api()
+    from app.agent.tutor_attempt import TutorAttemptEngine
+
+    loader = BlockCorpusLoader()
+    llm = BlockChunkLLM(
+        [
+            [{"type": "thinking", "thinking": _SENTINEL}],
+            [{"type": "text", "text": "Reciprocal rank fusion "}, "combines ranked lists [1]."],
+        ],
+        usage={"input_tokens": 4, "output_tokens": 8, "total_tokens": 12},
+    )
+    events: list[dict[str, Any]] = []
+    runner = TutorRunner(corpus_loader=loader, attempt_engine=TutorAttemptEngine())
+
+    candidate = await runner.run(definition=DEFINITION, llm=llm, events=events.append)
+
+    assert DEFINITION.runtime_judge is False
+    assert len(loader.snapshots) == 1
+    assert llm.astream_calls == 1, "evaluation profile must run exactly one Attempt"
+    assert loader.retriever.queries == [(DEFINITION.task.question, 5)]
+    assert candidate.answer == "Reciprocal rank fusion combines ranked lists [1]."
+    assert candidate.evidence == [_CORPUS_CHUNK]
+    assert candidate.citations == [
+        {
+            "chunk_id": "tgqa-c01-rrf",
+            "source": "learning-run-notes.md",
+            "page": 1,
+            "span_start": 0,
+            "span_end": len("Reciprocal rank fusion combines ranked lists."),
+        }
+    ]
+    assert candidate.usage == {"input_tokens": 4, "output_tokens": 8, "total_tokens": 12}
+    assert llm.prompts[0].startswith(DEFINITION.prompt.text)
+
+    tokens = [event["text"] for event in events if event.get("type") == "token"]
+    assert tokens == ["Reciprocal rank fusion combines ranked lists [1]."]
+    assert all(isinstance(token, str) for token in tokens)
+    assert _SENTINEL not in candidate.answer
+    assert loader.closed_event.wait(timeout=5)
+    assert loader.retriever.close_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "contents",
+    [
+        [],
+        [""],
+        ["   "],
+        [[{"type": "thinking", "thinking": _SENTINEL}]],
+        [[{"type": "tool_result", "text": _SENTINEL}]],
+        [[{"type": "text", "text": ""}]],
+    ],
+)
+async def test_real_attempt_without_usable_body_is_a_typed_generation_failure(contents):
+    TutorRunner, RunnerOperationalError, _ = _runner_api()
+    from app.agent.tutor_attempt import TutorAttemptEngine
+
+    loader = BlockCorpusLoader()
+    events: list[dict[str, Any]] = []
+    runner = TutorRunner(corpus_loader=loader, attempt_engine=TutorAttemptEngine())
+
+    with pytest.raises(RunnerOperationalError) as caught:
+        await runner.run(definition=DEFINITION, llm=BlockChunkLLM(contents), events=events.append)
+
+    assert caught.value.stage == "generation"
+    assert caught.value.code == "model_unavailable"
+    assert caught.value.retryable is True
+    assert _SENTINEL not in caught.value.sanitized_message
+    # Retrieval ran once; the failure belongs to the single Attempt.
+    assert len(loader.snapshots) == 1
+    assert any(
+        event.get("type") == "trace"
+        and event.get("step") == "generation"
+        and event.get("status") == "failed"
+        for event in events
+    )
+    assert not any(
+        event.get("type") == "trace"
+        and event.get("step") == "generation"
+        and event.get("status") == "completed"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_attempt_malformed_block_is_a_payload_free_typed_failure():
+    TutorRunner, RunnerOperationalError, _ = _runner_api()
+    from app.agent.tutor_attempt import TutorAttemptEngine
+
+    loader = BlockCorpusLoader()
+    events: list[dict[str, Any]] = []
+    runner = TutorRunner(corpus_loader=loader, attempt_engine=TutorAttemptEngine())
+    llm = BlockChunkLLM(
+        [
+            [{"type": "text", "text": "partial "}],
+            [{"type": "unknown_vendor_block", "text": _SENTINEL}],
+        ]
+    )
+
+    with pytest.raises(RunnerOperationalError) as caught:
+        await runner.run(definition=DEFINITION, llm=llm, events=events.append)
+
+    assert caught.value.stage == "generation"
+    assert caught.value.code == "model_unavailable"
+    assert _SENTINEL not in caught.value.sanitized_message
+    assert "unknown_vendor_block" not in caught.value.sanitized_message
+    assert llm.astream_calls == 1
+    assert any(
+        event.get("type") == "trace"
+        and event.get("step") == "generation"
+        and event.get("status") == "failed"
+        for event in events
+    )
