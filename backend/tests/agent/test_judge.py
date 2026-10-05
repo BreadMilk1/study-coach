@@ -18,7 +18,21 @@ masking heavy unexplained jargon). All dimensions weighted equally.
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.agent.judge import judge_response, load_tutor_rubric
+from app.agent.judge import (
+    PLAN_DIMENSIONS,
+    QUIZ_DIMENSIONS,
+    judge_response,
+    load_plan_rubric,
+    load_quiz_rubric,
+    load_tutor_rubric,
+)
+
+# Batch C publishes these as fixed, payload-free rejection text. The literals
+# are duplicated on purpose: a consumer bug must stay observable even when the
+# shared helper module is absent.
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
 
 
 class StubJudgeLLM:
@@ -166,3 +180,145 @@ async def test_judge_falls_back_to_neutral_score_when_json_unparseable():
     assert result["verdict"] == "pass"
     assert result["weak_dims"] == []
     assert "parsing" in result["reasoning"].lower() or "fallback" in result["reasoning"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Batch C — content-block text boundary (strict extraction before JSON parse).
+# ---------------------------------------------------------------------------
+
+
+class ContentJudgeLLM:
+    """Returns an arbitrary message-content shape for the boundary tests."""
+
+    def __init__(self, content):
+        self.content = content
+        self.last_prompt: str | None = None
+
+    async def ainvoke(self, messages, **_kwargs):
+        self.last_prompt = messages[-1].content if messages else ""
+        return AIMessage(content=self.content)
+
+
+async def _judge(content, *, dimensions=None, rubric=None):
+    return await judge_response(
+        question="q",
+        answer="a",
+        context="ctx",
+        rubric=rubric or load_tutor_rubric(),
+        judge_llm=ContentJudgeLLM(content),
+        dimensions=dimensions,
+    )
+
+
+@pytest.mark.asyncio
+async def test_judge_extracts_text_blocks_split_across_multiple_blocks():
+    payload = (
+        '{"relevance":5,"accuracy":5,"citation_quality":4,'
+        '"accessibility":4,"example_quality":5,"learner_level_fit":5,'
+        '"reasoning":"Well grounded and well paced."}'
+    )
+    content = [
+        {"type": "thinking", "thinking": _SENTINEL},
+        {"type": "text", "text": payload[:30]},
+        payload[30:70],
+        {"type": "text", "text": payload[70:]},
+    ]
+
+    result = await _judge(content)
+
+    assert result["score"] == pytest.approx(28 / 6 / 5, abs=1e-3)
+    assert result["verdict"] == "pass"
+    assert "well grounded" in result["reasoning"].lower()
+
+
+@pytest.mark.asyncio
+async def test_judge_ignores_text_like_fields_on_skipped_blocks():
+    content = [
+        {"type": "reasoning", "text": '{"relevance":1}'},
+        {"type": "tool_result", "text": '{"relevance":1}'},
+        {"type": "text", "text": '{"relevance":5,"accuracy":5,"citation_quality":5,'
+                                 '"accessibility":5,"example_quality":5,"learner_level_fit":5,'
+                                 '"reasoning":"clean"}'},
+    ]
+
+    result = await _judge(content)
+
+    assert result["score"] == pytest.approx(1.0, abs=1e-3)
+    assert result["weak_dims"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dimensions", "rubric_loader", "payload"),
+    [
+        (
+            None,
+            load_tutor_rubric,
+            '{"relevance":5,"accuracy":5,"citation_quality":5,'
+            '"accessibility":5,"example_quality":5,"learner_level_fit":5}',
+        ),
+        (
+            QUIZ_DIMENSIONS,
+            load_quiz_rubric,
+            '{"question_quality":4,"option_plausibility":4,"answer_correctness":4,'
+            '"explanation_clarity":4,"difficulty_calibration":4}',
+        ),
+        (
+            PLAN_DIMENSIONS,
+            load_plan_rubric,
+            '{"milestone_specificity":4,"milestone_granularity":4,"time_feasibility":4,'
+            '"topic_coverage":4,"actionability":4}',
+        ),
+    ],
+)
+async def test_judge_keeps_dimension_control_for_text_block_content(
+    dimensions, rubric_loader, payload
+):
+    result = await _judge(
+        [{"type": "text", "text": payload}],
+        dimensions=dimensions,
+        rubric=rubric_loader(),
+    )
+
+    assert result["verdict"] == "pass"
+    assert result["score"] == pytest.approx(0.8 if dimensions else 1.0, abs=1e-3)
+    assert result["weak_dims"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        [],
+        "   \n\t ",
+        [{"type": "thinking", "thinking": _SENTINEL}],
+        [{"type": "text", "text": ""}],
+        [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+    ],
+)
+async def test_judge_rejects_content_without_body_instead_of_neutral_fallback(content):
+    with pytest.raises(ValueError) as exc_info:
+        await _judge(content)
+
+    assert str(exc_info.value) == _EMPTY_CONTENT_MESSAGE
+    assert _SENTINEL not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_judge_rejects_unknown_block_type_without_leaking_payload():
+    with pytest.raises(ValueError) as exc_info:
+        await _judge([{"type": "unknown_vendor_block", "text": _SENTINEL}])
+
+    assert str(exc_info.value) == _MALFORMED_CONTENT_MESSAGE
+    assert _SENTINEL not in str(exc_info.value)
+    assert "unknown_vendor_block" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_judge_keeps_neutral_fallback_for_non_empty_unparseable_text():
+    """The legacy neutral fallback survives; only "no body at all" is rejected."""
+
+    result = await _judge([{"type": "text", "text": "This is not JSON at all."}])
+
+    assert result["score"] == pytest.approx(0.6, abs=1e-3)
+    assert result["verdict"] == "pass"

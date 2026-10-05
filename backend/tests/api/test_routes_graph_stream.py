@@ -704,3 +704,220 @@ def test_chat_stub_paths_do_not_emit_warning_even_when_same_model(
     assert "self-check" not in joined.lower() and "⚠️" not in joined, (
         f"stub path must not surface bias warning (no LLM ran), got: {joined!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch C — content-block text boundary through the real Chat -> Graph ->
+# TutorAttempt / Quiz path. Only the LLM and retriever are faked.
+# ---------------------------------------------------------------------------
+
+# Batch C publishes these as fixed, payload-free rejection text. The literals
+# are duplicated on purpose: a consumer bug must stay observable even when the
+# shared helper module is absent.
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
+
+
+class BlockStubLLM(StubLLM):
+    """Streams / returns content blocks instead of plain strings."""
+
+    def __init__(self, contents, *, quiz_json: str | None = None):
+        super().__init__(tokens=[], quiz_json=quiz_json)
+        self.contents = contents
+
+    async def astream(self, messages, **_kwargs):
+        self.invoked = True
+        for content in self.contents:
+            yield AIMessageChunk(content=content)
+
+    async def ainvoke(self, messages, **_kwargs):
+        self.invoked = True
+        self.ainvoke_count += 1
+        return AIMessage(content=self.contents)
+
+
+def _blocks_with_json_split(payload: str, cuts: tuple[int, ...]) -> list:
+    parts: list = [{"type": "thinking", "thinking": _SENTINEL}]
+    previous = 0
+    for index, cut in enumerate(cuts):
+        segment = payload[previous:cut]
+        parts.append(segment if index == 1 else {"type": "text", "text": segment})
+        previous = cut
+    parts.append({"type": "text", "text": payload[previous:]})
+    return parts
+
+
+def _stream_chat(client, message: str) -> list[dict]:
+    with client.stream(
+        "POST", "/api/chat", json={"message": message}, headers=_HEADERS
+    ) as resp:
+        assert resp.status_code == 200
+        return _read_sse_events(resp)
+
+
+def _stream_chat_until_failure(client, message: str, received: list[dict]) -> None:
+    """Collect events until the truncated stream raises the boundary error."""
+    with client.stream(
+        "POST", "/api/chat", json={"message": message}, headers=_HEADERS
+    ) as resp:
+        assert resp.status_code == 200
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                received.append(json.loads(line[6:]))
+
+
+def _persisted_roles() -> list[str]:
+    from sqlalchemy import select
+
+    from app.db.models import Message
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        return list(session.scalars(select(Message.role)).all())
+
+
+def _persisted_question_count() -> int:
+    from sqlalchemy import func, select
+
+    from app.db.models import Question
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        return int(session.scalar(select(func.count()).select_from(Question)) or 0)
+
+
+def test_chat_tutor_text_blocks_stream_as_str_tokens_and_persist(app, client):
+    from app.api.deps import get_llm
+
+    llm = BlockStubLLM(
+        [
+            [{"type": "thinking", "thinking": _SENTINEL}],
+            [{"type": "text", "text": "HyDE "}, "rewrites"],
+            [{"type": "text", "text": " queries."}],
+        ]
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    events = _stream_chat(client, "What is HyDE?")
+
+    types = [event["type"] for event in events]
+    assert types[-1] == "done", f"last event must be done, got {types}"
+
+    token_events = [event for event in events if event["type"] == "token"]
+    assert all(isinstance(event["text"], str) for event in token_events)
+    assert [event["text"] for event in token_events] == ["HyDE rewrites", " queries."]
+
+    citation_event = next(event for event in events if event["type"] == "citations")
+    assert citation_event["citations"][0]["chunk_id"] == "a:1:0"
+
+    session_id = next(
+        event["session_id"] for event in events if event["type"] == "session"
+    )
+    body = client.get(f"/api/chat/sessions/{session_id}/messages", headers=_HEADERS).json()
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "What is HyDE?"),
+        ("assistant", "HyDE rewrites queries."),
+    ]
+    assert _SENTINEL not in body["messages"][1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected_message"),
+    [
+        ([[{"type": "thinking", "thinking": _SENTINEL}]], _EMPTY_CONTENT_MESSAGE),
+        ([[]], _EMPTY_CONTENT_MESSAGE),
+        (["   "], _EMPTY_CONTENT_MESSAGE),
+        (
+            [[{"type": "unknown_vendor_block", "text": _SENTINEL}]],
+            _MALFORMED_CONTENT_MESSAGE,
+        ),
+    ],
+)
+def test_chat_tutor_without_usable_body_sends_no_done_and_no_assistant_row(
+    app, client, contents, expected_message
+):
+    from app.api.deps import get_llm
+
+    app.dependency_overrides[get_llm] = lambda: BlockStubLLM(contents)
+
+    received: list[dict] = []
+    with pytest.raises(ValueError, match=expected_message):
+        _stream_chat_until_failure(client, "What is HyDE?", received)
+
+    assert "done" not in [event["type"] for event in received]
+    assert _SENTINEL not in expected_message
+    assert _SENTINEL not in "".join(
+        event.get("text", "") for event in received if isinstance(event.get("text"), str)
+    )
+    roles = _persisted_roles()
+    assert "assistant" not in roles
+    assert "user" in roles
+
+
+def test_chat_tutor_keeps_already_sent_tokens_when_a_later_chunk_is_malformed(app, client):
+    from app.api.deps import get_llm
+
+    app.dependency_overrides[get_llm] = lambda: BlockStubLLM(
+        [
+            [{"type": "text", "text": "partial "}],
+            [{"type": "unknown_vendor_block", "text": _SENTINEL}],
+            [{"type": "text", "text": "never sent"}],
+        ]
+    )
+
+    received: list[dict] = []
+    with pytest.raises(ValueError, match=_MALFORMED_CONTENT_MESSAGE):
+        _stream_chat_until_failure(client, "What is HyDE?", received)
+
+    delivered = "".join(
+        event["text"] for event in received if event["type"] == "token"
+    )
+    # The graph drops its custom-stream buffer when the node raises, so a token
+    # queued before the failure may or may not reach the socket. What is fixed:
+    # the attempt produced no candidate, the client gets no `done`, and the
+    # chunk after the malformed one is never delivered or persisted.
+    assert "never sent" not in delivered
+    assert "done" not in [event["type"] for event in received]
+    assert "assistant" not in _persisted_roles()
+
+
+def test_chat_quiz_extracts_text_blocks_and_persists_question(app, client, stub_retriever):
+    from app.api.deps import get_llm
+
+    app.dependency_overrides[get_llm] = lambda: BlockStubLLM(
+        _blocks_with_json_split(_QUIZ_GEN_JSON, (30, 90))
+    )
+
+    events = _stream_chat(client, "测我一下 HyDE")
+
+    types = [event["type"] for event in events]
+    assert types[-1] == "done", f"last event must be done, got {types}"
+    assert stub_retriever.last_query == "HyDE"
+
+    joined = "".join(
+        event["text"] for event in events if event["type"] == "token"
+    )
+    assert "What does HyDE rewrite?" in joined
+    assert "A) Queries" in joined
+    assert "Reply with A, B, C, or D" in joined
+    # GENERATE must not leak the answer or explanation.
+    assert "HyDE rewrites the user query into a hypothetical answer." not in joined
+
+    assert _persisted_question_count() == 1
+
+
+def test_chat_quiz_without_usable_body_sends_no_done_and_creates_no_question(app, client):
+    from app.api.deps import get_llm
+
+    app.dependency_overrides[get_llm] = lambda: BlockStubLLM(
+        [{"type": "thinking", "thinking": _SENTINEL}]
+    )
+
+    received: list[dict] = []
+    with pytest.raises(ValueError, match=_EMPTY_CONTENT_MESSAGE):
+        _stream_chat_until_failure(client, "测我一下 HyDE", received)
+
+    assert "done" not in [event["type"] for event in received]
+    assert _persisted_question_count() == 0
+    assert "assistant" not in _persisted_roles()
