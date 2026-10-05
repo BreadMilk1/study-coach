@@ -8,6 +8,7 @@ import re
 from langchain_core.messages import HumanMessage
 
 from app.db.repositories import PlanRepository
+from app.llm.content import extract_text
 
 from .schemas import MindmapOut, PlanPatchOut, Milestone
 
@@ -63,7 +64,10 @@ async def generate_mindmap(
     )
     try:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
-        raw = getattr(response, "content", "") or ""
+        # Strict text consumption inside the existing try: malformed blocks, an
+        # empty body or a skipped-only body all fall back to the milestone
+        # outline below, and no block payload becomes the outline.
+        raw = extract_text(response.content)
     except Exception:
         # cloud-adapt: cloud LLMs rarely crash here; the fallback keeps gemma3:4b stable.
         return MindmapOut(mermaid_src="", markdown_outline=_fallback_outline(topic, milestones))

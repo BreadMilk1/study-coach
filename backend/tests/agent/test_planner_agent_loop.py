@@ -15,6 +15,7 @@ Tests:
   8. _extract_topic regression — closes a P2.1-⑤i loose end
 """
 import json
+import socket
 from datetime import datetime
 
 import pytest
@@ -45,12 +46,14 @@ class ScriptedLLM:
         self.responses = list(responses)
         self.idx = 0
         self.calls = 0
+        self.seen: list[list] = []
 
     def bind_tools(self, _tools):
         return self  # pass-through; tools are dispatched outside the LLM
 
     async def ainvoke(self, messages, **_kwargs):
         self.calls += 1
+        self.seen.append(list(messages))
         if self.idx >= len(self.responses):
             raise AssertionError("ScriptedLLM exhausted — loop called more times than expected")
         msg = self.responses[self.idx]
@@ -365,3 +368,218 @@ async def test_llm_failure_detail_is_projected_in_internal_and_public_trace(
     # The failing LLM never reached a persist tool → no plan side effect.
     active = goal_repo.list_active_for_user(user.id)
     assert PlanRepository(session).get_by_goal(active[0].id) is None
+
+
+# ---------------------------------------------------------------------------
+# Batch D1 — strict final-content consumption in the Planner agent loop.
+#
+# Only the model is faked; the real loop, tools, trace and repositories run.
+# A final response without a usable text body degrades through the existing
+# `llm_call_failed` path (warning assistant + failed agent_run), which is a
+# completed Chat turn — NOT the Tutor's no-assistant / no-done boundary.
+# ---------------------------------------------------------------------------
+
+_D1_SENTINEL = "D1_SENTINEL_DO_NOT_LEAK"
+_D1_MALFORMED = "LLM response content is not a supported text shape"
+_D1_EMPTY = "LLM response text has no non-whitespace body"
+_LLM_FAILED_TEXT = "⚠️ Could not reach the planner model. Please try again."
+_GENERIC_LLM_ERROR = "LLMError: Model request failed."
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail immediately on any real DNS / outbound socket attempt."""
+
+    def deny(*_args, **_kwargs):
+        raise AssertionError("D1 consumer test attempted real network access")
+
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+    monkeypatch.setattr(socket, "getaddrinfo", deny)
+
+
+def _plan_tool_call_msg(call_id: str = "c1"):
+    return _msg(tool_calls=[{
+        "name": "update_study_plan",
+        "args": {"milestones": [
+            {"title": "Read HyDE", "due_at": "2026-05-25", "done": False, "topic": "HyDE"},
+        ]},
+        "id": call_id,
+    }])
+
+
+def _d1_events(monkeypatch) -> list[dict]:
+    from app.agent import planner_agent as planner_agent_mod
+
+    events: list[dict] = []
+    monkeypatch.setattr(planner_agent_mod, "get_stream_writer", lambda: events.append)
+    return events
+
+
+async def test_agent_loop_final_unknown_block_degrades_instead_of_showing_payload(
+    session, monkeypatch, no_network
+):
+    events = _d1_events(monkeypatch)
+    user = UserRepository(session).get_or_create("fp-d1-loop-unknown")
+    goal_repo = GoalRepository(session)
+    goal = goal_repo.create(user_id=user.id, title="G")
+
+    llm = ScriptedLLM([
+        _plan_tool_call_msg(),
+        _msg(content=[{"type": "unknown_vendor_block", "text": _D1_SENTINEL}]),
+    ])
+    agent = _build(session, llm)
+
+    update = await agent({
+        "messages": [HumanMessage(content="make a plan on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert update["degraded"] is True
+    assert update["messages"][0].content == _LLM_FAILED_TEXT
+    trace = update["agent_trace"]
+    assert trace["exit_reason"] == "llm_call_failed"
+    assert trace["llm_error"] == _GENERIC_LLM_ERROR
+    # The rejected iteration is still recorded, with its usage.
+    assert trace["total_iterations"] == 2
+    assert trace["output_tokens"] == 10
+    assert trace["total_tool_calls"] == 1
+    # No "this turn succeeded" plan id is claimed by the node update.
+    assert "active_plan_id" not in update
+
+    # The tool already committed the plan before the model failed to summarise.
+    saved = PlanRepository(session).get_by_goal(goal.id)
+    assert saved is not None
+    assert [m["title"] for m in saved.milestones_json] == ["Read HyDE"]
+
+    tokens = [e for e in events if e.get("type") == "token"]
+    assert [e["text"] for e in tokens] == [_LLM_FAILED_TEXT]
+    payload = json.dumps(update, default=str) + json.dumps(events, default=str)
+    assert _D1_SENTINEL not in payload
+    assert _D1_MALFORMED not in payload
+    public = [e for e in events if e.get("type") == "agent_run"]
+    assert len(public) == 1
+    assert public[0]["run"]["exit_reason"] == "llm_call_failed"
+    assert public[0]["run"]["llm_error"] == _GENERIC_LLM_ERROR
+
+
+@pytest.mark.parametrize(
+    "final_content",
+    [
+        "",
+        "   ",
+        "\n\n",
+        [],
+        [{"type": "thinking", "thinking": _D1_SENTINEL}],
+    ],
+    ids=["empty-str", "blank-str", "newlines", "empty-list", "reasoning-only"],
+)
+async def test_agent_loop_final_without_usable_body_degrades_with_llm_call_failed(
+    session, monkeypatch, no_network, final_content
+):
+    events = _d1_events(monkeypatch)
+    user = UserRepository(session).get_or_create("fp-d1-loop-empty")
+    GoalRepository(session).create(user_id=user.id, title="G")
+
+    llm = ScriptedLLM([_msg(content=final_content, tool_calls=[])])
+    agent = _build(session, llm)
+
+    update = await agent({
+        "messages": [HumanMessage(content="make a plan on HyDE")],
+        "user_id": user.id,
+    })
+
+    trace = update["agent_trace"]
+    assert trace["exit_reason"] == "llm_call_failed", (
+        "a final response without a usable body must not be reported as natural_stop"
+    )
+    assert trace["llm_error"] == _GENERIC_LLM_ERROR
+    assert trace["total_iterations"] == 1
+    assert update["messages"][0].content == _LLM_FAILED_TEXT
+    tokens = [e for e in events if e.get("type") == "token"]
+    assert [e["text"] for e in tokens] == [_LLM_FAILED_TEXT]
+    payload = json.dumps(update, default=str) + json.dumps(events, default=str)
+    assert _D1_SENTINEL not in payload
+    assert _D1_EMPTY not in payload
+    assert _D1_MALFORMED not in payload
+
+
+async def test_agent_loop_only_narrows_the_helper_value_error(
+    session, monkeypatch, no_network
+):
+    """An unrelated failure inside the terminal branch must not be converted
+    into the llm_call_failed degrade."""
+    from app.agent import planner_agent as planner_agent_mod
+
+    def explode(_content):
+        raise RuntimeError("unrelated terminal-branch failure")
+
+    monkeypatch.setattr(planner_agent_mod, "require_text", explode)
+    user = UserRepository(session).get_or_create("fp-d1-loop-narrow")
+    GoalRepository(session).create(user_id=user.id, title="G")
+    agent = _build(session, ScriptedLLM([_msg(content="fine", tool_calls=[])]))
+
+    with pytest.raises(RuntimeError, match="unrelated terminal-branch failure"):
+        await agent({
+            "messages": [HumanMessage(content="make a plan on HyDE")],
+            "user_id": user.id,
+        })
+
+
+async def test_agent_loop_final_text_blocks_keep_original_whitespace_and_order(
+    session, no_network
+):
+    user = UserRepository(session).get_or_create("fp-d1-loop-whitespace")
+    GoalRepository(session).create(user_id=user.id, title="G")
+    llm = ScriptedLLM([_msg(
+        content=[
+            {"type": "thinking", "thinking": _D1_SENTINEL},
+            {"type": "text", "text": "  first\n"},
+            "second\n\n",
+            {"type": "text", "text": "  third  "},
+        ],
+        tool_calls=[],
+    )])
+    agent = _build(session, llm)
+
+    update = await agent({
+        "messages": [HumanMessage(content="make a plan on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert update["agent_trace"]["exit_reason"] == "natural_stop"
+    assert update["messages"][0].content == "  first\nsecond\n\n  third  "
+    assert _D1_SENTINEL not in update["messages"][0].content
+
+
+async def test_agent_loop_keeps_tool_call_responses_and_matching_tool_message_ids(
+    session, no_network
+):
+    """Tool-call turns are complete messages: never extracted, never rebuilt,
+    and the ToolMessage keeps the original tool_call_id."""
+    from langchain_core.messages import ToolMessage
+
+    user = UserRepository(session).get_or_create("fp-d1-loop-history")
+    GoalRepository(session).create(user_id=user.id, title="G")
+    tool_turn = _msg(
+        content=[{"type": "unknown_vendor_block", "text": _D1_SENTINEL}],
+        tool_calls=[{"name": "retriever_search", "args": {"query": "HyDE"}, "id": "call-1"}],
+    )
+    llm = ScriptedLLM([tool_turn, _msg(content="Final summary.", tool_calls=[])])
+    agent = _build(session, llm, retriever=StubRetriever(chunks=[
+        {"chunk_id": "c1", "content": "HyDE definition", "page": 1},
+    ]))
+
+    update = await agent({
+        "messages": [HumanMessage(content="make a plan on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert update["agent_trace"]["exit_reason"] == "natural_stop"
+    second_call = llm.seen[1]
+    assert second_call[2] is tool_turn  # the original AIMessage, unmodified
+    assert second_call[2].tool_calls[0]["id"] == "call-1"
+    tool_message = second_call[3]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.tool_call_id == "call-1"

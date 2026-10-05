@@ -52,6 +52,7 @@ from app.db.repositories import (
     MistakeRepository,
     PlanRepository,
 )
+from app.llm.content import require_text
 
 
 _DEFAULT_GOAL_TITLE = "Default Study Goal"
@@ -311,16 +312,9 @@ async def _safe_invoke_tool(tool_map, tc, trace: AgentTrace) -> str:
     return output_str
 
 
-def _format_final_output(writer, trace: AgentTrace, last_response) -> dict:
+def _format_final_output(writer, trace: AgentTrace, final_text: str) -> dict:
     plan_action = _infer_plan_action(trace)
     plan_id = trace.last_persisted_plan_id()
-    final_text = getattr(last_response, "content", "") or ""
-    if not isinstance(final_text, str):
-        # AIMessage.content can be a list of content blocks for some providers
-        final_text = "".join(
-            (b.get("text", "") if isinstance(b, dict) else str(b))
-            for b in final_text
-        )
 
     writer({"type": "citations", "citations": []})
     writer({"type": "token", "text": final_text})
@@ -423,8 +417,19 @@ def build_planner_agent(
 
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
+                try:
+                    # Terminal turn: the model must carry a usable text body.
+                    # Middle tool-call turns above are never extracted, so a
+                    # tool-call response keeps its content verbatim.
+                    final_text = require_text(response.content)
+                except ValueError as exc:
+                    # Narrow catch: only the helper's own rejection of the
+                    # final content degrades here. Writer / formatter / tool
+                    # errors keep propagating.
+                    trace.record_llm_error(exc)
+                    return _format_degrade_output(writer, trace, "llm_call_failed")
                 trace.exit_reason = "natural_stop"
-                return _format_final_output(writer, trace, response)
+                return _format_final_output(writer, trace, final_text)
 
             for tc in tool_calls:
                 output = await _safe_invoke_tool(tool_map, tc, trace)

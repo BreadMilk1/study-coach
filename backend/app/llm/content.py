@@ -5,7 +5,10 @@
 types it does not recognise and text blocks whose `text` is not a string, so it
 cannot be used where "the model returned no usable answer" must be an error
 instead of an empty answer. This module is the one place that interprets the
-content shape for the text consumers (Quiz, Judge, Tutor).
+content shape for the text consumers (Quiz, Judge, Tutor, Planner: the
+deterministic GENERATE / CHECK-IN node, the `generate_mindmap` tool and the
+final turn of the Planner agent loop). Each consumer owns its own failure
+policy — see the consumer sections of ARCHITECTURE.md.
 
 Contract:
 - A plain string is returned unchanged: no strip, no separator, no newline or
