@@ -2,7 +2,14 @@
 
 Mirrors test_quiz_master.py: factory built with real in-memory SQLite repos,
 LLM stubbed. Exercises both decide() paths + edge cases.
+
+Batch D1 adds content-block consumers: the stub LLM returns genuine AIMessage
+objects whose `.content` is a block list, so the real node (planner ->
+app.llm.content -> milestone parser -> repository) is what is under test. Only
+the model is faked.
 """
+import json
+import socket
 from datetime import datetime
 from pathlib import Path
 
@@ -302,3 +309,296 @@ async def test_planner_check_in_progress_count_matches_final_milestone_count(ses
     refreshed = plan_repo.get_by_goal(goal.id)
     expected_total = len(refreshed.milestones_json)
     assert f"/ {expected_total}" in done_line, f"expected '/ {expected_total}' in {done_line!r}"
+
+
+# ---------------------------------------------------------------------------
+# Batch D1 — strict content-block text consumption on the deterministic planner.
+#
+# The deterministic planner is the production GENERATE / CHECK-IN path. Each
+# case drives it with a genuine `AIMessage` whose `.content` is a block list;
+# only the model is faked and the real helper / parser / repository run.
+# ---------------------------------------------------------------------------
+
+_SENTINEL = "SENTINEL-DO-NOT-LEAK"
+_MALFORMED_CONTENT_MESSAGE = "LLM response content is not a supported text shape"
+_EMPTY_CONTENT_MESSAGE = "LLM response text has no non-whitespace body"
+_COULD_NOT_DRAFT = "Couldn't draft a plan on 'HyDE'. Try a clearer goal."
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail immediately on any real DNS / outbound socket attempt."""
+
+    def deny(*_args, **_kwargs):
+        raise AssertionError("D1 consumer test attempted real network access")
+
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+    monkeypatch.setattr(socket, "getaddrinfo", deny)
+
+
+class BlockPlannerLLM:
+    """Returns one genuine `AIMessage` per call, each with block-list content."""
+
+    def __init__(self, contents):
+        self.contents = list(contents)
+        self.calls = 0
+
+    async def ainvoke(self, _messages, **_kwargs):
+        if self.calls >= len(self.contents):
+            raise AssertionError("BlockPlannerLLM exhausted")
+        content = self.contents[self.calls]
+        self.calls += 1
+        return AIMessage(content=content)
+
+
+def _split_across_blocks(payload: str, cuts: tuple[int, ...]) -> list:
+    """Thinking marker + text blocks (and one bare str) carrying `payload`."""
+    parts: list = [{"type": "thinking", "thinking": _SENTINEL}]
+    previous = 0
+    for index, cut in enumerate(cuts):
+        segment = payload[previous:cut]
+        parts.append(segment if index == 1 else {"type": "text", "text": segment})
+        previous = cut
+    parts.append({"type": "text", "text": payload[previous:]})
+    return parts
+
+
+def _seed_plan(session, fingerprint: str):
+    user = UserRepository(session).get_or_create(fingerprint)
+    goal = GoalRepository(session).create(user_id=user.id, title="G")
+    plan = PlanRepository(session).create(
+        goal_id=goal.id,
+        milestones_json=[
+            {"title": "Read HyDE §1-§3", "due_at": "2026-05-25", "done": False, "topic": "HyDE"},
+            {"title": "Implement HyDEGenerator", "due_at": "2026-05-20", "done": False, "topic": "HyDE"},
+            {"title": "Compare HyDE vs BM25", "due_at": "2026-06-01", "done": False, "topic": "HyDE"},
+        ],
+    )
+    return user, goal, plan
+
+
+# --- GENERATE ---------------------------------------------------------------
+
+
+async def test_planner_generate_consumes_milestone_json_split_across_text_blocks(
+    session, no_network
+):
+    user = UserRepository(session).get_or_create("fp-d1-gen-blocks")
+    llm = BlockPlannerLLM([_split_across_blocks(_GEN_JSON, (40, 140))])
+    node = _build_node(session, llm=llm)
+
+    update = await node({
+        "messages": [HumanMessage(content="帮我做学习计划 on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert update["plan_action"] == "generate"
+    assert update["active_plan_id"]
+    goal = GoalRepository(session).list_active_for_user(user.id)[0]
+    saved = PlanRepository(session).get_by_goal(goal.id)
+    assert saved is not None
+    assert [m["title"] for m in saved.milestones_json] == [
+        "Read HyDE §1-§3",
+        "Implement HyDEGenerator",
+        "Compare HyDE vs BM25",
+    ]
+    text = update["messages"][0].content
+    assert isinstance(text, str)
+    assert "Read HyDE" in text
+    assert _SENTINEL not in text
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [],  # control: already handled before D1 (no blocks at all)
+        [{"type": "thinking", "thinking": _SENTINEL}],
+        [{"type": "text", "text": "   "}, {"type": "text", "text": "\n\n"}],
+        [{"type": "text-plain", "text": _SENTINEL}],  # published skipped type
+    ],
+)
+async def test_planner_generate_without_usable_body_keeps_friendly_failure(
+    session, no_network, blocks
+):
+    user = UserRepository(session).get_or_create("fp-d1-gen-empty")
+    llm = BlockPlannerLLM([blocks])
+    node = _build_node(session, llm=llm)
+
+    update = await node({
+        "messages": [HumanMessage(content="帮我做学习计划 on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert update["messages"][0].content == _COULD_NOT_DRAFT
+    assert "active_plan_id" not in update
+    assert _SENTINEL not in update["messages"][0].content
+    # The goal may already have been created before the model call, but no plan.
+    active = GoalRepository(session).list_active_for_user(user.id)
+    assert active
+    assert PlanRepository(session).get_by_goal(active[0].id) is None
+
+
+async def test_planner_generate_with_non_milestone_text_blocks_keeps_parse_failure(
+    session, no_network
+):
+    user = UserRepository(session).get_or_create("fp-d1-gen-nonjson")
+    llm = BlockPlannerLLM([
+        [{"type": "thinking", "thinking": _SENTINEL},
+         {"type": "text", "text": "Sorry, I can only help with study plans."}],
+    ])
+    node = _build_node(session, llm=llm)
+
+    update = await node({
+        "messages": [HumanMessage(content="帮我做学习计划 on HyDE")],
+        "user_id": user.id,
+    })
+
+    assert update["messages"][0].content == _COULD_NOT_DRAFT
+    assert "active_plan_id" not in update
+    active = GoalRepository(session).list_active_for_user(user.id)
+    assert active
+    assert PlanRepository(session).get_by_goal(active[0].id) is None
+
+
+@pytest.mark.parametrize(
+    "bad_block",
+    [
+        {"type": "unknown_vendor_block", "text": _SENTINEL},
+        {"text": _SENTINEL},  # missing type
+        {"type": "text", "text": 42},  # text is not a str
+    ],
+    ids=["unknown-type", "missing-type", "non-str-text"],
+)
+async def test_planner_generate_rejects_malformed_blocks_without_drafting_a_plan(
+    session, no_network, bad_block
+):
+    user = UserRepository(session).get_or_create("fp-d1-gen-bad")
+    llm = BlockPlannerLLM([[{"type": "thinking", "thinking": _SENTINEL}, bad_block]])
+    node = _build_node(session, llm=llm)
+
+    with pytest.raises(ValueError) as excinfo:
+        await node({
+            "messages": [HumanMessage(content="帮我做学习计划 on HyDE")],
+            "user_id": user.id,
+        })
+
+    assert str(excinfo.value) == _MALFORMED_CONTENT_MESSAGE
+    assert _SENTINEL not in str(excinfo.value)
+    # The malformed payload must not be turned into a plan that looks drafted.
+    active = GoalRepository(session).list_active_for_user(user.id)
+    assert active  # goal creation happens before the model call
+    assert PlanRepository(session).get_by_goal(active[0].id) is None
+
+
+# --- CHECK-IN ---------------------------------------------------------------
+
+
+async def test_planner_check_in_consumes_check_in_json_split_across_text_blocks(
+    session, no_network
+):
+    user, goal, plan = _seed_plan(session, "fp-d1-ci-blocks")
+    llm = BlockPlannerLLM([_split_across_blocks(_CHECK_IN_JSON, (30, 150))])
+    node = _build_node(session, llm=llm)
+
+    update = await node({
+        "messages": [HumanMessage(content="进度怎么样了")],
+        "user_id": user.id,
+        "active_plan_id": plan.id,
+    })
+
+    assert update["plan_action"] == "check_in"
+    refreshed = PlanRepository(session).get_by_goal(goal.id)
+    assert refreshed.id == plan.id
+    assert [m["title"] for m in refreshed.milestones_json] == [
+        "Read HyDE §1-§3",
+        "Implement HyDEGenerator",
+        "Compare HyDE vs BM25",
+    ]
+    assert refreshed.milestones_json[0]["done"] is True
+    assert refreshed.milestones_json[1]["due_at"] == "2026-05-24"
+    text = update["messages"][0].content
+    assert "Auto-adjust skipped" not in text
+    assert _SENTINEL not in text
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [{"type": "unknown_vendor_block", "text": _SENTINEL}],
+        [{"type": "thinking", "thinking": _SENTINEL}],
+        [{"type": "text", "text": "Sorry, I can't adjust that right now."}],
+    ],
+    ids=["malformed-blocks", "skipped-only-blocks", "non-milestone-text"],
+)
+async def test_planner_check_in_falls_back_without_updating_the_plan(
+    session, no_network, blocks
+):
+    user, goal, plan = _seed_plan(session, "fp-d1-ci-fallback")
+    before = PlanRepository(session).get_by_goal(goal.id)
+    before_snapshot = json.dumps(
+        {
+            "id": before.id,
+            "milestones": before.milestones_json,
+            "updated_at": before.updated_at.isoformat(),
+        },
+        sort_keys=True,
+    )
+    llm = BlockPlannerLLM([blocks])
+    node = _build_node(session, llm=llm)
+
+    update = await node({
+        "messages": [HumanMessage(content="进度怎么样了")],
+        "user_id": user.id,
+        "active_plan_id": plan.id,
+    })
+
+    assert update["plan_action"] == "check_in"
+    assert update["active_plan_id"] == plan.id
+    after = PlanRepository(session).get_by_goal(goal.id)
+    after_snapshot = json.dumps(
+        {
+            "id": after.id,
+            "milestones": after.milestones_json,
+            "updated_at": after.updated_at.isoformat(),
+        },
+        sort_keys=True,
+    )
+    # Same plan row, same milestones, same updated_at: no update, no new plan.
+    assert after_snapshot == before_snapshot
+    text = update["messages"][0].content
+    assert "Auto-adjust skipped" in text
+    assert "**Progress Check-in**" in text
+    assert _SENTINEL not in text
+
+
+# --- GENERATE + mindmap keyword --------------------------------------------
+
+
+async def test_planner_generate_keeps_persisted_plan_when_mindmap_blocks_are_malformed(
+    session, no_network
+):
+    user = UserRepository(session).get_or_create("fp-d1-mm-bad")
+    llm = BlockPlannerLLM([
+        _GEN_JSON,
+        [{"type": "unknown_vendor_block", "text": _SENTINEL}],
+    ])
+    node = _build_node(session, llm=llm)
+
+    update = await node({
+        "messages": [HumanMessage(content="帮我做学习计划 on HyDE 画脑图")],
+        "user_id": user.id,
+    })
+
+    # The plan the planner already persisted must survive a failing mindmap tool.
+    goal = GoalRepository(session).list_active_for_user(user.id)[0]
+    saved = PlanRepository(session).get_by_goal(goal.id)
+    assert saved is not None
+    assert len(saved.milestones_json) == 3
+    text = update["messages"][0].content
+    assert "```mermaid" not in text
+    assert _SENTINEL not in text
+    # The tool's own soft fallback (milestone-derived outline, empty mermaid).
+    assert "**Outline**" in text
+    assert "Read HyDE §1-§3" in text

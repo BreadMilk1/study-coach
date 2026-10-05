@@ -32,6 +32,7 @@ from app.db.repositories import (
     MistakeRepository,
     PlanRepository,
 )
+from app.llm.content import extract_text
 
 from .progress import ProgressSummary, compute_progress
 from .state import CoachState
@@ -251,7 +252,10 @@ def build_planner(
             )
             try:
                 response = await llm.ainvoke([HumanMessage(content=prompt)])
-                raw = getattr(response, "content", "") or ""
+                # Strict text consumption inside the existing try: a malformed
+                # block shape, like a call failure, skips the adjustment and
+                # keeps the current plan.
+                raw = extract_text(response.content)
             except Exception:
                 raw = ""
             adjusted = _parse_milestones_json(raw)
@@ -315,7 +319,10 @@ def build_planner(
             today=now_fn().date(),
         )
         response = await llm.ainvoke([HumanMessage(content=prompt)])
-        raw = getattr(response, "content", "") or ""
+        # Strict text consumption: a malformed block shape raises instead of
+        # being rendered as a plan; an empty/skipped-only body is the parser's
+        # ordinary "no milestones" result below.
+        raw = extract_text(response.content)
         milestones = _parse_milestones_json(raw)
         if not milestones:
             err = f"Couldn't draft a plan on '{topic}'. Try a clearer goal."

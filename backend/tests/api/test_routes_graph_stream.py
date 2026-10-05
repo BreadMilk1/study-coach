@@ -10,6 +10,7 @@ Together they prove:
 """
 
 import json
+import socket
 
 import pytest
 from fastapi.testclient import TestClient
@@ -748,9 +749,18 @@ def _blocks_with_json_split(payload: str, cuts: tuple[int, ...]) -> list:
     return parts
 
 
-def _stream_chat(client, message: str) -> list[dict]:
+def _stream_chat(
+    client,
+    message: str,
+    *,
+    session_id: str | None = None,
+    headers: dict | None = None,
+) -> list[dict]:
+    body: dict = {"message": message}
+    if session_id is not None:
+        body["session_id"] = session_id
     with client.stream(
-        "POST", "/api/chat", json={"message": message}, headers=_HEADERS
+        "POST", "/api/chat", json=body, headers=headers or _HEADERS
     ) as resp:
         assert resp.status_code == 200
         return _read_sse_events(resp)
@@ -921,3 +931,267 @@ def test_chat_quiz_without_usable_body_sends_no_done_and_creates_no_question(app
     assert "done" not in [event["type"] for event in received]
     assert _persisted_question_count() == 0
     assert "assistant" not in _persisted_roles()
+
+
+# ---------------------------------------------------------------------------
+# Batch D1 — content-block text boundary through the real Chat -> Graph ->
+# Planner (deterministic GENERATE / CHECK-IN / mindmap) and the Planner
+# agent-loop final. Only the LLM / retriever / judge are faked: the real graph,
+# node, helper, parser, repository and SSE projection all run. The judge
+# override is this module's always-pass stub, which isolates D1 from Judge
+# scoring policy — it is not evidence about that policy.
+# ---------------------------------------------------------------------------
+
+_D1_SENTINEL = "D1_SENTINEL_DO_NOT_LEAK"
+
+_D1_PLAN_JSON = (
+    '[{"title": "Read §1", "due_at": "2026-05-25", "done": false, "topic": "HyDE"},'
+    ' {"title": "Practice", "due_at": "2026-05-28", "done": false, "topic": "HyDE"},'
+    ' {"title": "Review", "due_at": "2026-06-01", "done": false, "topic": "HyDE"}]'
+)
+_D1_CHECK_IN_JSON = (
+    '[{"title": "Read §1", "due_at": "2026-05-25", "done": true, "topic": "HyDE"},'
+    ' {"title": "Practice", "due_at": "2026-05-30", "done": false, "topic": "HyDE"},'
+    ' {"title": "Review", "due_at": "2026-06-01", "done": false, "topic": "HyDE"}]'
+)
+_D1_MINDMAP_TEXT = (
+    "Here:\n```mermaid\nmindmap\n  root((HyDE))\n    Read\n```\n- HyDE\n  - Read\n"
+)
+_D1_LLM_FAILED_TEXT = "⚠️ Could not reach the planner model. Please try again."
+_D1_GENERIC_LLM_ERROR = "LLMError: Model request failed."
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail immediately on any real DNS / outbound socket attempt."""
+
+    def deny(*_args, **_kwargs):
+        raise AssertionError("D1 consumer test attempted real network access")
+
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+    monkeypatch.setattr(socket, "getaddrinfo", deny)
+
+
+class ScriptedContentLLM(StubLLM):
+    """Returns one genuine AIMessage per ainvoke(), each with preset content."""
+
+    def __init__(self, contents, *, quiz_json: str | None = None):
+        super().__init__(tokens=[], quiz_json=quiz_json)
+        self.contents = list(contents)
+        self.ainvoke_count = 0
+
+    def bind_tools(self, _tools):
+        return self
+
+    async def ainvoke(self, _messages, **_kwargs):
+        self.invoked = True
+        if self.ainvoke_count >= len(self.contents):
+            raise AssertionError("ScriptedContentLLM exhausted")
+        content = self.contents[self.ainvoke_count]
+        self.ainvoke_count += 1
+        return AIMessage(content=content)
+
+
+def _joined_tokens(events: list[dict]) -> str:
+    return "".join(e["text"] for e in events if e["type"] == "token")
+
+
+def _session_id(events: list[dict]) -> str:
+    return next(e["session_id"] for e in events if e["type"] == "session")
+
+
+def test_chat_plan_generate_consumes_text_blocks_and_persists_plan(app, client, no_network):
+    from app.api.deps import get_llm
+
+    llm = ScriptedContentLLM([_blocks_with_json_split(_D1_PLAN_JSON, (40, 140))])
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    events = _stream_chat(client, "帮我做学习计划 on HyDE")
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done", f"last event must be done, got {types}"
+    tokens = [e for e in events if e["type"] == "token"]
+    assert all(isinstance(e["text"], str) for e in tokens)
+    joined = _joined_tokens(events)
+    assert "Read §1" in joined and "Practice" in joined
+    assert _D1_SENTINEL not in joined
+
+    plan_resp = client.get("/api/plans/current", headers=_HEADERS)
+    assert plan_resp.status_code == 200
+    assert [m["title"] for m in plan_resp.json()["milestones"]] == [
+        "Read §1", "Practice", "Review",
+    ]
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
+    assert "Read §1" in body["messages"][1]["content"]
+    assert _D1_SENTINEL not in body["messages"][1]["content"]
+
+
+def test_chat_plan_generate_malformed_blocks_sends_no_done_and_writes_no_plan(
+    app, client, no_network
+):
+    from app.api.deps import get_llm
+
+    llm = ScriptedContentLLM([
+        [{"type": "unknown_vendor_block", "text": _D1_SENTINEL}],
+    ])
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    received: list[dict] = []
+    with pytest.raises(ValueError, match=_MALFORMED_CONTENT_MESSAGE):
+        _stream_chat_until_failure(client, "帮我做学习计划 on HyDE", received)
+
+    assert "done" not in [event["type"] for event in received]
+    assert _D1_SENTINEL not in _joined_tokens(received)
+    roles = _persisted_roles()
+    assert "assistant" not in roles
+    assert "user" in roles
+    # The malformed payload must not surface as a plan (a Goal may already exist).
+    no_plan = client.get("/api/plans/current", headers=_HEADERS)
+    assert no_plan.status_code == 404
+    assert no_plan.json()["detail"] == "no active plan for user"
+
+
+def test_chat_plan_generate_without_usable_body_completes_with_friendly_failure(
+    app, client, no_network
+):
+    from app.api.deps import get_llm
+
+    llm = ScriptedContentLLM([
+        [{"type": "thinking", "thinking": _D1_SENTINEL}],
+    ])
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    events = _stream_chat(client, "帮我做学习计划 on HyDE")
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done"
+    assert _joined_tokens(events) == "Couldn't draft a plan on 'HyDE'. Try a clearer goal."
+    assert "assistant" in _persisted_roles()
+    no_plan = client.get("/api/plans/current", headers=_HEADERS)
+    assert no_plan.status_code == 404
+    assert no_plan.json()["detail"] == "no active plan for user"
+
+
+def test_chat_plan_check_in_consumes_text_blocks_and_updates_the_plan(
+    app, client, no_network
+):
+    from app.api.deps import get_llm
+
+    llm = ScriptedContentLLM([
+        _D1_PLAN_JSON,
+        _blocks_with_json_split(_D1_CHECK_IN_JSON, (30, 150)),
+    ])
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    first = _stream_chat(client, "帮我做学习计划 on HyDE")
+    assert first[-1]["type"] == "done"
+    session_id = _session_id(first)
+
+    second = _stream_chat(client, "进度怎么样了", session_id=session_id)
+
+    assert llm.ainvoke_count == 2
+    assert second[-1]["type"] == "done"
+    joined = _joined_tokens(second)
+    assert "Progress Check-in" in joined
+    assert "Done: 1 / 3" in joined
+    assert "Auto-adjust skipped" not in joined
+    assert _D1_SENTINEL not in joined
+
+    plan = client.get("/api/plans/current", headers=_HEADERS).json()
+    assert [m["title"] for m in plan["milestones"]] == ["Read §1", "Practice", "Review"]
+    assert plan["milestones"][0]["done"] is True
+    assert plan["milestones"][1]["due_at"] == "2026-05-30"
+
+
+def test_chat_plan_generate_renders_mindmap_from_split_blocks(app, client, no_network):
+    from app.api.deps import get_llm
+
+    llm = ScriptedContentLLM([
+        _D1_PLAN_JSON,
+        _blocks_with_json_split(_D1_MINDMAP_TEXT, (10, 50)),
+    ])
+    app.dependency_overrides[get_llm] = lambda: llm
+
+    events = _stream_chat(client, "帮我做学习计划 on HyDE 画脑图")
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done"
+    joined = _joined_tokens(events)
+    assert "```mermaid" in joined
+    assert "root((HyDE))" in joined
+    assert "**Outline**" in joined
+    assert _D1_SENTINEL not in joined
+    # The plan persisted before the mindmap tool ran is still there.
+    assert client.get("/api/plans/current", headers=_HEADERS).status_code == 200
+
+
+def test_chat_plan_agent_loop_final_bad_blocks_degrades_with_warning_assistant(
+    app, client, no_network
+):
+    from app.api.deps import get_llm
+
+    class ScriptedPlannerAgentLLM(StubLLM):
+        def __init__(self):
+            super().__init__(tokens=[])
+            self.responses = [
+                AIMessage(content="", tool_calls=[{
+                    "name": "update_study_plan",
+                    "args": {"milestones": [
+                        {"title": "Read HyDE notes", "due_at": "2026-05-30",
+                         "done": False, "topic": "HyDE"},
+                    ]},
+                    "id": "c1",
+                }]),
+                AIMessage(content=[{"type": "unknown_vendor_block", "text": _D1_SENTINEL}]),
+            ]
+
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages, **_kwargs):
+            self.invoked = True
+            self.ainvoke_count += 1
+            if not self.responses:
+                raise AssertionError("ScriptedPlannerAgentLLM exhausted")
+            return self.responses.pop(0)
+
+    agent_llm = ScriptedPlannerAgentLLM()
+    app.dependency_overrides[get_llm] = lambda: agent_llm
+
+    events = _stream_chat(
+        client,
+        "make a plan on HyDE",
+        headers={**_HEADERS, "x-planner-mode": "agent_loop"},
+    )
+
+    assert agent_llm.ainvoke_count == 2
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done", f"a degraded agent turn still completes, got {types}"
+    assert _joined_tokens(events) == _D1_LLM_FAILED_TEXT
+
+    agent_run = next(e for e in events if e["type"] == "agent_run")["run"]
+    assert agent_run["exit_reason"] == "llm_call_failed"
+    assert agent_run["llm_error"] == _D1_GENERIC_LLM_ERROR
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    messages = body["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == _D1_LLM_FAILED_TEXT
+    assert messages[1]["agent_run"]["exit_reason"] == "llm_call_failed"
+
+    # The tool already committed the plan before the final summary failed.
+    plan_resp = client.get("/api/plans/current", headers=_HEADERS)
+    assert plan_resp.status_code == 200
+    assert [m["title"] for m in plan_resp.json()["milestones"]] == ["Read HyDE notes"]
+
+    assert _D1_SENTINEL not in json.dumps(events)
+    assert _D1_SENTINEL not in json.dumps(body)
