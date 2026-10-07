@@ -5,6 +5,16 @@ import { FACTORY_RECOVERY_FINGERPRINT_KEY } from '../lib/dataLifecycle'
 export type Provider = 'ollama' | 'openai' | 'anthropic' | 'gemini'
 export type Mode = 'agent_loop' | 'deterministic'
 
+export type ConnectionField = 'provider' | 'model' | 'apiKey' | 'baseUrl'
+
+export interface ConnectionSnapshot {
+  revision: string
+  provider: Provider
+  model: string
+  apiKey: string
+  baseUrl: string
+}
+
 interface SettingsState {
   provider: Provider
   model: string
@@ -13,15 +23,24 @@ interface SettingsState {
   judgeModel: string
   defaultPlannerMode: Mode
   defaultQuizMode: Mode
-  toolCapable: boolean | null  // null = untested, true/false = tested result
+  toolCapable: boolean | null  // null = unknown for the current connection
   debugMode: boolean
   language: 'en' | 'zh-CN'
   accessToken: string
   tier: 'guest' | 'member'
+  // Random connection generation. Never derived from the API key; it gives
+  // detection results and the capability cache an identity to bind to and is
+  // rotated whenever a connection field really changes.
+  connectionRevision: string
 }
 
 const STORAGE_KEY = 'study-coach:settings'
 const FINGERPRINT_KEY = 'study-coach:fingerprint'
+// Single v2 capability record. It stores the random revision and a boolean —
+// never the API key, a key hash, the base URL or any provider response.
+const CAPABILITY_CACHE_KEY = 'study-coach:connection-capability:v2'
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const DEFAULT_SETTINGS: SettingsState = {
   provider: 'ollama',
@@ -36,10 +55,17 @@ const DEFAULT_SETTINGS: SettingsState = {
   language: 'en',
   accessToken: '',
   tier: 'guest',
+  connectionRevision: '',
 }
 
 let _tokenPromise: Promise<string> | null = null
 let _identityGeneration = 0
+// In-memory result of a detection that is not (yet) bound to a saved
+// configuration. Runtime-only: it is never serialized into settings JSON.
+interface PendingCapability extends ConnectionSnapshot {
+  toolCapable: boolean
+}
+let _pendingCapability: PendingCapability | null = null
 
 function readStoredObject(raw: string | null): unknown {
   if (!raw) return {}
@@ -86,7 +112,7 @@ function persistIdentity(
     throw new Error('identity provisioning invalidated')
   }
   const next = updater(normalizeSettings(readStoredObject(localStorage.getItem(STORAGE_KEY))))
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeSettings(next)))
   return next.accessToken
 }
 
@@ -189,40 +215,94 @@ export function authHeaders(): Record<string, string> {
   return {}
 }
 
-const TOOL_CAPABLE_KEY = 'study-coach:tool-capable'
-
-function loadToolCapable(model: string): boolean | null {
-  try {
-    const raw = localStorage.getItem(`${TOOL_CAPABLE_KEY}:${model}`)
-    if (raw === 'true') return true
-    if (raw === 'false') return false
-  } catch { /* empty */ }
-  return null
+function sameConnection(
+  a: Pick<SettingsState, ConnectionField>,
+  b: Pick<SettingsState, ConnectionField>,
+): boolean {
+  return a.provider === b.provider && a.model === b.model
+    && a.apiKey === b.apiKey && a.baseUrl === b.baseUrl
 }
 
-function persistToolCapable(model: string, capable: boolean) {
-  localStorage.setItem(`${TOOL_CAPABLE_KEY}:${model}`, String(capable))
+interface CapabilityRecordV2 {
+  schemaVersion: 2
+  connectionRevision: string
+  toolCapable: boolean
+}
+
+function loadCapabilityRecord(): CapabilityRecordV2 | null {
+  try {
+    const raw = localStorage.getItem(CAPABILITY_CACHE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    if (record.schemaVersion !== 2) return null
+    if (typeof record.connectionRevision !== 'string' || !UUID_PATTERN.test(record.connectionRevision)) return null
+    if (typeof record.toolCapable !== 'boolean') return null
+    return {
+      schemaVersion: 2,
+      connectionRevision: record.connectionRevision,
+      toolCapable: record.toolCapable,
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeCapabilityRecord(record: CapabilityRecordV2): void {
+  try {
+    localStorage.setItem(CAPABILITY_CACHE_KEY, JSON.stringify(record))
+  } catch { /* storage unavailable */ }
+}
+
+function clearCapabilityRecordFor(revision: string): void {
+  const record = loadCapabilityRecord()
+  if (record && record.connectionRevision === revision) {
+    try { localStorage.removeItem(CAPABILITY_CACHE_KEY) } catch { /* ignore */ }
+  }
 }
 
 function normalizeSettings(value: unknown): SettingsState {
   const saved = typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {}
-  const provider = saved.provider
-  const model = saved.model
   const plannerMode = saved.defaultPlannerMode
   const quizMode = saved.defaultQuizMode
 
+  const savedProvider: Provider | null = saved.provider === 'ollama'
+    || saved.provider === 'openai'
+    || saved.provider === 'anthropic'
+    || saved.provider === 'gemini'
+    ? saved.provider
+    : null
+  const provider = savedProvider ?? DEFAULT_SETTINGS.provider
+  // A cloud provider with a missing/blank persisted model keeps the model
+  // empty instead of silently borrowing the Ollama default, so the user fills
+  // it in; Ollama and token-only records keep the default.
+  const savedModel: string | null = typeof saved.model === 'string' && saved.model.trim() !== ''
+    ? saved.model
+    : null
+  const model = savedModel ?? (provider === 'ollama' ? DEFAULT_SETTINGS.model : '')
+  const savedApiKey: string | null = typeof saved.apiKey === 'string' ? saved.apiKey : null
+  const savedBaseUrl: string | null = typeof saved.baseUrl === 'string' ? saved.baseUrl : null
+  const apiKey = savedApiKey ?? DEFAULT_SETTINGS.apiKey
+  const baseUrl = savedBaseUrl ?? DEFAULT_SETTINGS.baseUrl
+
+  // A saved revision is only trusted when it is well-formed AND no connection
+  // field needed correction — rewritten fields must never inherit capability
+  // cached for the previous values.
+  const connectionUnmodified = savedProvider !== null && savedModel !== null
+    && savedApiKey !== null && savedBaseUrl !== null
+  const savedRevision = typeof saved.connectionRevision === 'string'
+    && UUID_PATTERN.test(saved.connectionRevision)
+    ? saved.connectionRevision
+    : ''
+
   return {
-    provider: provider === 'ollama'
-      || provider === 'openai'
-      || provider === 'anthropic'
-      || provider === 'gemini'
-      ? provider
-      : DEFAULT_SETTINGS.provider,
-    model: typeof model === 'string' && model.trim() ? model : DEFAULT_SETTINGS.model,
-    apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : DEFAULT_SETTINGS.apiKey,
-    baseUrl: typeof saved.baseUrl === 'string' ? saved.baseUrl : DEFAULT_SETTINGS.baseUrl,
+    provider,
+    model,
+    apiKey,
+    baseUrl,
     judgeModel: typeof saved.judgeModel === 'string' ? saved.judgeModel : DEFAULT_SETTINGS.judgeModel,
     defaultPlannerMode: plannerMode === 'agent_loop' || plannerMode === 'deterministic'
       ? plannerMode
@@ -237,6 +317,37 @@ function normalizeSettings(value: unknown): SettingsState {
       : DEFAULT_SETTINGS.language,
     accessToken: typeof saved.accessToken === 'string' ? saved.accessToken : DEFAULT_SETTINGS.accessToken,
     tier: saved.tier === 'guest' || saved.tier === 'member' ? saved.tier : DEFAULT_SETTINGS.tier,
+    connectionRevision: connectionUnmodified ? savedRevision : '',
+  }
+}
+
+function serializeSettings(state: SettingsState): Record<string, unknown> {
+  // Controlled serialization: toolCapable and detection runtime/pending
+  // metadata never enter the settings JSON. Capability only lives in the v2
+  // record, keyed by the connection revision.
+  return {
+    provider: state.provider,
+    model: state.model,
+    apiKey: state.apiKey,
+    baseUrl: state.baseUrl,
+    judgeModel: state.judgeModel,
+    defaultPlannerMode: state.defaultPlannerMode,
+    defaultQuizMode: state.defaultQuizMode,
+    debugMode: state.debugMode,
+    language: state.language,
+    accessToken: state.accessToken,
+    tier: state.tier,
+    connectionRevision: state.connectionRevision,
+  }
+}
+
+function readStoredSettings(): SettingsState | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return normalizeSettings(JSON.parse(raw))
+  } catch {
+    return null
   }
 }
 
@@ -245,8 +356,15 @@ function loadInitial(): SettingsState {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const base = normalizeSettings(JSON.parse(raw))
-      // Restore per-model tool-capable cache (not stored in settings JSON)
-      base.toolCapable = loadToolCapable(base.model)
+      // Capability is only restored from a v2 record that matches the saved
+      // connection revision; legacy per-model v1 cache keys are never read
+      // or migrated.
+      if (base.connectionRevision) {
+        const record = loadCapabilityRecord()
+        if (record && record.connectionRevision === base.connectionRevision) {
+          base.toolCapable = record.toolCapable
+        }
+      }
       return base
     }
   } catch {
@@ -260,20 +378,99 @@ export const useSettings = defineStore('settings', {
   actions: {
     persist() {
       try {
-        const raw = localStorage.getItem(STORAGE_KEY)
-        const stored = raw ? normalizeSettings(JSON.parse(raw)) : null
+        const stored = readStoredSettings()
         if (stored?.accessToken && stored.accessToken !== this.accessToken) {
           this.accessToken = stored.accessToken
           this.tier = stored.tier
         }
+        // Conservative invalidation for direct four-field store assignments
+        // that bypassed updateConnection: the fields changed while the
+        // revision did not, so the old capability must not bind to them.
+        if (
+          stored
+          && stored.connectionRevision === this.connectionRevision
+          && !sameConnection(stored, this)
+        ) {
+          this.rotateConnectionRevision()
+        }
       } catch {
         // Persist the active state when no valid stored identity is available.
       }
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.$state))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeSettings(this)))
+      // A Save keeps the current revision, so a just-tested matching result
+      // becomes cacheable here if the saved configuration now matches.
+      this.writePendingCapabilityIfSavedMatches()
     },
-    setToolCapable(capable: boolean) {
+    updateConnection(field: ConnectionField, value: string): boolean {
+      const current = this[field]
+      if (current === value) return false
+      if (field === 'provider') this.provider = value as Provider
+      else if (field === 'model') this.model = value
+      else if (field === 'apiKey') this.apiKey = value
+      else this.baseUrl = value
+      this.rotateConnectionRevision()
+      return true
+    },
+    ensureConnectionRevision(): boolean {
+      // Bounded lazy creation for the first capability detection on a legacy
+      // (revision-less) configuration: gives the check a generation to bind
+      // to without touching normalizeSettings/hydration and without requiring
+      // an unrelated connection edit. A valid revision is never re-rotated.
+      if (UUID_PATTERN.test(this.connectionRevision)) return false
+      this.rotateConnectionRevision()
+      return true
+    },
+    rotateConnectionRevision() {
+      this.connectionRevision = crypto.randomUUID()
+      this.toolCapable = null
+      _pendingCapability = null
+    },
+    beginToolRecheck() {
+      // Starting a manual re-test drops the old capability for the current
+      // revision immediately, so a failed re-test cannot leave the previous
+      // result in place to masquerade as fresh after a refresh. Records for
+      // other (saved) revisions are left alone.
+      this.toolCapable = null
+      _pendingCapability = null
+      if (this.connectionRevision) clearCapabilityRecordFor(this.connectionRevision)
+    },
+    commitToolCheckResult(snapshot: ConnectionSnapshot, capable: boolean | null) {
+      // Only the request that still matches the current revision and the full
+      // four-field snapshot may write the capability state.
+      if (snapshot.revision !== this.connectionRevision) return
+      if (!sameConnection(snapshot, this)) return
+      if (capable === null) {
+        // An incomplete check stays unknown and is never cached as negative.
+        this.toolCapable = null
+        _pendingCapability = null
+        return
+      }
       this.toolCapable = capable
-      persistToolCapable(this.model, capable)
+      _pendingCapability = {
+        revision: snapshot.revision,
+        provider: snapshot.provider,
+        model: snapshot.model,
+        apiKey: snapshot.apiKey,
+        baseUrl: snapshot.baseUrl,
+        toolCapable: capable,
+      }
+      this.writePendingCapabilityIfSavedMatches()
+    },
+    writePendingCapabilityIfSavedMatches() {
+      const pending = _pendingCapability
+      if (!pending || pending.revision !== this.connectionRevision) return
+      if (!sameConnection(pending, this)) return
+      if (!UUID_PATTERN.test(pending.revision)) return
+      // Only a saved (persisted) configuration holds the cross-refresh
+      // record; unsaved results stay in memory until a matching Save.
+      const stored = readStoredSettings()
+      if (!stored || stored.connectionRevision !== pending.revision) return
+      if (!sameConnection(stored, pending)) return
+      writeCapabilityRecord({
+        schemaVersion: 2,
+        connectionRevision: pending.revision,
+        toolCapable: pending.toolCapable,
+      })
     },
   },
 })

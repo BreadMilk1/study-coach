@@ -13,7 +13,7 @@ const emit = defineEmits<{ (e: 'toggle'): void }>()
 const settings = useSettings()
 const overridden = computed(() => props.mode !== props.defaultMode)
 const tooltip = computed(() => {
-  if (settings.toolCapable === false) return 'Agent loop unavailable — model does not support tool calling'
+  if (settings.toolCapable === false) return 'Agent loop unavailable — no tool calls observed in the last check'
   if (overridden.value) return `Overridden — default is ${props.defaultMode}`
   return `Default mode for this view`
 })

@@ -282,21 +282,90 @@ export function getChunk(chunkId: string): Promise<ChunkDto> {
 }
 
 export interface ToolCheckDto {
-  tool_capable: boolean
+  tool_capable: boolean | null
   model: string
   note: string
 }
 
-export async function checkToolCapable(s: any): Promise<ToolCheckDto> {
+export interface PingDto {
+  ok: boolean
+  model: string
+  latency_ms: number
+  note: string
+}
+
+export interface ConnectionCheckInput {
+  provider: string
+  model: string
+  apiKey?: string
+  baseUrl?: string
+}
+
+// Fixed safe interpretation of a model-check failure. The 400 detail body is
+// only read for its field selector; the shown text always comes from the
+// fixed table below, and raw error bodies are never surfaced.
+const MODEL_CHECK_FIELD_MESSAGES: Record<string, string> = {
+  provider: 'The provider is not supported. Choose ollama, openai, anthropic, or gemini in Settings.',
+  model: 'A model name is required for the selected provider.',
+  api_key: 'An API key is required for the selected provider.',
+}
+const MODEL_CHECK_UNAVAILABLE_MESSAGE = 'The connection check could not be completed.'
+
+export class ModelCheckError extends Error {
+  public readonly field: string | null
+
+  constructor(message: string, field: string | null = null) {
+    super(message)
+    this.name = 'ModelCheckError'
+    this.field = field
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+async function modelCheckErrorFromResponse(response: Response): Promise<ModelCheckError> {
+  if (response.status === 400) {
+    const body = await response.json().catch(() => null) as unknown
+    const detail = asRecord(asRecord(body)?.detail)
+    const field = typeof detail?.field === 'string' ? detail.field : null
+    // Only the table's own three keys may select a field message — inherited
+    // Object properties (constructor/toString/__proto__) and unknown fields
+    // fall back to the fixed generic message with field=null.
+    if (
+      detail?.code === 'invalid_llm_config'
+      && field !== null
+      && Object.prototype.hasOwnProperty.call(MODEL_CHECK_FIELD_MESSAGES, field)
+    ) {
+      return new ModelCheckError(MODEL_CHECK_FIELD_MESSAGES[field], field)
+    }
+  }
+  return new ModelCheckError(MODEL_CHECK_UNAVAILABLE_MESSAGE)
+}
+
+function connectionHeaders(s: ConnectionCheckInput): Record<string, string> {
   const headers: Record<string, string> = {
     'x-provider': s.provider,
     'x-model': s.model,
   }
   if (s.apiKey) headers['x-api-key'] = s.apiKey
   if (s.baseUrl) headers['x-base-url'] = s.baseUrl
-  const resp = await fetch('/api/models/tool-check', { headers })
-  if (!resp.ok) throw new Error(`tool-check failed: ${resp.status}`)
+  return headers
+}
+
+export async function checkToolCapable(s: ConnectionCheckInput): Promise<ToolCheckDto> {
+  const resp = await fetch('/api/models/tool-check', { headers: connectionHeaders(s) })
+  if (!resp.ok) throw await modelCheckErrorFromResponse(resp)
   return resp.json() as Promise<ToolCheckDto>
+}
+
+export async function pingModel(s: ConnectionCheckInput): Promise<PingDto> {
+  const resp = await fetch('/api/models/ping', { headers: connectionHeaders(s) })
+  if (!resp.ok) throw await modelCheckErrorFromResponse(resp)
+  return resp.json() as Promise<PingDto>
 }
 
 export interface MistakeReviewOut {
@@ -321,25 +390,6 @@ export async function reviewMistake(
   })
   if (!resp.ok) throw new Error(`review failed: ${resp.status}`)
   return resp.json() as Promise<MistakeReviewOut>
-}
-
-export interface PingDto {
-  ok: boolean
-  model: string
-  latency_ms: number
-  note: string
-}
-
-export async function pingModel(s: any): Promise<PingDto> {
-  const headers: Record<string, string> = {
-    'x-provider': s.provider,
-    'x-model': s.model,
-  }
-  if (s.apiKey) headers['x-api-key'] = s.apiKey
-  if (s.baseUrl) headers['x-base-url'] = s.baseUrl
-  const resp = await fetch('/api/models/ping', { headers })
-  if (!resp.ok) throw new Error(`ping failed: ${resp.status}`)
-  return resp.json() as Promise<PingDto>
 }
 
 // --- P4b new endpoints ---

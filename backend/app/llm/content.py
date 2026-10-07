@@ -7,7 +7,10 @@ cannot be used where "the model returned no usable answer" must be an error
 instead of an empty answer. This module is the one place that interprets the
 content shape for the text consumers (Quiz, Judge, Tutor, Planner: the
 deterministic GENERATE / CHECK-IN node, the `generate_mindmap` tool and the
-final turn of the Planner agent loop). Each consumer owns its own failure
+final turn of the Planner agent loop) and for the model detection routes
+(`/api/models/ping` requires a usable response body, and
+`/api/models/tool-check` requires a usable body on both turns of its round
+trip). Each consumer owns its own failure
 policy — see the consumer sections of ARCHITECTURE.md.
 
 Contract:

@@ -266,29 +266,59 @@ def health(request: Request) -> dict:
 
 
 class ToolCapableOut(BaseModel):
-    tool_capable: bool
+    tool_capable: bool | None
     model: str
     note: str
+
+
+_TOOL_CHECK_OK_NOTE = "Tool call round trip completed."
+_TOOL_CHECK_NO_CALLS_NOTE = (
+    "No tool calls observed in this probe — deterministic mode will be used."
+)
+_TOOL_CHECK_INCOMPLETE_NOTE = "Tool check did not complete a valid round trip."
+
+
+def _tool_call_shape(response) -> tuple[list, list] | None:
+    """Normalized ``(tool_calls, invalid_tool_calls)`` for a protocol response.
+
+    Returns ``None`` when the response itself is not a protocol container
+    (``None`` or missing/non-list attributes at a synthetic model boundary).
+    Such shapes are an incomplete check, not an SDK contract — real messages
+    always carry list attributes.
+    """
+    if response is None:
+        return None
+    calls = getattr(response, "tool_calls", None)
+    invalid = getattr(response, "invalid_tool_calls", None)
+    if not isinstance(calls, list) or not isinstance(invalid, list):
+        return None
+    return calls, invalid
 
 
 @router.get("/models/tool-check", response_model=ToolCapableOut)
 async def tool_check(
     llm_config: Annotated[LLMConfig, Depends(get_llm_config)],
 ):
-    """Ping the configured model with a dummy tool to detect tool-call support.
+    """Probe tool support with one real tool-call round trip (≤2 model calls).
 
-    Local models like gemma3:4b don't support tool calling at all —
-    llm.bind_tools() returns a Runnable that silently ignores the tools,
-    and the LLM never returns tool_calls. Cloud providers (OpenAI, Anthropic,
-    Gemini) reliably support it.
+    - true: the model made exactly one legal `ping` call, the synthetic tool
+      ran once, and a second call on the same bound runnable finished the
+      round trip with a valid text body.
+    - false: the probe observed no tool calls but returned a valid body — a
+      conservative "nothing observed this time", never a verdict that the
+      model can never use tools.
+    - null: the check did not complete (factory/bind/invoke errors, empty or
+      illegal responses, an unknown tool-call shape, or a failed second
+      round). It is not written as a negative capability.
+
+    The result note only carries fixed safe text: runtime failures go through
+    `normalize_llm_error`, protocol/body validation failures use fixed notes.
     """
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import HumanMessage, ToolMessage
     from langchain_core.tools import tool
 
+    from app.llm.content import require_text
     from app.llm.provider import get_chat_model
-
-    # cloud-adapt: cloud BYOK will always return True here; we could
-    # short-circuit by provider instead of calling the LLM.
 
     @tool
     def ping() -> str:
@@ -298,24 +328,99 @@ async def tool_check(
     try:
         llm = get_chat_model(llm_config)
         llm_with_tools = llm.bind_tools([ping])
-        response = await llm_with_tools.ainvoke(
-            [HumanMessage(content="Call the ping tool")]
-        )
-        tool_calls = getattr(response, "tool_calls", None) or []
-        capable = len(tool_calls) > 0
-        note = (
-            "Model supports tool calling"
-            if capable
-            else "Model did not return any tool_calls — agent_loop mode unavailable"
-        )
+        messages = [HumanMessage(content="Call the ping tool")]
+        first = await llm_with_tools.ainvoke(messages)
     except Exception as exc:
-        capable = False
-        note = f"Tool check failed: {type(exc).__name__}"
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=f"Tool check failed: {normalize_llm_error(exc)}",
+        )
 
+    shape = _tool_call_shape(first)
+    if shape is None:
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=_TOOL_CHECK_INCOMPLETE_NOTE,
+        )
+    calls, invalid_calls = shape
+    if not calls and not invalid_calls:
+        try:
+            require_text(getattr(first, "content", None))
+        except ValueError:
+            return ToolCapableOut(
+                tool_capable=None,
+                model=llm_config.model,
+                note=_TOOL_CHECK_INCOMPLETE_NOTE,
+            )
+        return ToolCapableOut(
+            tool_capable=False,
+            model=llm_config.model,
+            note=_TOOL_CHECK_NO_CALLS_NOTE,
+        )
+
+    # Only one legal normalized call for the known synthetic tool is executed;
+    # every other shape leaves the check incomplete and runs nothing.
+    if invalid_calls or len(calls) != 1 or not isinstance(calls[0], dict):
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=_TOOL_CHECK_INCOMPLETE_NOTE,
+        )
+    call = calls[0]
+    call_id = call.get("id")
+    if (
+        call.get("name") != "ping"
+        or call.get("args") != {}
+        or not isinstance(call_id, str)
+        or not call_id
+    ):
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=_TOOL_CHECK_INCOMPLETE_NOTE,
+        )
+
+    try:
+        tool_result = await ping.ainvoke({})
+        tool_message = ToolMessage(content=tool_result, tool_call_id=call_id)
+        # The original AIMessage object is forwarded verbatim — never
+        # flattened or rebuilt — so the history keeps the aligned tool_call.
+        second = await llm_with_tools.ainvoke([*messages, first, tool_message])
+    except Exception as exc:
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=f"Tool check failed: {normalize_llm_error(exc)}",
+        )
+
+    second_shape = _tool_call_shape(second)
+    if second_shape is None:
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=_TOOL_CHECK_INCOMPLETE_NOTE,
+        )
+    second_calls, second_invalid = second_shape
+    if second_calls or second_invalid:
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=_TOOL_CHECK_INCOMPLETE_NOTE,
+        )
+    try:
+        require_text(getattr(second, "content", None))
+    except ValueError:
+        return ToolCapableOut(
+            tool_capable=None,
+            model=llm_config.model,
+            note=_TOOL_CHECK_INCOMPLETE_NOTE,
+        )
     return ToolCapableOut(
-        tool_capable=capable,
+        tool_capable=True,
         model=llm_config.model,
-        note=note,
+        note=_TOOL_CHECK_OK_NOTE,
     )
 
 
@@ -326,28 +431,32 @@ class PingOut(BaseModel):
     note: str
 
 
+_PING_NO_TEXT_NOTE = (
+    "Failed: the model response did not contain a usable text body."
+)
+
+
 @router.get("/models/ping", response_model=PingOut)
 async def ping_model(
     llm_config: Annotated[LLMConfig, Depends(get_llm_config)],
 ):
-    """Lightweight connectivity test — single ping message, no tools."""
+    """Lightweight connectivity test — one model call that must return a body.
+
+    ok=True means this single check obtained a valid, non-empty text body; it
+    says nothing about production reliability beyond that. The response body
+    itself is never saved or echoed back.
+    """
     import time
 
     from langchain_core.messages import HumanMessage
 
+    from app.llm.content import require_text
     from app.llm.provider import get_chat_model
 
     t0 = time.monotonic()
     try:
         llm = get_chat_model(llm_config)
-        await llm.ainvoke([HumanMessage(content="ping")])
-        latency_ms = round((time.monotonic() - t0) * 1000)
-        return PingOut(
-            ok=True,
-            model=llm_config.model,
-            latency_ms=latency_ms,
-            note=f"Connected — responded in {latency_ms}ms",
-        )
+        response = await llm.ainvoke([HumanMessage(content="ping")])
     except Exception as exc:
         latency_ms = round((time.monotonic() - t0) * 1000)
         return PingOut(
@@ -358,6 +467,27 @@ async def ping_model(
             # reaches the client (Batch A boundary).
             note=f"Failed: {normalize_llm_error(exc)}",
         )
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    try:
+        # Body validation keeps its own narrow scope: only factory/ainvoke
+        # failures are normalized LLM errors; an unusable body is a fixed
+        # safe note that never echoes response fragments. A non-standard
+        # container (e.g. a None or attribute-less response at a synthetic
+        # boundary) reaches the strict helper as a safe missing value.
+        require_text(getattr(response, "content", None))
+    except ValueError:
+        return PingOut(
+            ok=False,
+            model=llm_config.model,
+            latency_ms=latency_ms,
+            note=_PING_NO_TEXT_NOTE,
+        )
+    return PingOut(
+        ok=True,
+        model=llm_config.model,
+        latency_ms=latency_ms,
+        note=f"Connected — responded in {latency_ms}ms",
+    )
 
 
 _UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
