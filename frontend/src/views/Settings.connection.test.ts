@@ -21,8 +21,13 @@ type TestNode = {
   text?: string
   props: Record<string, unknown>
   handlers: Record<string, (event?: unknown) => void>
-  addEventListener?: () => void
+  // Listeners registered via el.addEventListener (the v-model directives).
+  // In the real DOM they run before the template's @change prop handler
+  // because the directive's created hook patches before props.
+  listeners: Record<string, Array<(event?: unknown) => void>>
+  addEventListener?: (type: string, handler: (event?: unknown) => void) => void
   removeEventListener?: () => void
+  [key: string]: unknown
 }
 
 const REVISION_A = '00000000-0000-4000-8000-00000000000a'
@@ -104,7 +109,7 @@ afterAll(() => {
 })
 
 function mountSettings(): { app: { mount: (root: TestNode) => void; unmount: () => void }; root: TestNode } {
-  const root: TestNode = { children: [], props: {}, handlers: {} }
+  const root: TestNode = { children: [], props: {}, handlers: {}, listeners: {} }
   const renderer = createRenderer<TestNode, TestNode>({
     patchProp: (el, key, _prev, next) => {
       if (key.startsWith('on') && typeof next === 'function') {
@@ -128,15 +133,23 @@ function mountSettings(): { app: { mount: (root: TestNode) => void; unmount: () 
         tag,
         props: {},
         handlers: {},
-        addEventListener: () => undefined,
+        listeners: {},
         removeEventListener: () => undefined,
+      }
+      // Real addEventListener semantics: capture v-model directive listeners
+      // so a dispatched change event runs the same listener chain a browser
+      // would (directive listener first, then the template @change handler).
+      node.addEventListener = (type, handler) => {
+        if (typeof handler !== 'function') return
+        const list = node.listeners[type] ?? (node.listeners[type] = [])
+        if (!list.includes(handler)) list.push(handler)
       }
       // v-model directives in the real SFC inspect these DOM-ish fields.
       if (tag === 'select') Object.assign(node, { options: [], selectedIndex: -1 })
       return node
     },
-    createText: text => ({ children: [], tag: '#text', text, props: {}, handlers: {} }),
-    createComment: text => ({ children: [], tag: '#comment', text, props: {}, handlers: {} }),
+    createText: text => ({ children: [], tag: '#text', text, props: {}, handlers: {}, listeners: {} }),
+    createComment: text => ({ children: [], tag: '#comment', text, props: {}, handlers: {}, listeners: {} }),
     setText: (node, text) => { node.text = text },
     setElementText: (node, text) => { node.text = text },
     parentNode: node => node.parent ?? null,
@@ -150,6 +163,31 @@ function mountSettings(): { app: { mount: (root: TestNode) => void; unmount: () 
   app.config.globalProperties.$t = (key: string) => key
   app.mount(root)
   return { app, root }
+}
+
+// Simulates a real change event on a v-model bound control: the select gets
+// its options rebuilt from the rendered <option> children with the chosen
+// value marked selected (what a browser would do), and the checkbox flips
+// its checked flag. Every registered change listener — the v-model directive
+// first, then the template handler — then runs in registration order.
+function dispatchChange(node: TestNode, value: string | boolean): void {
+  if (node.tag === 'select') {
+    node.options = node.children
+      .filter(child => child.tag === 'option')
+      .map(child => ({
+        value: String(child.props.value ?? ''),
+        selected: child.props.value === value,
+      }))
+  } else {
+    node.checked = value
+  }
+  const event = { target: { value, checked: value } }
+  for (const handler of [
+    ...(node.listeners.change ?? []),
+    ...(node.handlers.change ? [node.handlers.change] : []),
+  ]) {
+    handler(event)
+  }
 }
 
 async function flushUi() {
@@ -665,6 +703,285 @@ describe('Settings first-detection connection revision', () => {
       expect(storage.getItem(CAPABILITY_KEY)).toBeNull()
       setActivePinia(createPinia())
       expect(useSettings().toolCapable).toBeNull()
+    } finally {
+      app.unmount()
+    }
+  })
+})
+
+describe('Settings preference auto-save boundary', () => {
+  const languageSelect = (root: TestNode) =>
+    requireNode(
+      root,
+      node => node.tag === 'select' && node.children.some(o => o.props?.value === 'en'),
+      'language select',
+    )
+  const debugCheckbox = (root: TestNode) =>
+    requireNode(root, node => node.tag === 'input' && node.props.type === 'checkbox', 'debug checkbox')
+
+  function saveButton(root: TestNode): TestNode {
+    return buttonByText(root, 'settings.save')
+  }
+
+  it('does not persist the unsaved connection or promote its result: language entry', async () => {
+    // beforeEach seed: saved A (revision R_A) + A capability record (true).
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      // Unsaved B through the real connection bindings, then a full check.
+      editConnection(providerSelect(root), 'change', 'anthropic')
+      editConnection(modelInput(root), 'input', 'claude-haiku-4-5')
+      editConnection(
+        requireNode(root, node => node.tag === 'input' && node.props.type === 'password', 'api key input'),
+        'input',
+        'sk-b',
+      )
+      editConnection(
+        requireNode(
+          root,
+          node => node.tag === 'input' && String(node.props.placeholder ?? '').includes('api.openai.com'),
+          'base url input',
+        ),
+        'input',
+        'https://b.test/v1',
+      )
+      await flushUi()
+      click(buttonByText(root, 'Test Tool Call'))
+      pending.tool[0].resolve(
+        okResponse({ tool_capable: true, model: 'claude-haiku-4-5', note: 'Tool call round trip completed.' }),
+      )
+      await flushUi()
+      const settings = useSettings()
+      expect(settings.toolCapable).toBe(true)
+
+      // Pre-control: storage still holds A and the A capability record.
+      expect(JSON.parse(storage.getItem('study-coach:settings') ?? '{}').model).toBe('gpt-4o-mini')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+
+      // Preference auto-save WITHOUT clicking Save.
+      dispatchChange(languageSelect(root), 'zh-CN')
+      await flushUi()
+
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.language).toBe('zh-CN')
+      expect(storedAfter.provider).toBe('openai')
+      expect(storedAfter.model).toBe('gpt-4o-mini')
+      expect(storedAfter.apiKey).toBe('sk-test')
+      expect(storedAfter.connectionRevision).toBe(REVISION_A)
+      // The capability record is untouched: B's true result was not promoted.
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}')).toMatchObject({
+        connectionRevision: REVISION_A,
+        toolCapable: true,
+      })
+
+      // Active memory keeps B, its revision and its result.
+      expect(settings.provider).toBe('anthropic')
+      expect(settings.model).toBe('claude-haiku-4-5')
+      expect(settings.toolCapable).toBe(true)
+      expect(settings.connectionRevision).not.toBe(REVISION_A)
+
+      // Refresh equivalent: a recreated store restores saved A + A's cache.
+      setActivePinia(createPinia())
+      const restored = useSettings()
+      expect(restored.model).toBe('gpt-4o-mini')
+      expect(restored.toolCapable).toBe(true)
+      expect(restored.language).toBe('zh-CN')
+
+      // Only the explicit Save adopts B and its matched result.
+      click(saveButton(root))
+      await flushUi()
+      expect(JSON.parse(storage.getItem('study-coach:settings') ?? '{}').model).toBe('claude-haiku-4-5')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}')).toMatchObject({
+        connectionRevision: settings.connectionRevision,
+        toolCapable: true,
+      })
+      setActivePinia(createPinia())
+      const restoredB = useSettings()
+      expect(restoredB.model).toBe('claude-haiku-4-5')
+      expect(restoredB.toolCapable).toBe(true)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('does not persist the unsaved connection or promote its result: debug entry', async () => {
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      editConnection(modelInput(root), 'input', 'gpt-4o')
+      await flushUi()
+      click(buttonByText(root, 'Test Tool Call'))
+      pending.tool[0].resolve(
+        okResponse({ tool_capable: true, model: 'gpt-4o', note: 'Tool call round trip completed.' }),
+      )
+      await flushUi()
+
+      dispatchChange(debugCheckbox(root), true)
+      await flushUi()
+
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.debugMode).toBe(true)
+      expect(storedAfter.model).toBe('gpt-4o-mini')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+
+      const settings = useSettings()
+      expect(settings.model).toBe('gpt-4o')
+      expect(settings.toolCapable).toBe(true)
+
+      click(saveButton(root))
+      await flushUi()
+      expect(JSON.parse(storage.getItem('study-coach:settings') ?? '{}').model).toBe('gpt-4o')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}')).toMatchObject({
+        connectionRevision: settings.connectionRevision,
+        toolCapable: true,
+      })
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('keeps a failed detection unknown and uncached across preference auto-save', async () => {
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      editConnection(modelInput(root), 'input', 'gpt-4o')
+      await flushUi()
+      click(buttonByText(root, 'Test Tool Call'))
+      pending.tool[0].resolve(
+        okResponse({
+          tool_capable: null,
+          model: 'gpt-4o',
+          note: 'Tool check did not complete a valid round trip.',
+        }),
+      )
+      await flushUi()
+      expect(useSettings().toolCapable).toBeNull()
+
+      dispatchChange(languageSelect(root), 'zh-CN')
+      await flushUi()
+
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.language).toBe('zh-CN')
+      expect(storedAfter.model).toBe('gpt-4o-mini')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+
+      // Even the explicit Save must not cache the failed result.
+      click(saveButton(root))
+      await flushUi()
+      expect(JSON.parse(storage.getItem('study-coach:settings') ?? '{}').model).toBe('gpt-4o')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('never writes an undetected unsaved connection through preference auto-save', async () => {
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      editConnection(modelInput(root), 'input', 'gpt-4o')
+      await flushUi()
+
+      dispatchChange(debugCheckbox(root), true)
+      await flushUi()
+
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.debugMode).toBe(true)
+      expect(storedAfter.model).toBe('gpt-4o-mini')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+
+      // Explicit Save of the undetected B persists B but still no B cache.
+      click(saveButton(root))
+      await flushUi()
+      expect(JSON.parse(storage.getItem('study-coach:settings') ?? '{}').model).toBe('gpt-4o')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('does not invalidate an in-flight check when preferences auto-save', async () => {
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      editConnection(modelInput(root), 'input', 'gpt-4o')
+      await flushUi()
+      click(buttonByText(root, 'Test Tool Call'))
+
+      // Preference auto-save while the request is in flight.
+      dispatchChange(languageSelect(root), 'zh-CN')
+      await flushUi()
+
+      pending.tool[0].resolve(
+        okResponse({ tool_capable: true, model: 'gpt-4o', note: 'Tool call round trip completed.' }),
+      )
+      await flushUi()
+
+      const settings = useSettings()
+      // The preference change did not kill the request; the result stays in
+      // memory only and the stored configuration is still A.
+      expect(settings.toolCapable).toBe(true)
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.model).toBe('gpt-4o-mini')
+      expect(storedAfter.language).toBe('zh-CN')
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}').connectionRevision).toBe(REVISION_A)
+
+      click(saveButton(root))
+      await flushUi()
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}')).toMatchObject({
+        connectionRevision: settings.connectionRevision,
+        toolCapable: true,
+      })
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('never fills a partial stored record with the active unsaved connection', async () => {
+    storage = memoryStorage({
+      'study-coach:settings': JSON.stringify({ accessToken: 'preseeded-token', tier: 'guest' }),
+    })
+    vi.stubGlobal('localStorage', storage)
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      editConnection(modelInput(root), 'input', 'gpt-4o')
+      await flushUi()
+
+      dispatchChange(languageSelect(root), 'zh-CN')
+      await flushUi()
+
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.language).toBe('zh-CN')
+      // The partial record keeps its normalized defaults — not the active edit.
+      expect(storedAfter.provider).toBe('ollama')
+      expect(storedAfter.model).toBe('gemma3:4b')
+      expect(storedAfter.apiKey).toBe('')
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('keeps plain preference auto-save working for an already saved configuration', async () => {
+    const { app, root } = mountSettings()
+    try {
+      await flushUi()
+      dispatchChange(languageSelect(root), 'zh-CN')
+      dispatchChange(debugCheckbox(root), true)
+      await flushUi()
+
+      const storedAfter = JSON.parse(storage.getItem('study-coach:settings') ?? '{}')
+      expect(storedAfter.language).toBe('zh-CN')
+      expect(storedAfter.debugMode).toBe(true)
+      expect(storedAfter.model).toBe('gpt-4o-mini')
+      expect(storedAfter.connectionRevision).toBe(REVISION_A)
+      expect(JSON.parse(storage.getItem(CAPABILITY_KEY) ?? '{}')).toMatchObject({
+        connectionRevision: REVISION_A,
+        toolCapable: true,
+      })
+      const settings = useSettings()
+      expect(settings.connectionRevision).toBe(REVISION_A)
+      expect(settings.toolCapable).toBe(true)
     } finally {
       app.unmount()
     }

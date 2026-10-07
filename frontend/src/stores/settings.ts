@@ -401,6 +401,34 @@ export const useSettings = defineStore('settings', {
       // becomes cacheable here if the saved configuration now matches.
       this.writePendingCapabilityIfSavedMatches()
     },
+    persistPreferences() {
+      // Preference auto-save (language / debug toggles) writes ONLY the
+      // non-connection preferences onto the already-stored settings snapshot.
+      // The saved connection fields, judgeModel, connectionRevision and
+      // identity stay untouched, no revision rotation/ensure runs, and no
+      // in-memory detection result is promoted — adopting the active
+      // connection and its capability is the explicit full Save's job.
+      const stored = readStoredSettings()
+      if (stored?.accessToken && stored.accessToken !== this.accessToken) {
+        // Same identity adoption as the full Save: the newest stored token
+        // wins and the active store stays in sync.
+        this.accessToken = stored.accessToken
+        this.tier = stored.tier
+      }
+      const base = stored ?? { ...DEFAULT_SETTINGS }
+      const merged = {
+        ...base,
+        language: this.language,
+        debugMode: this.debugMode,
+        defaultPlannerMode: this.defaultPlannerMode,
+        defaultQuizMode: this.defaultQuizMode,
+        // Newest stored identity wins; without one keep the active token
+        // (same as the full Save). No provisioning or identity UUID runs here.
+        accessToken: base.accessToken || this.accessToken,
+        tier: base.accessToken ? base.tier : this.tier,
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeSettings(merged)))
+    },
     updateConnection(field: ConnectionField, value: string): boolean {
       const current = this[field]
       if (current === value) return false

@@ -91,7 +91,10 @@ function save() {
 
 function onLanguageChange() {
   locale.value = s.language
-  s.persist()
+  // Preference auto-save writes only preferences onto the stored snapshot —
+  // never the active unsaved connection or a detection result. The explicit
+  // Save button keeps the full persist().
+  s.persistPreferences()
 }
 
 async function runPing() {
@@ -234,7 +237,7 @@ async function runToolCheck() {
         </label>
 
         <label class="flex items-center gap-2 mt-3 cursor-pointer">
-          <input type="checkbox" v-model="s.debugMode" @change="s.persist()"
+          <input type="checkbox" v-model="s.debugMode" @change="s.persistPreferences()"
                  class="rounded border-white/10 bg-white/5 text-indigo-500 focus:ring-indigo-400/40" />
           <span class="text-sm text-white/70">{{ $t('settings.debugMode') }}</span>
         </label>

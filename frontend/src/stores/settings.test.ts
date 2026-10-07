@@ -611,3 +611,146 @@ describe('settings ensureConnectionRevision', () => {
       .toBe(settings.connectionRevision)
   })
 })
+
+describe('settings persistPreferences boundary', () => {
+  function seedSavedA(): void {
+    vi.stubGlobal('localStorage', memoryStorage({
+      'study-coach:settings': JSON.stringify({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        apiKey: 'sk-test',
+        baseUrl: '',
+        judgeModel: 'stored-judge',
+        language: 'en',
+        debugMode: false,
+        accessToken: 'preseeded-token',
+        tier: 'guest',
+        connectionRevision: REVISION_A,
+      }),
+      [CAPABILITY_CACHE_KEY]: capabilityRecordValue(REVISION_A, true),
+    }))
+  }
+
+  it('merges only non-connection preferences onto the stored snapshot', () => {
+    seedSavedA()
+    stubSequentialUuids()
+    const settings = useSettings()
+    // Active unsaved B, an unsaved judgeModel, and new preferences.
+    settings.updateConnection('provider', 'anthropic')
+    settings.updateConnection('model', 'claude-haiku-4-5')
+    settings.updateConnection('apiKey', 'sk-b')
+    settings.updateConnection('baseUrl', 'https://b.test/v1')
+    settings.judgeModel = 'active-judge'
+    settings.language = 'zh-CN'
+    settings.debugMode = true
+
+    settings.persistPreferences()
+
+    const stored = JSON.parse(localStorage.getItem('study-coach:settings') ?? '{}')
+    expect(stored).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      apiKey: 'sk-test',
+      baseUrl: '',
+      judgeModel: 'stored-judge',
+      connectionRevision: REVISION_A,
+      language: 'zh-CN',
+      debugMode: true,
+      accessToken: 'preseeded-token',
+      tier: 'guest',
+    })
+    expect(stored).not.toHaveProperty('toolCapable')
+    // The A capability record is untouched — no pending promotion ran.
+    expect(localStorage.getItem(CAPABILITY_CACHE_KEY)).toBe(capabilityRecordValue(REVISION_A, true))
+
+    // B's detection result stays in memory until the explicit full Save.
+    settings.commitToolCheckResult(
+      connectionSnapshot(settings.connectionRevision, {
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        apiKey: 'sk-b',
+        baseUrl: 'https://b.test/v1',
+      }),
+      true,
+    )
+    settings.persist()
+    expect(JSON.parse(localStorage.getItem('study-coach:settings') ?? '{}')).toMatchObject({
+      model: 'claude-haiku-4-5',
+      language: 'zh-CN',
+    })
+    expect(JSON.parse(localStorage.getItem(CAPABILITY_CACHE_KEY) ?? '{}')).toMatchObject({
+      connectionRevision: settings.connectionRevision,
+      toolCapable: true,
+    })
+  })
+
+  it('keeps a newer stored identity and adopts it into the active store', () => {
+    vi.stubGlobal('localStorage', memoryStorage({
+      'study-coach:settings': JSON.stringify({ accessToken: 'preseeded-token', tier: 'guest' }),
+    }))
+    const settings = useSettings()
+    // Another tab persisted a newer identity after this store hydrated.
+    localStorage.setItem('study-coach:settings', JSON.stringify({
+      accessToken: 'stored-newer-token',
+      tier: 'member',
+      provider: 'ollama',
+      model: 'gemma3:4b',
+    }))
+
+    settings.persistPreferences()
+
+    const stored = JSON.parse(localStorage.getItem('study-coach:settings') ?? '{}')
+    expect(stored.accessToken).toBe('stored-newer-token')
+    expect(stored.tier).toBe('member')
+    expect(settings.accessToken).toBe('stored-newer-token')
+    expect(settings.tier).toBe('member')
+  })
+
+  it('falls back to the active identity when the stored record has no token', () => {
+    vi.stubGlobal('localStorage', memoryStorage({
+      'study-coach:settings': JSON.stringify({ provider: 'ollama', model: 'gemma3:4b' }),
+    }))
+    const settings = useSettings()
+    settings.accessToken = 'active-provisioned-token'
+    settings.tier = 'guest'
+
+    settings.persistPreferences()
+
+    const stored = JSON.parse(localStorage.getItem('study-coach:settings') ?? '{}')
+    expect(stored.accessToken).toBe('active-provisioned-token')
+    expect(stored.provider).toBe('ollama')
+  })
+
+  it('writes a defaults-based record for missing or malformed storage', () => {
+    for (const initial of [undefined, 'not-json']) {
+      vi.stubGlobal('localStorage', memoryStorage(
+        initial === undefined ? {} : { 'study-coach:settings': initial },
+      ))
+      stubSequentialUuids()
+      const settings = useSettings()
+      settings.updateConnection('model', 'gpt-4o') // active unsaved edit
+
+      settings.persistPreferences()
+
+      const stored = JSON.parse(localStorage.getItem('study-coach:settings') ?? '{}')
+      // The record is rebuilt from safe defaults, not the active edit, and
+      // no revision is rotated or created by a preference save.
+      expect(stored.provider).toBe('ollama')
+      expect(stored.model).toBe('gemma3:4b')
+      expect(stored.connectionRevision).toBe('')
+    }
+  })
+
+  it('does not rotate or ensure the connection revision', () => {
+    vi.stubGlobal('localStorage', memoryStorage())
+    stubSequentialUuids()
+    const settings = useSettings()
+    expect(settings.connectionRevision).toBe('')
+
+    settings.persistPreferences()
+
+    expect(settings.connectionRevision).toBe('')
+    expect(settings.toolCapable).toBeNull()
+    expect(localStorage.getItem(CAPABILITY_CACHE_KEY)).toBeNull()
+  })
+})
