@@ -14,7 +14,7 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.db.session import get_session, get_eval_session as _get_eval_session
-from app.llm.provider import LLMConfig, parse_llm_config
+from app.llm.provider import InvalidLLMConfigError, LLMConfig, parse_llm_config
 
 
 async def require_signed_user(
@@ -77,13 +77,25 @@ def get_llm_config(
     x_base_url: Annotated[str | None, Header()] = None,
     x_judge_model: Annotated[str | None, Header()] = None,
 ) -> LLMConfig:
-    return parse_llm_config(
-        x_provider=x_provider,
-        x_model=x_model,
-        x_api_key=x_api_key,
-        x_base_url=x_base_url,
-        x_judge_model=x_judge_model,
-    )
+    try:
+        return parse_llm_config(
+            x_provider=x_provider,
+            x_model=x_model,
+            x_api_key=x_api_key,
+            x_base_url=x_base_url,
+            x_judge_model=x_judge_model,
+        )
+    except InvalidLLMConfigError as exc:
+        # Fixed stable body: only the narrow config exception reaches here, so
+        # neither the raw header values nor any other error detail can leak.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_llm_config",
+                "field": exc.field,
+                "message": exc.message,
+            },
+        ) from None
 
 
 def get_retriever(request: Request):

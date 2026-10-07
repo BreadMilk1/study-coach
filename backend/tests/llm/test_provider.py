@@ -7,7 +7,20 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.llm.provider import LLMConfig, get_chat_model, parse_llm_config
+from app.llm.provider import (
+    InvalidLLMConfigError,
+    LLMConfig,
+    get_chat_model,
+    parse_llm_config,
+)
+
+# Fixed safe sentences carried by InvalidLLMConfigError. They must never
+# contain the rejected input value.
+_INVALID_PROVIDER_MESSAGE = "Provider must be ollama, openai, anthropic, or gemini."
+_INVALID_MODEL_MESSAGE = "A valid model is required for the selected provider."
+_INVALID_API_KEY_MESSAGE = "An API key is required for the selected provider."
+
+_LEGAL_PROVIDERS = ["ollama", "openai", "anthropic", "gemini", "google_genai"]
 
 
 def test_parse_llm_config_uses_defaults_when_all_headers_missing():
@@ -19,8 +32,119 @@ def test_parse_llm_config_uses_defaults_when_all_headers_missing():
 
 
 def test_parse_llm_config_requires_api_key_for_cloud_providers():
-    with pytest.raises(ValueError, match="api[-_ ]?key"):
+    with pytest.raises(InvalidLLMConfigError) as excinfo:
         parse_llm_config(x_provider="openai", x_model="gpt-4o-mini")
+
+    assert excinfo.value.field == "api_key"
+    assert excinfo.value.message == _INVALID_API_KEY_MESSAGE
+    assert "openai" not in str(excinfo.value)
+
+
+def test_invalid_llm_config_error_is_a_narrow_value_error_with_fixed_payload():
+    assert issubclass(InvalidLLMConfigError, ValueError)
+    err = InvalidLLMConfigError("model", _INVALID_MODEL_MESSAGE)
+    assert err.field == "model"
+    assert err.message == _INVALID_MODEL_MESSAGE
+    assert str(err) == _INVALID_MODEL_MESSAGE
+
+
+@pytest.mark.parametrize("provider", _LEGAL_PROVIDERS)
+def test_parse_llm_config_accepts_all_supported_provider_names(provider):
+    key = None if provider == "ollama" else "sk-offline-key"
+
+    cfg = parse_llm_config(x_provider=provider, x_model="model-x", x_api_key=key)
+
+    assert cfg.provider == provider
+    assert cfg.model == "model-x"
+
+
+def test_parse_llm_config_normalizes_provider_case_and_whitespace_but_keeps_model():
+    cfg = parse_llm_config(
+        x_provider="  OpenAI ",
+        x_model="  GPT-4o-Mini  ",
+        x_api_key="sk-xxx",
+    )
+
+    assert cfg.provider == "openai"
+    assert cfg.model == "GPT-4o-Mini"
+    assert cfg.api_key == "sk-xxx"
+
+
+def test_parse_llm_config_keeps_model_case_and_internal_characters():
+    cfg = parse_llm_config(x_provider="ollama", x_model="Gemma3:4B-Finetune_v2")
+
+    assert cfg.model == "Gemma3:4B-Finetune_v2"
+
+
+@pytest.mark.parametrize(
+    "bad_provider",
+    ["vertexai", "azure-openai", "gpt", "OLLAMA-X", "", "   "],
+)
+def test_parse_llm_config_rejects_unknown_or_blank_provider(bad_provider):
+    with pytest.raises(InvalidLLMConfigError) as excinfo:
+        parse_llm_config(
+            x_provider=bad_provider, x_model="model-x", x_api_key="sk-xxx"
+        )
+
+    assert excinfo.value.field == "provider"
+    assert excinfo.value.message == _INVALID_PROVIDER_MESSAGE
+    if bad_provider.strip():
+        assert bad_provider not in excinfo.value.message
+
+
+def test_parse_llm_config_rejects_explicit_blank_model_even_for_ollama():
+    for bad_model in ["", "   "]:
+        with pytest.raises(InvalidLLMConfigError) as excinfo:
+            parse_llm_config(x_provider="ollama", x_model=bad_model)
+
+        assert excinfo.value.field == "model"
+        assert excinfo.value.message == _INVALID_MODEL_MESSAGE
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "gemini", "google_genai"])
+def test_parse_llm_config_rejects_missing_model_for_cloud_providers(provider):
+    with pytest.raises(InvalidLLMConfigError) as excinfo:
+        parse_llm_config(x_provider=provider, x_api_key="sk-xxx")
+
+    assert excinfo.value.field == "model"
+    assert excinfo.value.message == _INVALID_MODEL_MESSAGE
+
+
+def test_parse_llm_config_keeps_ollama_default_model_when_model_missing():
+    cfg = parse_llm_config(x_provider="ollama")
+
+    assert cfg.model == "gemma3:4b"
+
+
+@pytest.mark.parametrize("bad_key", [None, "", "   "])
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "gemini", "google_genai"])
+def test_parse_llm_config_rejects_missing_or_blank_cloud_api_key(provider, bad_key):
+    with pytest.raises(InvalidLLMConfigError) as excinfo:
+        parse_llm_config(x_provider=provider, x_model="model-x", x_api_key=bad_key)
+
+    assert excinfo.value.field == "api_key"
+    assert excinfo.value.message == _INVALID_API_KEY_MESSAGE
+    assert "sk-" not in excinfo.value.message
+
+
+def test_parse_llm_config_passes_nonempty_key_through_unchanged():
+    cfg = parse_llm_config(
+        x_provider="openai", x_model="model-x", x_api_key="  sk-keep-spaces  "
+    )
+
+    assert cfg.api_key == "  sk-keep-spaces  "
+
+
+def test_parse_llm_config_keeps_base_url_and_judge_model_passthrough():
+    cfg = parse_llm_config(
+        x_provider="ollama",
+        x_model="model-x",
+        x_base_url="http://127.0.0.1:11434",
+        x_judge_model="judge-x",
+    )
+
+    assert cfg.base_url == "http://127.0.0.1:11434"
+    assert cfg.judge_model == "judge-x"
 
 
 def test_parse_llm_config_accepts_cloud_provider_with_key():

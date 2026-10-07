@@ -1,8 +1,10 @@
 import asyncio
 import json
+import socket
 import tempfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1385,10 +1387,11 @@ def test_ping_success_contract_is_unchanged(client, monkeypatch):
     assert body["note"].endswith("ms")
 
 
-def test_ping_empty_response_keeps_legacy_success_behavior(client, monkeypatch):
-    """Deliberately NOT fixed in Batch A: an empty ping response still reports
-    ok=True. Pinned so the later batch that changes it must update this test on
-    purpose instead of shifting the contract silently."""
+def test_ping_empty_response_reports_failure_with_fixed_note(client, monkeypatch):
+    """D2 deliberately changes the Batch A legacy behaviour: a ping response
+    without a usable text body is a failed check (ok=False) with a fixed safe
+    note, never a success. The route boundary (200 result, fixed fields) is
+    preserved on purpose."""
 
     class EmptyModel:
         async def ainvoke(self, _messages, **_kwargs):
@@ -1402,7 +1405,687 @@ def test_ping_empty_response_keeps_legacy_success_behavior(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()["ok"] is True
+    body = response.json()
+    assert body["ok"] is False
+    assert body["model"] == "gemma3:4b"
+    assert body["note"] == _PING_NO_TEXT_NOTE
+
+
+# --- D2: ping requires a valid response body --------------------------------
+
+_PING_NO_TEXT_NOTE = (
+    "Failed: the model response did not contain a usable text body."
+)
+
+
+def test_ping_whitespace_response_reports_failure_with_fixed_note(
+    client, monkeypatch, deny_model_route_network
+):
+    class WhitespaceModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(content="   \n\t  ")
+
+    monkeypatch.setattr(
+        "app.llm.provider.get_chat_model", lambda _config: WhitespaceModel()
+    )
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["note"] == _PING_NO_TEXT_NOTE
+
+
+def test_ping_skipped_only_blocks_report_failure_without_echoing_payload(
+    client, monkeypatch, deny_model_route_network
+):
+    class ReasoningOnlyModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(
+                content=[{"type": "reasoning", "thinking": f"secret-{_MARKER}"}]
+            )
+
+    monkeypatch.setattr(
+        "app.llm.provider.get_chat_model", lambda _config: ReasoningOnlyModel()
+    )
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["note"] == _PING_NO_TEXT_NOTE
+    assert _MARKER not in response.text
+
+
+def test_ping_malformed_shape_reports_failure_without_echoing_payload(
+    client, monkeypatch, deny_model_route_network
+):
+    class MalformedModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(
+                content=[{"type": "text", "text": {"leak": _MARKER}}]
+            )
+
+    monkeypatch.setattr(
+        "app.llm.provider.get_chat_model", lambda _config: MalformedModel()
+    )
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["note"] == _PING_NO_TEXT_NOTE
+    assert _MARKER not in response.text
+
+
+def test_ping_note_for_body_failure_is_not_a_normalized_llm_error(
+    client, monkeypatch, deny_model_route_network
+):
+    """The body-validation failure must keep its own fixed note — it is not
+    routed through normalize_llm_error like factory/ainvoke failures."""
+
+    class EmptyModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(content="")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: EmptyModel())
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    note = response.json()["note"]
+    assert note == _PING_NO_TEXT_NOTE
+    assert note not in {
+        f"Failed: {_SAFE_CONNECTION}",
+        f"Failed: {_SAFE_AUTH}",
+        f"Failed: {_SAFE_RATE_LIMIT}",
+    }
+
+
+def test_ping_text_block_body_succeeds(client, monkeypatch, deny_model_route_network):
+    class TextBlockModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(
+                content=[
+                    {"type": "text", "text": "pon"},
+                    {"type": "text", "text": "g"},
+                ]
+            )
+
+    monkeypatch.setattr(
+        "app.llm.provider.get_chat_model", lambda _config: TextBlockModel()
+    )
+
+    response = client.get(
+        "/api/models/ping",
+        headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["note"].startswith("Connected — responded in")
+
+
+# --- D2: tool-check completes a real tool round trip ------------------------
+
+_TOOL_CHECK_OK_NOTE = "Tool call round trip completed."
+_TOOL_CHECK_NO_CALLS_NOTE = (
+    "No tool calls observed in this probe — deterministic mode will be used."
+)
+_TOOL_CHECK_INCOMPLETE_NOTE = "Tool check did not complete a valid round trip."
+_SAFE_TIMEOUT = "APITimeoutError: The model request timed out."
+
+
+class _ScriptedBound:
+    """Stands in for the bound runnable; replays a fixed response script."""
+
+    def __init__(self, script: list, calls: list):
+        self._script = script
+        self._calls = calls
+
+    async def ainvoke(self, messages, **_kwargs):
+        self._calls.append(list(messages))
+        step = self._script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+class _ScriptedToolModel:
+    """Stands in for the factory model; bind_tools returns one bound runnable."""
+
+    def __init__(self, script: list):
+        self._script = script
+        self.ainvoke_calls: list[list] = []
+        self.bind_calls = 0
+
+    def bind_tools(self, _tools):
+        self.bind_calls += 1
+        return _ScriptedBound(self._script, self.ainvoke_calls)
+
+
+def _install_scripted_tool_model(monkeypatch, script) -> _ScriptedToolModel:
+    model = _ScriptedToolModel(script)
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: model)
+    return model
+
+
+def _ping_tool_call(call_id: str = "call-1") -> dict:
+    return {"name": "ping", "args": {}, "id": call_id}
+
+
+_HEADERS = {"x-provider": "ollama", "x-model": "gemma3:4b"}
+
+
+def test_tool_check_round_trip_executes_tool_once_and_reports_capable(
+    client, monkeypatch, deny_model_route_network
+):
+    first = AIMessage(content="", tool_calls=[_ping_tool_call("call-1")])
+    second = AIMessage(content="pong after tool")
+    model = _install_scripted_tool_model(monkeypatch, [first, second])
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is True
+    assert body["model"] == "gemma3:4b"
+    assert body["note"] == _TOOL_CHECK_OK_NOTE
+    # Exactly two model invocations, one bind, and the synthetic ping tool
+    # produced the real ToolMessage in the second-round history.
+    assert model.bind_calls == 1
+    assert len(model.ainvoke_calls) == 2
+    first_round, second_round = model.ainvoke_calls
+    assert len(first_round) == 1
+    assert first_round[0].content == "Call the ping tool"
+    assert second_round[1] is first  # original AIMessage passed through as-is
+    tool_message = second_round[2]
+    assert type(tool_message).__name__ == "ToolMessage"
+    assert tool_message.tool_call_id == "call-1"
+    assert tool_message.content == "pong"
+
+
+def test_tool_check_reports_false_when_probe_observes_no_tool_calls(
+    client, monkeypatch, deny_model_route_network
+):
+    model = _install_scripted_tool_model(
+        monkeypatch, [AIMessage(content="I am a plain text model")]
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is False
+    assert body["note"] == _TOOL_CHECK_NO_CALLS_NOTE
+    assert len(model.ainvoke_calls) == 1
+
+
+def test_tool_check_unknown_when_first_round_carries_invalid_tool_calls(
+    client, monkeypatch, deny_model_route_network
+):
+    model = _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[_ping_tool_call()],
+                invalid_tool_calls=[
+                    {"name": "ping", "args": "not-json", "id": "bad", "error": None}
+                ],
+            )
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+    assert len(model.ainvoke_calls) == 1
+
+
+def test_tool_check_unknown_when_tool_call_args_are_not_empty(
+    client, monkeypatch, deny_model_route_network
+):
+    model = _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ping", "args": {"q": "x"}, "id": "call-1"}],
+            )
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+    assert len(model.ainvoke_calls) == 1  # unknown tool shape is never executed
+
+
+def test_tool_check_unknown_when_tool_call_name_is_not_ping(
+    client, monkeypatch, deny_model_route_network
+):
+    model = _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "mystery_tool", "args": {}, "id": "call-1"}],
+            )
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+    assert len(model.ainvoke_calls) == 1  # unknown tool is never executed
+
+
+@pytest.mark.parametrize("bad_id", ["", None])
+def test_tool_check_unknown_when_tool_call_id_is_not_a_nonempty_string(
+    client, monkeypatch, deny_model_route_network, bad_id
+):
+    # Note: LangChain's AIMessage validation rejects a non-string id outright
+    # (e.g. 42), so only the empty/None shapes are constructible here; the
+    # route additionally guards with isinstance(id, str).
+    _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ping", "args": {}, "id": bad_id}],
+            )
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+
+
+def test_tool_check_unknown_when_first_round_returns_multiple_tool_calls(
+    client, monkeypatch, deny_model_route_network
+):
+    _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[_ping_tool_call("call-1"), _ping_tool_call("call-2")],
+            )
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+
+
+def test_tool_check_unknown_when_second_round_starts_new_tool_calls(
+    client, monkeypatch, deny_model_route_network
+):
+    _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(content="", tool_calls=[_ping_tool_call("call-1")]),
+            AIMessage(content="", tool_calls=[_ping_tool_call("call-2")]),
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+
+
+def test_tool_check_unknown_when_second_round_body_is_empty(
+    client, monkeypatch, deny_model_route_network
+):
+    _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(content="", tool_calls=[_ping_tool_call()]),
+            AIMessage(content="   "),
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+
+
+def test_tool_check_unknown_when_probe_without_calls_has_no_usable_body(
+    client, monkeypatch, deny_model_route_network
+):
+    _install_scripted_tool_model(monkeypatch, [AIMessage(content="")])
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+
+
+def test_tool_check_note_is_safe_when_factory_raises(
+    client, monkeypatch, deny_model_route_network
+):
+    def boom(_config):
+        raise ConnectionError(f"cannot reach http://127.0.0.1:11434?token={_MARKER}")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", boom)
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == f"Tool check failed: {_SAFE_CONNECTION}"
+    assert _MARKER not in response.text
+
+
+def test_tool_check_note_is_safe_when_first_ainvoke_raises(
+    client, monkeypatch, deny_model_route_network
+):
+    synthetic_auth_error = type("AuthenticationError", (Exception,), {})
+    _install_scripted_tool_model(
+        monkeypatch, [synthetic_auth_error(f"bad key {_MARKER}")]
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == f"Tool check failed: {_SAFE_AUTH}"
+    assert _MARKER not in response.text
+    assert "AuthenticationError(" not in body["note"]
+
+
+def test_tool_check_note_is_safe_when_second_ainvoke_raises(
+    client, monkeypatch, deny_model_route_network
+):
+    synthetic_timeout_error = type("APITimeoutError", (Exception,), {})
+    _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(content="", tool_calls=[_ping_tool_call()]),
+            synthetic_timeout_error(f"timed out {_MARKER}"),
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == f"Tool check failed: {_SAFE_TIMEOUT}"
+    assert _MARKER not in response.text
+
+
+# --- D2 repair: synthetic malformed response containers → fixed 200 results -
+#
+# These stubs are clearly synthetic model-boundary shapes used to pin the
+# route's protocol defense. They are NOT evidence that the locked real SDKs
+# produce such values, and the assertions make no real-provider claim: any
+# non-standard response container must yield the fixed "did not complete"
+# null result (200) instead of a 500, without extra tool executions or model
+# calls. The real-message controls are the existing round-trip / no-call
+# tests above.
+
+_SYNTHETIC_TOOL_CHECK_CASES = [
+    pytest.param(None, id="synthetic-missing-response"),
+    pytest.param(
+        SimpleNamespace(tool_calls=[], invalid_tool_calls=[]),
+        id="synthetic-missing-content",
+    ),
+    pytest.param(
+        SimpleNamespace(tool_calls=["synthetic-malformed"], invalid_tool_calls=[], content="body"),
+        id="synthetic-non-mapping-call",
+    ),
+    pytest.param(
+        SimpleNamespace(tool_calls=42, invalid_tool_calls=[], content="body"),
+        id="synthetic-non-list-calls",
+    ),
+]
+
+
+@pytest.mark.parametrize("synthetic_response", _SYNTHETIC_TOOL_CHECK_CASES)
+def test_tool_check_synthetic_malformed_first_round_reports_fixed_null(
+    client, monkeypatch, deny_model_route_network, synthetic_response
+):
+    model = _install_scripted_tool_model(monkeypatch, [synthetic_response])
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+    assert _MARKER not in response.text
+    # No second model call and no tool execution for a malformed container.
+    assert len(model.ainvoke_calls) == 1
+
+
+def test_tool_check_synthetic_malformed_second_round_reports_fixed_null(
+    client, monkeypatch, deny_model_route_network
+):
+    model = _install_scripted_tool_model(
+        monkeypatch,
+        [
+            AIMessage(content="", tool_calls=[_ping_tool_call()]),
+            SimpleNamespace(tool_calls=42, invalid_tool_calls=[], content="body"),
+        ],
+    )
+
+    response = client.get("/api/models/tool-check", headers=_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tool_capable"] is None
+    assert body["note"] == _TOOL_CHECK_INCOMPLETE_NOTE
+    # Exactly the two invocations of the round trip: the malformed second
+    # response neither restarts the probe nor triggers extra tool work.
+    assert len(model.ainvoke_calls) == 2
+
+
+def test_ping_synthetic_malformed_response_reports_fixed_failure(
+    client, monkeypatch, deny_model_route_network
+):
+    for synthetic_response, case_id in [
+        (None, "missing-response"),
+        (SimpleNamespace(), "missing-content"),
+    ]:
+        class SyntheticPingModel:
+            async def ainvoke(self, _messages, **_kwargs):
+                return synthetic_response
+
+        monkeypatch.setattr(
+            "app.llm.provider.get_chat_model", lambda _config: SyntheticPingModel()
+        )
+
+        response = client.get(
+            "/api/models/ping",
+            headers={"x-provider": "ollama", "x-model": "gemma3:4b"},
+        )
+
+        assert response.status_code == 200, case_id
+        body = response.json()
+        assert body["ok"] is False, case_id
+        assert body["note"] == _PING_NO_TEXT_NOTE, case_id
+        assert _MARKER not in response.text, case_id
+
+
+# --- D2: strict connection config → stable 400 before the model factory -----
+
+_INVALID_PROVIDER_MESSAGE = "Provider must be ollama, openai, anthropic, or gemini."
+_INVALID_MODEL_MESSAGE = "A valid model is required for the selected provider."
+_INVALID_API_KEY_MESSAGE = "An API key is required for the selected provider."
+
+
+@pytest.fixture()
+def deny_model_route_network(monkeypatch):
+    """Offline guard for the D2 model-route consumer tests.
+
+    Every real DNS resolution or socket connection attempt fails the test
+    immediately; the probe test below confirms the guard covers the real
+    socket surface while the tests themselves only use inert stubs.
+    """
+
+    def deny(*args, **kwargs):
+        raise AssertionError("model route test attempted real network access")
+
+    monkeypatch.setattr(socket, "getaddrinfo", deny)
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+
+
+def test_model_route_network_guard_covers_real_socket_surface(deny_model_route_network):
+    probe = socket.socket()
+    try:
+        with pytest.raises(AssertionError):
+            socket.getaddrinfo("localhost", 80)
+        with pytest.raises(AssertionError):
+            probe.connect(("127.0.0.1", 80))
+        with pytest.raises(AssertionError):
+            probe.connect_ex(("127.0.0.1", 80))
+        with pytest.raises(AssertionError):
+            socket.create_connection(("127.0.0.1", 80))
+    finally:
+        probe.close()
+
+
+def _install_counting_factory(monkeypatch):
+    """Stub the model factory and fail loudly if it is ever reached."""
+    calls: list[object] = []
+
+    def counting_factory(_config):
+        calls.append(_config)
+        raise AssertionError("model factory must not run for an invalid config")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", counting_factory)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("headers", "field", "message"),
+    [
+        ({"x-provider": "vertexai", "x-model": "m", "x-api-key": "sk-x"},
+         "provider", _INVALID_PROVIDER_MESSAGE),
+        ({"x-provider": "", "x-model": "m"},
+         "provider", _INVALID_PROVIDER_MESSAGE),
+        ({"x-provider": "   ", "x-model": "m"},
+         "provider", _INVALID_PROVIDER_MESSAGE),
+        ({"x-provider": "openai", "x-api-key": "sk-x"},
+         "model", _INVALID_MODEL_MESSAGE),
+        ({"x-provider": "openai", "x-model": "   ", "x-api-key": "sk-x"},
+         "model", _INVALID_MODEL_MESSAGE),
+        ({"x-provider": "ollama", "x-model": ""},
+         "model", _INVALID_MODEL_MESSAGE),
+        ({"x-provider": "openai", "x-model": "m"},
+         "api_key", _INVALID_API_KEY_MESSAGE),
+        ({"x-provider": "openai", "x-model": "m", "x-api-key": "   "},
+         "api_key", _INVALID_API_KEY_MESSAGE),
+        ({"x-provider": "gemini", "x-model": "m"},
+         "api_key", _INVALID_API_KEY_MESSAGE),
+    ],
+)
+@pytest.mark.parametrize("path", ["/api/models/ping", "/api/models/tool-check"])
+def test_model_routes_reject_invalid_config_with_stable_400_before_factory(
+    client, monkeypatch, deny_model_route_network, headers, field, message, path
+):
+    calls = _install_counting_factory(monkeypatch)
+
+    response = client.get(path, headers=headers)
+
+    assert response.status_code == 400
+    body = response.json()["detail"]
+    assert body == {"code": "invalid_llm_config", "field": field, "message": message}
+    assert calls == []
+
+
+@pytest.mark.parametrize("path", ["/api/models/ping", "/api/models/tool-check"])
+def test_model_routes_never_echo_the_rejected_header_value(
+    client, monkeypatch, deny_model_route_network, path
+):
+    _install_counting_factory(monkeypatch)
+    marker_provider = f"bad-provider-{_MARKER}"
+
+    response = client.get(
+        path,
+        headers={"x-provider": marker_provider, "x-model": "m", "x-api-key": "sk-x"},
+    )
+
+    assert response.status_code == 400
+    assert marker_provider not in response.text
+
+
+def test_models_ping_passes_normalized_config_to_the_factory(
+    client, monkeypatch, deny_model_route_network
+):
+    captured: dict[str, object] = {}
+
+    class PongModel:
+        async def ainvoke(self, _messages, **_kwargs):
+            return AIMessage(content="pong")
+
+    def fake_factory(config):
+        captured["config"] = config
+        return PongModel()
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", fake_factory)
+
+    response = client.get(
+        "/api/models/ping",
+        headers={
+            "x-provider": "  google_genai ",
+            "x-model": "  gemini-2.5-flash  ",
+            "x-api-key": "gm-offline-key",
+        },
+    )
+
+    assert response.status_code == 200
+    config = captured["config"]
+    assert config.provider == "google_genai"
+    assert config.model == "gemini-2.5-flash"
+    assert config.api_key == "gm-offline-key"
 
 
 def test_chat_projects_raw_agent_run_before_sse_and_persistence(app, client):

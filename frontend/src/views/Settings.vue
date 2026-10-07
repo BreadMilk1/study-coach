@@ -1,21 +1,63 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { AlertTriangle } from 'lucide-vue-next'
 
-import { useSettings } from '../stores/settings'
+import { useSettings, type ConnectionField } from '../stores/settings'
 import { useDataLifecycle } from '../stores/dataLifecycle'
 import { useNotifications } from '../stores/notifications'
-import { checkToolCapable, pingModel, type DataCounts } from '../lib/api'
+import { checkToolCapable, pingModel, ModelCheckError, type DataCounts } from '../lib/api'
 import { useI18n } from 'vue-i18n'
 
 const { locale, t } = useI18n()
 const lifecycle = useDataLifecycle()
 const notifications = useNotifications()
 const s = useSettings()
+
+// Stale-request protection: every ping/tool-check captures its own sequence
+// number plus the connection snapshot at request time. Only a still-current
+// request may write state or clear loading — a revision rotation (real
+// connection edit) or unmount synchronously invalidates in-flight requests.
+let pingSeq = 0
+let toolSeq = 0
 const toolTesting = ref(false)
 const toolNote = ref('')
 const pingTesting = ref(false)
 const pingResult = ref<{ ok: boolean; note: string; latency_ms: number } | null>(null)
+
+const CHECK_FAILED_MESSAGE = 'The connection check failed. Please try again.'
+
+watch(() => s.connectionRevision, () => {
+  pingSeq += 1
+  toolSeq += 1
+  pingTesting.value = false
+  pingResult.value = null
+  toolTesting.value = false
+  toolNote.value = ''
+}, { flush: 'sync' })
+
+onUnmounted(() => {
+  pingSeq += 1
+  toolSeq += 1
+})
+
+function checkErrorText(e: unknown): string {
+  return e instanceof ModelCheckError ? e.message : CHECK_FAILED_MESSAGE
+}
+
+function connectionSnapshot() {
+  return {
+    revision: s.connectionRevision,
+    provider: s.provider,
+    model: s.model,
+    apiKey: s.apiKey,
+    baseUrl: s.baseUrl,
+  }
+}
+
+function onConnectionEvent(field: ConnectionField, event: Event) {
+  const target = event.target as HTMLInputElement | HTMLSelectElement
+  s.updateConnection(field, target.value)
+}
 
 const countKeys: (keyof DataCounts)[] = [
   'documents',
@@ -49,33 +91,53 @@ function save() {
 
 function onLanguageChange() {
   locale.value = s.language
-  s.persist()
+  // Preference auto-save writes only preferences onto the stored snapshot —
+  // never the active unsaved connection or a detection result. The explicit
+  // Save button keeps the full persist().
+  s.persistPreferences()
 }
 
 async function runPing() {
+  const seq = ++pingSeq
+  const snapshot = connectionSnapshot()
   pingTesting.value = true
   pingResult.value = null
   try {
-    const result = await pingModel(s.$state)
+    const result = await pingModel(snapshot)
+    if (seq !== pingSeq) return
     pingResult.value = result
   } catch (e) {
-    pingResult.value = { ok: false, note: `Error: ${e}`, latency_ms: 0 }
+    if (seq !== pingSeq) return
+    pingResult.value = { ok: false, note: checkErrorText(e), latency_ms: 0 }
   } finally {
-    pingTesting.value = false
+    if (seq === pingSeq) pingTesting.value = false
   }
 }
 
 async function runToolCheck() {
+  // Establish a valid revision BEFORE capturing this request's sequence and
+  // snapshot: on a legacy revision-less configuration the ensure step may
+  // rotate the revision, and its synchronous watcher must not invalidate the
+  // very check it is establishing the generation for.
+  s.ensureConnectionRevision()
+  const seq = ++toolSeq
+  const snapshot = connectionSnapshot()
   toolTesting.value = true
   toolNote.value = ''
+  // A manual re-test drops the cached capability for the current revision
+  // before the request starts, so a failed re-test cannot leave the previous
+  // result in place.
+  s.beginToolRecheck()
   try {
-    const result = await checkToolCapable(s.$state)
-    s.setToolCapable(result.tool_capable)
+    const result = await checkToolCapable(snapshot)
+    if (seq !== toolSeq) return
+    s.commitToolCheckResult(snapshot, result.tool_capable)
     toolNote.value = result.note
   } catch (e) {
-    toolNote.value = `Error: ${e}`
+    if (seq !== toolSeq) return
+    toolNote.value = checkErrorText(e)
   } finally {
-    toolTesting.value = false
+    if (seq === toolSeq) toolTesting.value = false
   }
 }
 </script>
@@ -90,7 +152,8 @@ async function runToolCheck() {
     <div class="space-y-4">
       <label class="block">
         <span class="text-sm text-white/70">Provider</span>
-        <select v-model="s.provider"
+        <select :value="s.provider"
+                @change="onConnectionEvent('provider', $event)"
                 class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40">
           <option value="ollama">Ollama (local)</option>
           <option value="openai">OpenAI</option>
@@ -101,19 +164,19 @@ async function runToolCheck() {
 
       <label class="block">
         <span class="text-sm text-white/70">Model</span>
-        <input v-model="s.model" placeholder="gemma3:4b / gpt-4o-mini / claude-haiku-4-5 / gemini-2.5-flash"
+        <input :value="s.model" @input="onConnectionEvent('model', $event)" placeholder="gemma3:4b / gpt-4o-mini / claude-haiku-4-5 / gemini-2.5-flash"
                class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40" />
       </label>
 
       <label class="block">
         <span class="text-sm text-white/70">API Key {{ s.provider === 'ollama' ? '(not needed for Ollama)' : '' }}</span>
-        <input v-model="s.apiKey" type="password" placeholder="sk-…"
+        <input :value="s.apiKey" @input="onConnectionEvent('apiKey', $event)" type="password" placeholder="sk-…"
                class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40" />
       </label>
 
       <label class="block">
         <span class="text-sm text-white/70">Base URL (optional)</span>
-        <input v-model="s.baseUrl" placeholder="http://localhost:11434 / https://api.openai.com/v1"
+        <input :value="s.baseUrl" @input="onConnectionEvent('baseUrl', $event)" placeholder="http://localhost:11434 / https://api.openai.com/v1"
                class="mt-1 block w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 outline-none focus:border-indigo-400/40" />
       </label>
 
@@ -144,17 +207,21 @@ async function runToolCheck() {
 
       <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
         <legend class="text-xs font-mono uppercase tracking-wider text-white/60 px-2">Tool Call Detection</legend>
-        <p class="text-xs text-white/50 mb-3">Local models like gemma3:4b don't support tool calling — agent_loop mode won't work. Test your model to auto-lock unavailable modes.</p>
+        <p class="text-xs text-white/50 mb-3">
+          Runs a real tool-call round trip (up to two model calls, only started by this button).
+          When no tool calls are observed in the check, agent_loop defaults stay locked to deterministic.
+        </p>
         <div class="flex items-center gap-3">
           <button @click="runToolCheck" :disabled="toolTesting"
                   class="px-3 py-1.5 rounded-md bg-indigo-500/20 border border-indigo-400/30 text-xs font-mono text-indigo-200 hover:bg-indigo-500/30 disabled:opacity-50 transition-colors">
             {{ toolTesting ? 'Testing…' : 'Test Tool Call' }}
           </button>
           <span v-if="s.toolCapable === true" class="text-xs font-mono text-green-400">Tool Call Supported</span>
-          <span v-else-if="s.toolCapable === false" class="text-xs font-mono text-red-400">Tool Call Not Supported</span>
+          <span v-else-if="s.toolCapable === false" class="text-xs font-mono text-red-400">No Tool Calls Observed</span>
           <span v-else class="text-xs text-white/40">Untested</span>
         </div>
         <p v-if="toolNote" class="text-xs text-white/50 mt-2">{{ toolNote }}</p>
+        <p class="text-xs text-white/40 mt-2">The result is cached per saved configuration and reflects the last check — re-test any time to verify it again.</p>
       </fieldset>
 
       <fieldset class="rounded-lg border border-white/10 bg-white/5 p-4 mt-4">
@@ -170,7 +237,7 @@ async function runToolCheck() {
         </label>
 
         <label class="flex items-center gap-2 mt-3 cursor-pointer">
-          <input type="checkbox" v-model="s.debugMode" @change="s.persist()"
+          <input type="checkbox" v-model="s.debugMode" @change="s.persistPreferences()"
                  class="rounded border-white/10 bg-white/5 text-indigo-500 focus:ring-indigo-400/40" />
           <span class="text-sm text-white/70">{{ $t('settings.debugMode') }}</span>
         </label>
