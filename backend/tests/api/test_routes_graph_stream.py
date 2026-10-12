@@ -60,16 +60,38 @@ class StubLLM:
 
 
 class StubJudgeLLM:
-    """Judge LLM stub that always returns a pass verdict."""
+    """Judge stub returning a valid pass payload for the requested rubric.
+
+    The production judge validates each intent against its own rubric, so the
+    stub reads the rubric the real graph embedded in the prompt and answers
+    with the matching complete payload instead of a tutor-shaped one.
+    """
 
     _PASS = (
         '{"relevance":5,"accuracy":5,"citation_quality":4,'
         '"accessibility":4,"example_quality":5,"learner_level_fit":5,'
         '"reasoning":"Solid."}'
     )
+    _QUIZ_PASS = (
+        '{"question_quality":4,"option_plausibility":4,"answer_correctness":5,'
+        '"explanation_clarity":4,"difficulty_calibration":4,'
+        '"reasoning":"Solid."}'
+    )
+    _PLAN_PASS = (
+        '{"milestone_specificity":5,"milestone_granularity":4,"time_feasibility":4,'
+        '"topic_coverage":5,"actionability":4,'
+        '"reasoning":"Solid."}'
+    )
 
     async def ainvoke(self, messages, **_kwargs):
-        return AIMessage(content=self._PASS)
+        prompt = messages[-1].content if messages else ""
+        if "question_quality" in prompt:
+            payload = self._QUIZ_PASS
+        elif "milestone_specificity" in prompt:
+            payload = self._PLAN_PASS
+        else:
+            payload = self._PASS
+        return AIMessage(content=payload)
 
 
 @pytest.fixture
@@ -1195,3 +1217,376 @@ def test_chat_plan_agent_loop_final_bad_blocks_degrades_with_warning_assistant(
 
     assert _D1_SENTINEL not in json.dumps(events)
     assert _D1_SENTINEL not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# D3 RED — production judge policy over the real SSE / persistence contract.
+#
+# The app fixture already uses the real `get_graph` production entry and real
+# dependencies; only the LLMs and retriever are faked here. RED stage: the
+# legacy graph neutral-passes invalid judge payloads and truncates the stream
+# on judge request errors, so every production expectation below fails.
+# ---------------------------------------------------------------------------
+
+_UNAVAILABLE_SUFFIX = (
+    "\n\n---\n⚠️ Self-check incomplete: this content was kept, but the "
+    "quality check could not be completed."
+)
+_PROSE_VERDICT = "The answer looks well grounded and clearly cited."
+_WEAK_JSON = (
+    '{"relevance":2,"accuracy":2,"citation_quality":2,'
+    '"accessibility":2,"example_quality":2,"learner_level_fit":2,'
+    '"reasoning":"Ungrounded."}'
+)
+_PASS_JSON = StubJudgeLLM._PASS
+
+
+class _ScriptedJudgeLLM:
+    """Judge stub: each script entry is an AIMessage or an exception instance."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.call_count = 0
+
+    async def ainvoke(self, _messages, **_kwargs):
+        self.call_count += 1
+        item = self.script[min(self.call_count - 1, len(self.script) - 1)]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class _MultiAttemptLLM:
+    """Tutor LLM yielding one token group per astream call."""
+
+    def __init__(self, attempts):
+        self.attempts = [list(attempt) for attempt in attempts]
+        self.calls = 0
+
+    async def astream(self, _messages, **_kwargs):
+        idx = min(self.calls, len(self.attempts) - 1)
+        self.calls += 1
+        for token in self.attempts[idx]:
+            yield AIMessageChunk(content=token)
+
+
+def test_no_network_guard_covers_real_socket_surface(no_network):
+    probe = socket.socket()
+    try:
+        with pytest.raises(AssertionError):
+            socket.getaddrinfo("localhost", 80)
+        with pytest.raises(AssertionError):
+            probe.connect(("127.0.0.1", 80))
+        with pytest.raises(AssertionError):
+            probe.connect_ex(("127.0.0.1", 80))
+        with pytest.raises(AssertionError):
+            socket.create_connection(("127.0.0.1", 80))
+    finally:
+        probe.close()
+
+
+def _judge_trace_events(events: list[dict]) -> list[dict]:
+    return [
+        e for e in events if e["type"] == "trace" and e.get("step") == "judge"
+    ]
+
+
+def test_chat_judge_invalid_payload_keeps_content_and_appends_fixed_warning(
+    app, client, no_network
+):
+    from app.api.deps import get_judge_dependencies
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM([AIMessage(content=_PROSE_VERDICT)]),
+        "same_model": False,
+    }
+
+    events = _stream_chat(client, "What is HyDE?")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+    assert joined.count("Self-check incomplete") == 1
+    judge_traces = _judge_trace_events(events)
+    assert judge_traces and judge_traces[-1].get("status") == "unavailable"
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    assert body["messages"][-1]["role"] == "assistant"
+    assert body["messages"][-1]["content"] == joined
+
+
+def test_chat_judge_request_failure_keeps_content_and_completes(
+    app, client, no_network
+):
+    from app.api.deps import get_judge_dependencies
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM([TimeoutError("judge socket marker")]),
+        "same_model": False,
+    }
+
+    events = _stream_chat(client, "What is HyDE?")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+    assert "judge socket marker" not in json.dumps(events)
+
+
+def test_chat_judge_failure_after_weak_retry_keeps_accumulated_attempts(
+    app, client, no_network
+):
+    """Weak verdict -> retry -> judge failure: both streamed attempts stay in
+    the single saved chat message, the fixed warning appears exactly once, and
+    the fault generates no third candidate."""
+    from app.api.deps import get_judge_dependencies, get_llm
+
+    llm = _MultiAttemptLLM([["first attempt."], ["second answer."]])
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM(
+            [AIMessage(content=_WEAK_JSON), TimeoutError("judge socket marker")]
+        ),
+        "same_model": False,
+    }
+
+    events = _stream_chat(client, "What is HyDE?")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert joined == "first attempt.second answer." + _UNAVAILABLE_SUFFIX
+    assert joined.count("Self-check incomplete") == 1
+    assert llm.calls == 2  # the fault caused no regeneration
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == joined
+
+
+def test_chat_negative_completion_signal_blocks_scoring_and_warns(
+    app, client, no_network
+):
+    """A valid high-score body with an explicit truncation signal is not scored."""
+    from app.api.deps import get_judge_dependencies
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM(
+            [AIMessage(content=_PASS_JSON, response_metadata={"finish_reason": "length"})]
+        ),
+        "same_model": False,
+    }
+
+    events = _stream_chat(client, "What is HyDE?")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+    judge_traces = _judge_trace_events(events)
+    assert judge_traces and judge_traces[-1].get("status") == "unavailable"
+
+
+def test_chat_valid_judge_pass_stream_contract_unchanged(app, client, no_network):
+    """Control: a valid pass verdict keeps today's stream byte-for-byte."""
+    events = _stream_chat(client, "What is HyDE?")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert joined == "HyDE is a technique."
+    assert "Self-check incomplete" not in joined
+
+
+def test_chat_quiz_generate_committed_question_survives_judge_fault(
+    app, client, no_network
+):
+    """Real deterministic quiz consumer submits a Question, then the judge
+    fails: the turn still completes (kept content + fixed warning + done), and
+    the already-committed Question stays retrievable by its original ID."""
+    from sqlalchemy import func, select
+
+    from app.api.deps import get_judge_dependencies
+    from app.db.models import Goal, Question
+    from app.db.session import session_scope
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM([TimeoutError("judge socket marker")]),
+        "same_model": False,
+    }
+
+    events = _stream_chat(client, "测我一下 HyDE")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert "What does HyDE rewrite?" in joined
+    assert "Reply with A, B, C, or D" in joined
+    assert joined.endswith(_UNAVAILABLE_SUFFIX)
+    assert "judge socket marker" not in json.dumps(events)
+
+    quiz_events = [e for e in events if e.get("type") == "quiz_question"]
+    assert len(quiz_events) == 1
+    question_id = quiz_events[0]["question_id"]
+
+    with session_scope() as session:
+        row = session.get(Question, question_id)
+        goal_count = int(
+            session.scalar(select(func.count()).select_from(Goal)) or 0
+        )
+    assert row is not None and "HyDE" in row.prompt
+    assert goal_count >= 1  # the consumer's own side effects are not rolled back
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == joined
+    assert assistant[0]["quiz_question_id"] == question_id
+
+
+def test_chat_plan_generate_committed_plan_survives_judge_fault(
+    app, client, no_network
+):
+    """Real deterministic planner submits a Plan, then the judge fails: the
+    turn still completes and the committed plan is queryable by its ID. The
+    queried plan_id must be the entity this turn newly persisted."""
+    from sqlalchemy import select
+
+    from app.api.deps import get_judge_dependencies, get_llm
+    from app.db.models import Plan
+    from app.db.session import session_scope
+
+    plan_llm = StubLLM(tokens=[], quiz_json=_D1_PLAN_JSON)
+    app.dependency_overrides[get_llm] = lambda: plan_llm
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM([TimeoutError("judge socket marker")]),
+        "same_model": False,
+    }
+
+    with session_scope() as session:
+        plan_ids_before = set(session.scalars(select(Plan.id)).all())
+
+    events = _stream_chat(client, "帮我做学习计划 on HyDE")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert "Read §1" in joined
+    assert joined.endswith(_UNAVAILABLE_SUFFIX)
+
+    plan = client.get("/api/plans/current", headers=_HEADERS)
+    assert plan.status_code == 200
+    assert [m["title"] for m in plan.json()["milestones"]] == [
+        "Read §1", "Practice", "Review",
+    ]
+
+    with session_scope() as session:
+        plan_ids_after = set(session.scalars(select(Plan.id)).all())
+    # The queried plan is the one this turn created — not just any non-empty id.
+    assert plan.json()["plan_id"] in plan_ids_after
+    assert plan.json()["plan_id"] not in plan_ids_before
+    assert plan_ids_after - plan_ids_before == {plan.json()["plan_id"]}
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == joined
+
+
+def test_chat_locked_gemini_wrapped_client_error_keeps_content_and_warns(
+    app, client, no_network
+):
+    """Real route + Graph + SSE + tmp SQLite, with the Judge raising the
+    locked langchain-google-genai SDK wrapper around google.genai ClientError.
+
+    The contract: one Tutor candidate, one Judge call, no regeneration, one
+    `done`, exactly one assistant row in history, body = streamed tokens + one
+    fixed warning, history re-readable with no payload marker. The synthetic
+    error message must never leak through any SSE event or persisted row.
+
+    The wrapper helper (`_handle_client_error`) is used unchanged: only the
+    production-judge class-name list is widened. No SDK module is imported
+    inside production_judge.py.
+    """
+    from langchain_google_genai.chat_models import (
+        ChatGoogleGenerativeAIError,
+        _handle_client_error,
+    )
+    from google.genai.errors import ClientError
+
+    from app.api.deps import get_judge_dependencies
+
+    raw = ClientError(
+        400,
+        {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                   "message": "D3-SYNTHETIC-GEMINI-ROUTE-MARKER"}},
+    )
+    try:
+        _handle_client_error(raw, {"model": "synthetic-gemini-model"})
+    except ChatGoogleGenerativeAIError as wrapped:
+        exception = wrapped
+
+    class BrokenJudge:
+        async def ainvoke(self, _messages, **_kwargs):
+            raise exception
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": BrokenJudge(),
+        "same_model": False,
+    }
+
+    events = _stream_chat(client, "What is HyDE?")
+
+    assert events[-1]["type"] == "done"
+    joined = _joined_tokens(events)
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+    assert joined.count("Self-check incomplete") == 1
+    judge_traces = _judge_trace_events(events)
+    assert judge_traces and judge_traces[-1].get("status") == "unavailable"
+    assert "D3-SYNTHETIC-GEMINI-ROUTE-MARKER" not in json.dumps(events)
+
+    body = client.get(
+        f"/api/chat/sessions/{_session_id(events)}/messages", headers=_HEADERS
+    ).json()
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == joined
+    assert "D3-SYNTHETIC-GEMINI-ROUTE-MARKER" not in json.dumps(body)
+
+
+def test_chat_quiz_grade_with_judge_factory_error_still_skips_deterministically(
+    app, client, no_network
+):
+    """A GRADE turn's deterministic skip takes priority over judge factory
+    failure: grading still happens, no unavailable treatment is applied, and
+    the judge trace marks the turn skipped."""
+    from app.api.deps import get_judge_dependencies
+
+    session_id = "d3-grade-factory-error"
+    first = _stream_chat(client, "quiz me on HyDE", session_id=session_id)
+    assert first[-1]["type"] == "done"
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": None,
+        "same_model": False,
+        "factory_error": "ConnectionError: Could not connect to the model service.",
+    }
+    second = _stream_chat(client, "A", session_id=session_id)
+
+    assert second[-1]["type"] == "done"
+    joined = _joined_tokens(second)
+    assert "Correct" in joined
+    assert _UNAVAILABLE_SUFFIX not in joined
+    judge_traces = _judge_trace_events(second)
+    assert judge_traces and judge_traces[-1].get("status") == "skipped"
+
+    body = client.get(
+        f"/api/chat/sessions/{session_id}/messages", headers=_HEADERS
+    ).json()
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 2  # one row per completed turn
+    assert assistant[-1]["content"] == joined

@@ -798,6 +798,9 @@ async def chat(
             "configurable": {
                 "thread_id": thread_id,
                 "judge_llm": judge["llm"],
+                # Controlled judge-factory failure signal only: a fixed safe
+                # classification produced by deps, never an exception object.
+                "judge_factory_error": judge.get("factory_error"),
                 "quiz_master": quiz_master,
                 "planner": planner,
                 "planner_agent": planner_agent,

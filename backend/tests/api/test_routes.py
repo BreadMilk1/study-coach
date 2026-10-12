@@ -2490,3 +2490,265 @@ def test_chat_agent_run_event_shapes_and_order_are_preserved(app, client):
 
     # No graph chunk was mutated in place.
     assert json.dumps(chunks, sort_keys=True) == snapshot
+
+
+# --- D3 RED: production judge policy through the real chat dependencies ------
+#
+# The chat route keeps using the real `get_graph` and `get_judge_dependencies`
+# here: RED expectations come from the legacy wiring, not from hand-built graph
+# signals. Judge payloads / model factory behavior are faked; no network.
+
+_UNAVAILABLE_SUFFIX = (
+    "\n\n---\n⚠️ Self-check incomplete: this content was kept, but the "
+    "quality check could not be completed."
+)
+_PROSE_VERDICT = "The answer looks well grounded and clearly cited."
+
+
+class _ScriptedJudgeLLM:
+    """Judge stub: each script entry is an AIMessage or an exception instance."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.call_count = 0
+
+    async def ainvoke(self, _messages, **_kwargs):
+        self.call_count += 1
+        item = self.script[min(self.call_count - 1, len(self.script) - 1)]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def test_get_judge_dependencies_factory_failure_returns_controlled_signal(
+    monkeypatch, deny_model_route_network
+):
+    """A judge-only construction failure is a controlled field, not an escape."""
+    from app.api.deps import get_judge_dependencies
+    from app.llm.provider import LLMConfig
+
+    def boom(_config):
+        raise ConnectionError("judge factory opaque marker")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", boom)
+
+    deps = get_judge_dependencies(
+        llm_config=LLMConfig(provider="ollama", model="gemma3:4b")
+    )
+
+    assert deps["llm"] is None
+    assert deps["factory_error"] == _SAFE_CONNECTION
+    assert deps["same_model"] is True
+
+
+def test_get_judge_dependencies_factory_failure_keeps_judge_target_and_same_model(
+    monkeypatch, deny_model_route_network
+):
+    from app.api.deps import get_judge_dependencies
+    from app.llm.provider import LLMConfig
+
+    captured = {}
+
+    def boom(config):
+        captured["config"] = config
+        raise ConnectionError("judge factory opaque marker")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", boom)
+
+    deps = get_judge_dependencies(
+        llm_config=LLMConfig(
+            provider="ollama", model="gemma3:4b", judge_model="qwen2.5:7b"
+        )
+    )
+
+    assert deps["llm"] is None
+    assert deps["same_model"] is False
+    assert deps["factory_error"] == _SAFE_CONNECTION
+    assert captured["config"].model == "qwen2.5:7b"
+
+
+def test_get_judge_dependencies_program_error_still_propagates(
+    monkeypatch, deny_model_route_network
+):
+    """A general RuntimeError is a program bug, not an availability signal."""
+    from app.api.deps import get_judge_dependencies
+    from app.llm.provider import LLMConfig
+
+    def boom(_config):
+        raise RuntimeError("program bug marker")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", boom)
+
+    with pytest.raises(RuntimeError):
+        get_judge_dependencies(
+            llm_config=LLMConfig(provider="ollama", model="gemma3:4b")
+        )
+
+
+def test_get_judge_dependencies_success_contract_unchanged(
+    monkeypatch, deny_model_route_network
+):
+    from app.api.deps import get_judge_dependencies
+    from app.llm.provider import LLMConfig
+
+    sentinel = object()
+    monkeypatch.setattr("app.llm.provider.get_chat_model", lambda _config: sentinel)
+
+    deps = get_judge_dependencies(
+        llm_config=LLMConfig(provider="ollama", model="gemma3:4b")
+    )
+
+    assert deps["llm"] is sentinel
+    assert deps["same_model"] is True
+    assert deps.get("factory_error") is None
+
+
+def test_chat_judge_request_failure_keeps_content_with_fixed_warning(
+    app, client, deny_model_route_network
+):
+    from app.api.deps import get_judge_dependencies
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM([TimeoutError("judge socket marker")]),
+        "same_model": False,
+    }
+
+    with client.stream(
+        "POST", "/api/chat", json={"message": "What is HyDE?"}, headers=_CHAT_HEADERS
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done"
+    joined = "".join(e["text"] for e in events if e["type"] == "token")
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+    assert joined.count("Self-check incomplete") == 1
+
+    judge_traces = [
+        e for e in events if e["type"] == "trace" and e.get("step") == "judge"
+    ]
+    assert judge_traces and judge_traces[-1].get("status") == "unavailable"
+
+    # The raw exception never crosses the SSE boundary.
+    assert "judge socket marker" not in json.dumps(events)
+
+    session_id = next(e["session_id"] for e in events if e["type"] == "session")
+    body = client.get(
+        f"/api/chat/sessions/{session_id}/messages", headers=_CHAT_HEADERS
+    ).json()
+    assert body["messages"][-1]["role"] == "assistant"
+    assert body["messages"][-1]["content"] == joined
+
+
+def test_chat_judge_invalid_payload_keeps_content_and_marks_unavailable(
+    app, client, deny_model_route_network
+):
+    from app.api.deps import get_judge_dependencies
+
+    app.dependency_overrides[get_judge_dependencies] = lambda: {
+        "llm": _ScriptedJudgeLLM([AIMessage(content=_PROSE_VERDICT)]),
+        "same_model": False,
+    }
+
+    with client.stream(
+        "POST", "/api/chat", json={"message": "What is HyDE?"}, headers=_CHAT_HEADERS
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done"
+    joined = "".join(e["text"] for e in events if e["type"] == "token")
+    # The legacy neutral pass would keep the bare content with no warning.
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+
+    judge_traces = [
+        e for e in events if e["type"] == "trace" and e.get("step") == "judge"
+    ]
+    assert judge_traces and judge_traces[-1].get("status") == "unavailable"
+
+
+def test_chat_judge_factory_failure_streams_content_with_fixed_warning(
+    app, client, monkeypatch, deny_model_route_network
+):
+    """A judge-only model factory failure must not abort the turn with a 500.
+
+    The real `get_judge_dependencies` runs with `x-judge-model` distinct from
+    the generator model, and the factory fails only for the judge target
+    config — so the test never depends on FastAPI dependency resolution order.
+    The controlled signal must let generation proceed with the fixed
+    self-check warning; the raw failure never reaches the client.
+    """
+    from app.api.deps import get_llm, get_judge_dependencies
+
+    app.dependency_overrides.pop(get_llm, None)
+    app.dependency_overrides.pop(get_judge_dependencies, None)
+
+    tutor_stub = StubLLM(tokens=["HyDE", " is", " a", " technique", "."])
+    judge_model = "d3-judge-target-model"
+    constructed: list[str] = []
+    judge_attempts: list[str] = []
+
+    def factory(config):
+        constructed.append(config.model)
+        if config.model == judge_model:
+            judge_attempts.append(config.model)
+            raise ConnectionError("judge factory opaque marker")
+        return tutor_stub
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", factory)
+
+    with client.stream(
+        "POST",
+        "/api/chat",
+        json={"message": "What is HyDE?"},
+        headers={**_CHAT_HEADERS, "x-judge-model": judge_model},
+    ) as resp:
+        assert resp.status_code == 200
+        events = _read_sse_events(resp)
+
+    # Both models were constructed; only the judge target failed, once.
+    assert "gemma3:4b" in constructed
+    assert judge_model in constructed
+    assert len(judge_attempts) == 1
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "done"
+    joined = "".join(e["text"] for e in events if e["type"] == "token")
+    assert joined == "HyDE is a technique." + _UNAVAILABLE_SUFFIX
+
+    assert "judge factory opaque marker" not in json.dumps(events)
+
+    session_id = next(e["session_id"] for e in events if e["type"] == "session")
+    body = client.get(
+        f"/api/chat/sessions/{session_id}/messages", headers=_CHAT_HEADERS
+    ).json()
+    assistant = [m for m in body["messages"] if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == joined
+    assert "judge factory opaque marker" not in json.dumps(body)
+
+
+def test_chat_main_llm_factory_failure_still_fails_closed(
+    app, client, monkeypatch, deny_model_route_network
+):
+    """Control: a main-generator factory failure keeps its existing boundary.
+
+    The failure propagates out of dependency resolution (the TestClient
+    surfaces it as the raised exception) — it must never be turned into a
+    controlled judge-style availability signal.
+    """
+    from app.api.deps import get_llm
+
+    app.dependency_overrides.pop(get_llm, None)
+
+    def boom(_config):
+        raise ConnectionError("main factory opaque marker")
+
+    monkeypatch.setattr("app.llm.provider.get_chat_model", boom)
+
+    with pytest.raises(ConnectionError):
+        client.post(
+            "/api/chat", json={"message": "What is HyDE?"}, headers=_CHAT_HEADERS
+        )

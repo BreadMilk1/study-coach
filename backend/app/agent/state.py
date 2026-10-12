@@ -21,7 +21,16 @@ class CoachState(TypedDict):
     citations: NotRequired[list[Citation]]
 
     # P2.1-② Judge Guard
-    judge_score: NotRequired[float]
+    # judge_score None means "no usable score this turn" (production
+    # unavailable/skipped); a float is a verified payload score.
+    judge_score: NotRequired[float | None]
+    # D3 production judge status: valid (payload legal — not provider
+    # completion evidence), unavailable (kept content + fixed warning), or
+    # skipped (deterministic GRADE / CHECK-IN turns).
+    judge_status: NotRequired[Literal["valid", "unavailable", "skipped"] | None]
+    # Fixed safe failure classification for unavailable turns (already
+    # normalize_llm_error-projected or a fixed sentence; never raw detail).
+    judge_error: NotRequired[str | None]
     retry_count: NotRequired[int]
     weak_dims: NotRequired[list[str]]
     judge_reasoning: NotRequired[str]
@@ -40,11 +49,13 @@ class CoachState(TypedDict):
     # P2.1-④ Quiz
     active_quiz_question_id: NotRequired[str | None]
     # Cut ④g: phase signal so Judge can skip the deterministic grade path.
-    quiz_action: NotRequired[Literal["generate", "grade"]]
+    # None (a cleared prior-turn phase) is a valid resting value: production
+    # turns reset it at the router and the consumer rewrites it.
+    quiz_action: NotRequired[Literal["generate", "grade"] | None]
 
     # P2.1-⑤ Plan
     active_plan_id: NotRequired[str | None]
-    plan_action: NotRequired[Literal["generate", "check_in"]]
+    plan_action: NotRequired[Literal["generate", "check_in"] | None]
 
     # P2.2 — agent loop instrumentation. Populated only when the agent_loop
     # planner mode is active; deterministic path leaves this field absent.

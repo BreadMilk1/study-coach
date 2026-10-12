@@ -22,14 +22,21 @@ Tutor node:
 - emits `citations` then per-token `{type:"token","text":...}` via get_stream_writer()
 - on retry (state.retry_count > 0), prepends a hint to the prompt with
   previous score + weak_dims so the LLM can self-correct (PDCA "Act")
+- production retry hint excludes the Judge's free reasoning; only the
+  verified score and fixed dimension names re-enter the prompt.
 
 Judge node (Guard):
 - pulls judge_llm from RunnableConfig.configurable so build_graph stays small
-- when no judge_llm configured, short-circuits to pass (baseline-friendly)
+- when no judge_llm configured, the legacy policy short-circuits to pass
+  (baseline-friendly); the production policy returns the kept-content +
+  fixed-warning unavailable update and skips the MemoryWriter.
 - rubric selected from state.intent (quiz vs tutor); quiz weak → degrade direct
 - tutor weak + retry_count < 2 → Command(goto="tutor", update={retry_count+1,...})
 - tutor weak + retry_count == 2 → degrade: append disclaimer, route to memory_writer
 - pass → memory_writer
+- the Judge's free reasoning is read locally for the validity gate only and
+  never lands in `state.judge_reasoning`, the trace, the retry hint, or any
+  persisted snapshot; the router clears `judge_reasoning` on every new turn.
 """
 
 from typing import Literal
@@ -47,6 +54,10 @@ from .judge import (
     load_quiz_rubric,
     load_tutor_rubric,
 )
+from .production_judge import (
+    NO_JUDGE_MODEL_REASON,
+    judge_response as production_judge_response,
+)
 from .prompt import TutorPromptTemplate
 from .router import route_intent
 from .state import CoachState
@@ -62,6 +73,14 @@ _PLAN_STUB_MESSAGE = (
     "Goal-driven study planning, milestone tracking, and review will land in P2.1-⑤.]"
 )
 _MAX_RETRIES = 2
+
+_JUDGE_POLICIES = ("legacy", "production_v1")
+
+# D3 production unavailable suffix (fixed product text, D3-CONTRACT.md §3).
+_UNAVAILABLE_SUFFIX = (
+    "\n\n---\n⚠️ Self-check incomplete: this content was kept, but the "
+    "quality check could not be completed."
+)
 
 
 class _ProductionTutorEventSink:
@@ -95,6 +114,21 @@ def _retry_hint(previous_score: float, weak_dims: list[str], reasoning: str) -> 
     )
 
 
+def _production_retry_hint(previous_score: float, weak_dims: list[str]) -> str:
+    """Production quality-retry hint: verified score + fixed dimension names.
+
+    The judge's free reasoning is deliberately never injected into the next
+    generation prompt (D3 production policy); the legacy hint keeps it.
+    """
+    dims_str = ", ".join(weak_dims) if weak_dims else "none"
+    return (
+        f"\n\n---\nPrevious attempt rating: previous_score={previous_score:.2f} "
+        f"(weak dimensions: {dims_str}). "
+        "Re-read the sources carefully and produce a more grounded, well-paced answer "
+        "for an exam-prep student. Address the weak dimensions specifically."
+    )
+
+
 def _degrade_disclaimer(score: float, weak_dims: list[str], retry_count: int = 0) -> str:
     dims_str = ", ".join(weak_dims) if weak_dims else "groundedness"
     after_clause = f" after {retry_count} retries" if retry_count > 0 else ""
@@ -105,7 +139,24 @@ def _degrade_disclaimer(score: float, weak_dims: list[str], retry_count: int = 0
     )
 
 
-def build_graph(*, retriever, llm, checkpointer=None, tutor_attempt_engine=None):
+def build_graph(
+    *,
+    retriever,
+    llm,
+    checkpointer=None,
+    tutor_attempt_engine=None,
+    judge_policy: Literal["legacy", "production_v1"] = "legacy",
+):
+    """Compile the coach graph.
+
+    `judge_policy` is an internal build parameter, not user configuration:
+    the default `legacy` keeps the historical Judge behavior byte-for-byte,
+    and only the production API construction (`app.api.deps.get_graph`)
+    selects `production_v1` for the strict Judge and failure policy.
+    """
+    if judge_policy not in _JUDGE_POLICIES:
+        raise ValueError(f"unsupported judge_policy: {judge_policy!r}")
+    production_policy = judge_policy == "production_v1"
     tutor_attempt_engine = tutor_attempt_engine or TutorAttemptEngine()
 
     def memory_hydrator_node(state: CoachState, config) -> dict:
@@ -147,6 +198,24 @@ def build_graph(*, retriever, llm, checkpointer=None, tutor_attempt_engine=None)
                 "active_quiz": state.get("active_quiz_question_id"),
                 "active_plan": state.get("active_plan_id")})
 
+        if production_policy:
+            # Every production new turn resets the judge-derived state and the
+            # retry budget at the router entry; internal quality retries do
+            # not pass through here again. Active plan/quiz ids are kept, and
+            # the previous turn's quiz/plan phase markers are cleared so the
+            # turn's real consumer rewrites them.
+            return {
+                "intent": intent,
+                "judge_score": None,
+                "judge_status": None,
+                "judge_error": None,
+                "weak_dims": [],
+                "judge_reasoning": "",
+                "retry_count": 0,
+                "degraded": False,
+                "quiz_action": None,
+                "plan_action": None,
+            }
         return {"intent": intent}
 
     async def tutor_node(state: CoachState) -> dict:
@@ -157,11 +226,18 @@ def build_graph(*, retriever, llm, checkpointer=None, tutor_attempt_engine=None)
         prompt_template = TutorPromptTemplate.production_v2()
         retry_count = state.get("retry_count", 0)
         if retry_count > 0:
-            prompt_template = prompt_template.with_suffix(_retry_hint(
-                previous_score=state.get("judge_score", 0.0),
-                weak_dims=list(state.get("weak_dims", [])),
-                reasoning=state.get("judge_reasoning", ""),
-            ))
+            if production_policy:
+                suffix = _production_retry_hint(
+                    previous_score=state.get("judge_score", 0.0),
+                    weak_dims=list(state.get("weak_dims", [])),
+                )
+            else:
+                suffix = _retry_hint(
+                    previous_score=state.get("judge_score", 0.0),
+                    weak_dims=list(state.get("weak_dims", [])),
+                    reasoning=state.get("judge_reasoning", ""),
+                )
+            prompt_template = prompt_template.with_suffix(suffix)
 
         candidate = await tutor_attempt_engine.answer(
             question=last_user,
@@ -247,12 +323,130 @@ def build_graph(*, retriever, llm, checkpointer=None, tutor_attempt_engine=None)
             return plan_stub_node(state)
         return await planner(state)
 
+    def _production_unavailable(state: CoachState, writer, reason: str):
+        """End the production turn with the kept-content unavailable policy.
+
+        The latest candidate is replaced in place — same message id, public
+        attributes preserved, fixed warning appended once — and the turn goes
+        straight to END: no score, no MemoryWriter, pending state cleared.
+        """
+        update = {
+            "judge_score": None,
+            "weak_dims": [],
+            "judge_reasoning": "",
+            "judge_status": "unavailable",
+            "judge_error": reason,
+            "degraded": True,
+            "pending_mastery_delta": {},
+            "pending_mistake": None,
+        }
+        ai_msgs = [m for m in state["messages"] if isinstance(m, AIMessage)]
+        if ai_msgs:
+            candidate = ai_msgs[-1]
+            update["messages"] = [AIMessage(
+                content=candidate.content + _UNAVAILABLE_SUFFIX,
+                id=candidate.id,
+                response_metadata=candidate.response_metadata,
+                additional_kwargs=candidate.additional_kwargs,
+            )]
+            writer({"type": "token", "text": _UNAVAILABLE_SUFFIX})
+        writer({"type": "trace", "step": "judge", "status": "unavailable",
+                "error": reason})
+        return Command(goto=END, update=update)
+
     async def judge_node(
         state: CoachState,
         config,
-    ) -> Command[Literal["tutor", "memory_writer"]]:
+    ) -> Command[Literal["tutor", "memory_writer", "__end__"]]:
         writer = get_stream_writer()
         configurable = (config or {}).get("configurable", {}) or {}
+
+        if production_policy:
+            intent = state.get("intent", "tutor")
+
+            # Deterministic outputs skip the judge first — before any judge
+            # factory-fault handling (contract ordering).
+            if intent == "quiz" and state.get("quiz_action") == "grade":
+                writer({"type": "trace", "step": "judge", "status": "skipped"})
+                return Command(
+                    goto="memory_writer", update={"judge_status": "skipped"}
+                )
+            if intent == "plan" and state.get("plan_action") == "check_in":
+                writer({"type": "trace", "step": "judge", "status": "skipped"})
+                return Command(
+                    goto="memory_writer", update={"judge_status": "skipped"}
+                )
+
+            # A controlled judge construction failure makes the self-check
+            # unavailable. A merely missing judge model is never mistaken for
+            # a skip or a pass in production either.
+            factory_error = configurable.get("judge_factory_error")
+            judge_llm = configurable.get("judge_llm")
+            if factory_error:
+                return _production_unavailable(state, writer, factory_error)
+            if judge_llm is None:
+                return _production_unavailable(state, writer, NO_JUDGE_MODEL_REASON)
+
+            user_msgs = [m for m in state["messages"] if isinstance(m, HumanMessage)]
+            question = user_msgs[-1].content if user_msgs else ""
+            ai_msgs = [m for m in state["messages"] if isinstance(m, AIMessage)]
+            answer = ai_msgs[-1].content if ai_msgs else ""
+            context = state.get("last_context", "")
+
+            if intent == "quiz":
+                rubric, dimensions = load_quiz_rubric(), QUIZ_DIMENSIONS
+            elif intent == "plan":
+                rubric, dimensions = load_plan_rubric(), PLAN_DIMENSIONS
+            else:
+                rubric, dimensions = load_tutor_rubric(), None
+
+            result = await production_judge_response(
+                question=question,
+                answer=answer,
+                context=context,
+                rubric=rubric,
+                judge_llm=judge_llm,
+                dimensions=dimensions,
+            )
+
+            if result["status"] == "unavailable":
+                return _production_unavailable(state, writer, result["reason"])
+
+            score = result["score"]
+            weak_dims = result["weak_dims"]
+            # `result["reasoning"]` is read for the local validity gate only;
+            # the production contract (D3-CONTRACT.md §3) forbids persisting
+            # the Judge's free reasoning, so it never enters the state, trace,
+            # retry hint, or message update. The router clears `judge_reasoning`
+            # on every new turn; the judge node simply does not write it back.
+            retry_count = state.get("retry_count", 0)
+            writer({"type": "trace", "step": "judge", "status": "valid",
+                    "score": score, "weak_dims": weak_dims, "retry": retry_count})
+
+            if result["verdict"] == "pass":
+                return Command(goto="memory_writer", update={
+                    "judge_score": score,
+                    "weak_dims": weak_dims,
+                    "judge_status": "valid",
+                })
+            if intent == "tutor" and retry_count < _MAX_RETRIES:
+                return Command(goto="tutor", update={
+                    "judge_score": score,
+                    "weak_dims": weak_dims,
+                    "judge_status": "valid",
+                    "retry_count": retry_count + 1,
+                })
+            # Retry budget exhausted (or non-tutor weak) -> degrade.
+            disclaimer = _degrade_disclaimer(score, weak_dims, retry_count)
+            writer({"type": "token", "text": disclaimer})
+            return Command(goto="memory_writer", update={
+                "judge_score": score,
+                "weak_dims": weak_dims,
+                "judge_status": "valid",
+                "degraded": True,
+                "messages": [AIMessage(content=answer + disclaimer)],
+            })
+
         judge_llm = configurable.get("judge_llm")
 
         # No judge configured -> baseline pass-through (keeps test_graph tests green).
