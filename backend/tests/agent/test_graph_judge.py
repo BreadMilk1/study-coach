@@ -230,3 +230,281 @@ async def test_judge_weak_path_executes_at_most_three_tutor_attempts():
     )
 
     assert attempt_engine.calls == 3
+
+
+# ---------------------------------------------------------------------------
+# D3 RED — production judge policy through the real production entry point.
+#
+# These tests build the graph via `app.api.deps.get_graph`, the construction
+# path the production API uses. RED stage: get_graph still builds the legacy
+# graph, so every production-policy expectation below fails against legacy
+# behavior (neutral 0.6 fallback on invalid payloads, stream truncation on
+# judge request errors, reasoning-bearing retry hints, no completion-signal
+# gate). Only the LLM and retriever are faked; no network access is allowed.
+# ---------------------------------------------------------------------------
+
+import socket
+
+from app.api.deps import get_graph
+
+_UNAVAILABLE_SUFFIX = (
+    "\n\n---\n⚠️ Self-check incomplete: this content was kept, but the "
+    "quality check could not be completed."
+)
+_PROSE_VERDICT = "The answer looks well grounded and clearly cited."
+_REASONING_MARKER = "HIDDEN-JUDGE-REASONING"
+_WEAK_WITH_REASONING = (
+    '{"relevance":2,"accuracy":2,"citation_quality":2,'
+    '"accessibility":2,"example_quality":2,"learner_level_fit":2,'
+    f'"reasoning":"{_REASONING_MARKER} ungrounded claims"}}'
+)
+_MISSING_DIM_JSON = (
+    '{"relevance":5,"accuracy":5,"citation_quality":4,'
+    '"example_quality":5,"learner_level_fit":5}'
+)
+
+
+class ScriptedJudgeLLM:
+    """Judge stub: each script entry is an AIMessage or an exception instance."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.call_count = 0
+
+    async def ainvoke(self, _messages, **_kwargs):
+        self.call_count += 1
+        item = self.script[min(self.call_count - 1, len(self.script) - 1)]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+@pytest.fixture
+def deny_network(monkeypatch):
+    """Fail immediately on any real DNS / outbound socket attempt."""
+
+    def deny(*_args, **_kwargs):
+        raise AssertionError("D3 RED test attempted real network access")
+
+    monkeypatch.setattr(socket, "getaddrinfo", deny)
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect_ex", deny)
+    monkeypatch.setattr(socket, "create_connection", deny)
+
+
+def test_network_guard_covers_real_socket_surface(deny_network):
+    probe = socket.socket()
+    try:
+        with pytest.raises(AssertionError):
+            socket.getaddrinfo("localhost", 80)
+        with pytest.raises(AssertionError):
+            probe.connect(("127.0.0.1", 80))
+        with pytest.raises(AssertionError):
+            probe.connect_ex(("127.0.0.1", 80))
+        with pytest.raises(AssertionError):
+            socket.create_connection(("127.0.0.1", 80))
+    finally:
+        probe.close()
+
+
+def _assert_unavailable(result, *, base_answer, llm, judge):
+    """The D3 unavailable contract for one tutor candidate."""
+    ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
+    assert ai_msgs[-1].content == base_answer + _UNAVAILABLE_SUFFIX
+    assert result.get("judge_score") is None
+    assert not result.get("weak_dims")
+    assert not result.get("judge_reasoning")
+    assert result.get("degraded", False) is True
+    # A judge fault is not a retry signal: exactly one candidate, one judge call.
+    assert llm.call_count == 1
+    assert judge.call_count == 1
+    assert result.get("retry_count", 0) == 0
+
+
+async def test_production_get_graph_judge_prose_payload_is_unavailable_not_neutral_pass(
+    deny_network,
+):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["HyDE is a query rewriting technique."])
+    judge = ScriptedJudgeLLM([AIMessage(content=_PROSE_VERDICT)])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="What is HyDE?")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    _assert_unavailable(
+        result, base_answer="HyDE is a query rewriting technique.", llm=llm, judge=judge
+    )
+
+
+async def test_production_get_graph_judge_missing_dimension_is_unavailable(deny_network):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["answer with a missing dim"])
+    judge = ScriptedJudgeLLM([AIMessage(content=_MISSING_DIM_JSON)])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    _assert_unavailable(
+        result, base_answer="answer with a missing dim", llm=llm, judge=judge
+    )
+
+
+async def test_production_get_graph_judge_request_failure_keeps_content_and_completes(
+    deny_network,
+):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["answer during judge outage"])
+    judge = ScriptedJudgeLLM([TimeoutError("judge socket marker")])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    _assert_unavailable(
+        result, base_answer="answer during judge outage", llm=llm, judge=judge
+    )
+
+
+async def test_production_get_graph_judge_failure_does_not_regenerate(deny_network):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["only candidate"])
+    judge = ScriptedJudgeLLM([TimeoutError("judge socket marker")])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    assert llm.call_count == 1
+    assert judge.call_count == 1
+    assert result.get("retry_count", 0) == 0
+    assert result.get("degraded", False) is True
+
+
+async def test_production_get_graph_negative_finish_reason_blocks_scoring(deny_network):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["truncated but well scored answer"])
+    judge = ScriptedJudgeLLM(
+        [AIMessage(content=_PASS, response_metadata={"finish_reason": "length"})]
+    )
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    _assert_unavailable(
+        result, base_answer="truncated but well scored answer", llm=llm, judge=judge
+    )
+
+
+async def test_production_get_graph_judge_tool_call_blocks_scoring(deny_network):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["answer with a stray tool call"])
+    judge = ScriptedJudgeLLM([
+        AIMessage(
+            content=_PASS,
+            tool_calls=[{"name": "lookup", "args": {}, "id": "c1"}],
+        )
+    ])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    _assert_unavailable(
+        result, base_answer="answer with a stray tool call", llm=llm, judge=judge
+    )
+
+
+async def test_production_get_graph_valid_weak_retry_hint_excludes_judge_reasoning(
+    deny_network,
+):
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["weak answer", "improved answer"])
+    judge = ScriptedJudgeLLM([AIMessage(content=_WEAK_WITH_REASONING), AIMessage(_PASS)])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    assert len(llm.prompts) == 2
+    retry_prompt = llm.prompts[1]
+    # The verified score and fixed dimension names stay in the hint...
+    assert "previous" in retry_prompt.lower()
+    # ...as the normalized 0..1 score (0.40), never the raw 2.0 rubric value.
+    assert "0.40" in retry_prompt
+    assert "2.0" not in retry_prompt
+    assert any(d in retry_prompt for d in (
+        "accuracy", "citation_quality", "relevance",
+        "accessibility", "example_quality", "learner_level_fit",
+    ))
+    # ...but the judge's free reasoning never re-enters the next prompt.
+    assert _REASONING_MARKER not in retry_prompt
+
+
+async def test_production_get_graph_judge_program_error_still_propagates(deny_network):
+    """A judge-side program bug is not an availability signal (control)."""
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["answer"])
+    judge = ScriptedJudgeLLM([RuntimeError("judge program bug marker")])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    with pytest.raises(RuntimeError):
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="q")]},
+            config={"configurable": {"judge_llm": judge}},
+        )
+
+
+async def test_production_get_graph_judge_cancellation_still_propagates(deny_network):
+    """Cancellation is a BaseException and must never become unavailable (control)."""
+    import asyncio
+
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["answer"])
+    judge = ScriptedJudgeLLM([asyncio.CancelledError()])
+    graph = get_graph(retriever=retriever, llm=llm, checkpointer=None)
+
+    with pytest.raises(asyncio.CancelledError):
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="q")]},
+            config={"configurable": {"judge_llm": judge}},
+        )
+
+
+async def test_legacy_build_graph_neutral_fallback_contract_unchanged(deny_network):
+    """Legacy control: `build_graph` (default policy) keeps the neutral fallback.
+
+    The RED above comes from the production entry point, not from a broken
+    legacy path; this control must stay green through GREEN.
+    """
+    retriever = StubRetriever(_CHUNKS)
+    llm = RecordingTutorLLM(["legacy answer"])
+    judge = ScriptedJudgeLLM([AIMessage(content=_PROSE_VERDICT)])
+    graph = build_graph(retriever=retriever, llm=llm)
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="q")]},
+        config={"configurable": {"judge_llm": judge}},
+    )
+
+    assert result.get("judge_score", 0.0) == pytest.approx(0.6)
+    assert result.get("degraded", False) is False
+    ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
+    assert ai_msgs[-1].content == "legacy answer"
+    assert _UNAVAILABLE_SUFFIX not in ai_msgs[-1].content

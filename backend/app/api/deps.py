@@ -130,20 +130,42 @@ def get_judge_dependencies(
 
     - x-judge-model set AND distinct from x-model → distinct judge LLM, same_model=False
     - otherwise → same LLM, same_model=True (caller surfaces self-preference warning)
+    - a judge-only model construction failure is returned as the controlled
+      ``factory_error`` field (normalize_llm_error projection) with ``llm``
+      None and ``same_model`` still computed from the configuration; the raw
+      exception never crosses this boundary. Program errors are not caught.
     """
+    from app.agent.production_judge import is_model_service_error
+    from app.llm.errors import normalize_llm_error
     from app.llm.provider import get_chat_model
+
     judge_target = llm_config.effective_judge_model()
     same_model = judge_target == llm_config.model
-    if same_model:
-        return {"llm": get_chat_model(llm_config), "same_model": True}
-    judge_cfg = LLMConfig(
-        provider=llm_config.provider,
-        model=judge_target,
-        api_key=llm_config.api_key,
-        base_url=llm_config.base_url,
-        judge_model=judge_target,
-    )
-    return {"llm": get_chat_model(judge_cfg), "same_model": False}
+    try:
+        if same_model:
+            return {"llm": get_chat_model(llm_config), "same_model": True}
+        judge_cfg = LLMConfig(
+            provider=llm_config.provider,
+            model=judge_target,
+            api_key=llm_config.api_key,
+            base_url=llm_config.base_url,
+            judge_model=judge_target,
+        )
+        return {"llm": get_chat_model(judge_cfg), "same_model": False}
+    except (ValueError, OSError) as exc:
+        return {
+            "llm": None,
+            "same_model": same_model,
+            "factory_error": normalize_llm_error(exc),
+        }
+    except Exception as exc:
+        if not is_model_service_error(exc):
+            raise
+        return {
+            "llm": None,
+            "same_model": same_model,
+            "factory_error": normalize_llm_error(exc),
+        }
 
 
 def get_graph(
@@ -152,7 +174,14 @@ def get_graph(
     checkpointer: Annotated[object, Depends(get_checkpointer)],
 ):
     from app.agent.graph import build_graph
-    return build_graph(retriever=retriever, llm=llm, checkpointer=checkpointer)
+    # Production Chat explicitly selects the strict judge policy; build_graph
+    # defaults to legacy so historical callers keep their behavior.
+    return build_graph(
+        retriever=retriever,
+        llm=llm,
+        checkpointer=checkpointer,
+        judge_policy="production_v1",
+    )
 
 
 def get_quiz_master(
