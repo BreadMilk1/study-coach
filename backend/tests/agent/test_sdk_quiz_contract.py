@@ -20,7 +20,6 @@ Case map: Q1-Q3 deterministic GENERATE, Q4-Q10 agent loop.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import json
 import sys
@@ -65,6 +64,7 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (frozen, read-only)
     deny_sockets,
     offline_env,
     offline_openai,
+    reclaim_own_task,
     send,
     wait_for,
 )
@@ -407,14 +407,6 @@ def build_loop(session, llm, *, retriever=None, max_iter: int = 6):
         now_fn=lambda: NOW,
         max_iter=max_iter,
     )
-
-
-async def reclaim_own_task(task, *, timeout: float = 5.0) -> None:
-    """Cancel and bounded-await only this test's own task."""
-    if not task.done():
-        task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=timeout)
 
 
 # ===========================================================================

@@ -18,7 +18,6 @@ two soft-degradation triggers, so the file holds 11 test functions.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import json
 import sys
@@ -59,6 +58,7 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (frozen, read-only)
     deny_sockets,
     offline_env,
     offline_openai,
+    reclaim_own_task,
     send,
     wait_for,
 )
@@ -504,19 +504,6 @@ def build_node(session, llm, *, retriever=None):
         retriever=retriever if retriever is not None else SyntheticRetriever(),
         now_fn=lambda: NOW,
     )
-
-
-async def reclaim_own_task(task, *, timeout: float = 5.0) -> None:
-    """Cancel and bounded-await only this test's own task.
-
-    Consumes only the ``CancelledError`` this cleanup itself caused; any other
-    exception the task raised propagates, and a cleanup that does not finish
-    inside ``timeout`` raises instead of being left dangling for teardown.
-    """
-    if not task.done():
-        task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=timeout)
 
 
 # ===========================================================================

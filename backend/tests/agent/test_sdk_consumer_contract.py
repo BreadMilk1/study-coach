@@ -22,7 +22,6 @@ means "the payload was legal", never "the provider really scored it".
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 import sysconfig
@@ -42,6 +41,7 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (frozen, read-only)
     deny_sockets,
     fail_with,
     offline_openai,
+    reclaim_own_task,
     send,
     sse_event,
     wait_for,
@@ -481,20 +481,6 @@ class RecordingEventSink:
 
     def traces(self) -> list[dict]:
         return [e for e in self.events if e.get("type") == "trace"]
-
-
-async def reclaim_own_task(task: asyncio.Task, *, timeout: float = 5.0) -> None:
-    """Cancel and bounded-await *this test's own* task, without hiding anything.
-
-    Only the ``CancelledError`` this cleanup itself caused is consumed. Any
-    other exception the task raised is re-raised untouched, and a task that does
-    not finish within ``timeout`` raises ``TimeoutError`` instead of being left
-    dangling for pytest teardown to deal with.
-    """
-    if not task.done():
-        task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=timeout)
 
 
 class CloseObservingBody(ScriptedByteStream):
@@ -1352,6 +1338,100 @@ def graph_unavailable_suffix() -> str:
     from app.agent.graph import _UNAVAILABLE_SUFFIX
 
     return _UNAVAILABLE_SUFFIX
+
+
+# ---------------------------------------------------------------------------
+# Pure-asyncio mechanism check for the shared `reclaim_own_task` this file now
+# imports instead of its own deleted duplicate.
+#
+# IMPORTANT: this case is **not** consumer or SDK evidence. It uses plain asyncio
+# primitives only -- no provider, no SDK transport, no socket, no database. Its
+# only subject is the bounded cleanup contract every scenario above relies on
+# from its `finally` block, and it neither replaces nor weakens any of them.
+# ---------------------------------------------------------------------------
+
+
+async def test_meta_reclaim_own_task_fails_fast_on_a_permanent_cancellation_swallow():
+    """A task that swallows cancellation forever must fail fast, not hang.
+
+    The old file-local duplicate bounded itself with ``asyncio.wait_for(task,
+    timeout=...)``. On a target that refuses to die, ``wait_for`` cancels and
+    then awaits that target *unbounded*, so the cleanup -- and with it the whole
+    pytest process -- would hang until the 180s process limit. The shared helper
+    instead uses ``asyncio.wait``, which returns on its own deadline whatever
+    the target does, and fails with a precise ``AssertionError``.
+
+    The proof is deliberately external to the helper: the cleanup runs as its own
+    task and is watched by an *independent* ``asyncio.wait`` with a far larger
+    budget. That observer never cancels anything, so it cannot manufacture the
+    cancellation under test, and it cannot rescue the helper either -- if the
+    helper regressed to a waiting-for-doom cleanup, the observer returns with the
+    cleanup still pending and the assertion below fails instead of hanging.
+    """
+    START_BUDGET = 5.0
+    RECLAIM_WINDOW = 0.2  # the helper's own short window, this case only
+    OBSERVE_BUDGET = 5.0  # must be far larger than RECLAIM_WINDOW
+    FINAL_BUDGET = 5.0
+
+    started = asyncio.Event()
+    swallowed = asyncio.Event()
+    # Never set inside the body: it is the test's own gate, and releasing it is
+    # the only way this stubborn task can ever finish.
+    own_gate = asyncio.Event()
+
+    async def stubborn():
+        started.set()
+        while True:
+            try:
+                await own_gate.wait()
+            except asyncio.CancelledError:
+                swallowed.set()  # deliberately keep ignoring cancellations
+                continue
+            return
+
+    victim = asyncio.create_task(stubborn())
+    cleanup = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=START_BUDGET)
+
+        cleanup = asyncio.create_task(reclaim_own_task(victim, timeout=RECLAIM_WINDOW))
+
+        done, pending = await asyncio.wait({cleanup}, timeout=OBSERVE_BUDGET)
+        assert not pending, (
+            "reclaim_own_task must fail its bounded window instead of waiting "
+            "for a task that never settles"
+        )
+        assert cleanup in done
+
+        exc = cleanup.exception()
+        assert type(exc) is AssertionError, (
+            f"a bounded-cleanup failure must be exactly AssertionError, got {exc!r}"
+        )
+        assert str(exc) == "test-owned task did not settle within the bounded cleanup window"
+
+        # The failure is genuinely about the stubborn task, not an early exit:
+        # it really was cancelled, really swallowed that, and is still running.
+        await asyncio.wait_for(swallowed.wait(), timeout=START_BUDGET)
+        assert victim.cancelling() == 1, "exactly one cancellation was requested"
+        assert not victim.done(), "the stubborn task must still be pending"
+        assert victim.cancelled() is False
+    finally:
+        # Releasing our own gate is what lets the stubborn task finish. Both
+        # test-owned tasks are then reclaimed under one more bounded wait, so
+        # this case cannot leave a pending task behind for pytest teardown even
+        # when an assertion above failed.
+        own_gate.set()
+        targets = {t for t in (victim, cleanup) if t is not None}
+        _done, still_pending = await asyncio.wait(targets, timeout=FINAL_BUDGET)
+
+    # Asserted after the finally so a body failure is never masked by cleanup.
+    assert not still_pending, (
+        f"test-owned tasks must all settle in finally; still pending: {still_pending}"
+    )
+    assert victim.done() and victim.cancelled() is False, (
+        "releasing the gate must let the stubborn task finish normally"
+    )
+    assert cleanup is not None and cleanup.done()
 
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,6 @@ current behaviour and asserts no product change.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import sys
 import sysconfig
@@ -60,6 +59,7 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (frozen, read-only)
     deny_sockets,
     fail_with,
     offline_openai,
+    reclaim_own_task,
     send,
     sse_event,
     wait_for,
@@ -519,20 +519,6 @@ def first_index(events: list[dict], event_type: str) -> int:
         if event.get("type") == event_type:
             return index
     raise AssertionError(f"no {event_type!r} event in {event_types(events)}")
-
-
-async def reclaim_own_task(task: asyncio.Task, *, timeout: float = 5.0) -> None:
-    """Cancel and bounded-await *this test's own* task, without hiding anything.
-
-    Only the ``CancelledError`` this cleanup itself caused is consumed. Any
-    other exception the task raised is re-raised untouched, and a task that
-    does not finish in ``timeout`` raises ``TimeoutError`` rather than being
-    left dangling for pytest teardown.
-    """
-    if not task.done():
-        task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
