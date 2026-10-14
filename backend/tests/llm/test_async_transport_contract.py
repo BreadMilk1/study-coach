@@ -39,8 +39,10 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (autouse fixtures)
     backend_root,
     deny_sockets,
     fail_with,
+    observe_explicit_cancellation,
     offline_env,
     offline_openai,
+    reclaim_own_task,
     send,
     sse_event,
     wait_for,
@@ -735,14 +737,18 @@ async def test_cancel_active_ainvoke_propagates_without_replay(offline_openai):
     model = offline_openai.model()
 
     task = asyncio.create_task(model.ainvoke("ping"))
-    # Wait for the body to actually start being read; no sleep-based guessing.
-    await asyncio.wait_for(body.started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        # Wait for the body to actually start being read; no sleep-based guessing.
+        await asyncio.wait_for(body.started.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_openai.requests) == 1
-    assert body.close_count >= 1, "response created before cancellation must close"
+        # Business assertions run while the gate is still unset and before the
+        # fixture can close the client, so nothing here is cleanup evidence.
+        assert len(offline_openai.requests) == 1
+        assert body.close_count >= 1, "response created before cancellation must close"
+    finally:
+        await reclaim_own_task(task, gate=gate)
 
 
 async def test_cancel_astream_before_first_chunk(offline_openai):
@@ -758,14 +764,16 @@ async def test_cancel_astream_before_first_chunk(offline_openai):
             received.append(chunk)
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(body.started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(body.started.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_openai.requests) == 1
-    assert received == []
-    assert body.close_count >= 1
+        assert len(offline_openai.requests) == 1
+        assert received == []
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
 
 
 async def test_cancel_astream_after_first_chunk_keeps_prefix(offline_openai):
@@ -787,14 +795,16 @@ async def test_cancel_astream_after_first_chunk_keeps_prefix(offline_openai):
             first_chunk_seen.set()
 
     task = asyncio.create_task(consume_and_signal())
-    await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_openai.requests) == 1
-    assert "".join(c.content for c in received) == "first"
-    assert body.close_count >= 1
+        assert len(offline_openai.requests) == 1
+        assert "".join(c.content for c in received) == "first"
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
 
 
 # ---------------------------------------------------------------------------
@@ -874,3 +884,80 @@ async def test_stream_without_finish_metadata_still_yields_text(
 
     assert len(offline_openai.requests) == 1
     assert "".join(c.content for c in chunks) == "text"
+
+
+# ---------------------------------------------------------------------------
+# 12. Pure-asyncio mechanism checks for the cancellation helpers.
+#
+# IMPORTANT: these two cases are **not** SDK evidence. They exercise the
+# test-owned `observe_explicit_cancellation` / `reclaim_own_task` helpers with
+# plain asyncio primitives only -- no SDK, no adapter, no transport, no socket.
+# They exist so the bounded observation cannot silently regress into "wait
+# forever" or "swallow the timeout", and they do not replace or weaken any of
+# the twelve real SDK cancellation cases above.
+# ---------------------------------------------------------------------------
+
+
+async def test_meta_explicit_cancel_keeps_exact_cancelled_error_and_state():
+    """A normal explicit cancel keeps the exact CancelledError + cancelled state."""
+    started = asyncio.Event()
+    parked_gate = asyncio.Event()
+
+    async def victim():
+        started.set()
+        await parked_gate.wait()
+
+    task = asyncio.create_task(victim())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        exc = await observe_explicit_cancellation(task, timeout=5)
+        assert type(exc) is asyncio.CancelledError
+        assert task.cancelled() is True
+    finally:
+        await reclaim_own_task(task, gate=parked_gate, timeout=5)
+
+
+async def test_meta_swallowed_cancel_times_out_without_second_cancel():
+    """A task that swallows the first cancel: bounded TimeoutError, no 2nd cancel.
+
+    The task catches ``CancelledError`` once and then parks on a gate that stays
+    unset, which is exactly the failure shape the bounded observation exists to
+    catch. The local deadline must raise ``TimeoutError`` rather than count as
+    the expected cancellation, and ``shield`` must not have cancelled the target
+    a second time -- proven with ``Task.cancelling()``, which stays at 1.
+    """
+    started = asyncio.Event()
+    swallowed = asyncio.Event()
+    parked_gate = asyncio.Event()
+
+    async def stubborn():
+        started.set()
+        try:
+            await parked_gate.wait()
+        except asyncio.CancelledError:
+            swallowed.set()  # deliberately ignore the first cancellation
+            await parked_gate.wait()  # park again; this task never completes
+
+    task = asyncio.create_task(stubborn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        await asyncio.wait_for(swallowed.wait(), timeout=5)
+        assert task.cancelling() == 1, "exactly one cancellation was requested"
+
+        with pytest.raises(asyncio.TimeoutError):
+            # Short local deadline for the meta case only; the twelve real SDK
+            # cases keep their own 5 second budget.
+            await observe_explicit_cancellation(task, timeout=0.2)
+
+        assert not task.done(), "the stubborn task must still be pending"
+        assert task.cancelling() == 1, (
+            "the bounded observation must not cancel the target a second time"
+        )
+    finally:
+        # Releasing the gate lets the pending task finish, so the bounded
+        # reclaim can complete instead of hanging the whole pytest process.
+        await reclaim_own_task(task, gate=parked_gate, timeout=5)
+
+    assert task.done(), "the reclaimed task must have settled"

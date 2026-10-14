@@ -40,6 +40,8 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (shared, read-only)
     assert_module_from_backend,
     deny_sockets,
     fail_with,
+    observe_explicit_cancellation,
+    reclaim_own_task,
     send,
     wait_for,
 )
@@ -659,13 +661,18 @@ async def test_cancel_active_ainvoke_reading_body(offline_ollama):
     model = offline_ollama.model()
 
     task = asyncio.create_task(model.ainvoke("ping"))
-    await asyncio.wait_for(body.started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(body.started.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_ollama.requests) == 1
-    assert body.close_count >= 1
+        # Business assertions run while the gate is still unset and before
+        # the fixture can close the client, so none of them is cleanup evidence.
+        assert len(offline_ollama.requests) == 1
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
+
 
 
 async def test_cancel_astream_before_first_content(offline_ollama):
@@ -683,14 +690,19 @@ async def test_cancel_astream_before_first_content(offline_ollama):
             received.append(chunk)
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(body.started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(body.started.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_ollama.requests) == 1
-    assert received == []
-    assert body.close_count >= 1
+        # Business assertions run while the gate is still unset and before
+        # the fixture can close the client, so none of them is cleanup evidence.
+        assert len(offline_ollama.requests) == 1
+        assert received == []
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
+
 
 
 async def test_cancel_astream_after_first_content_keeps_prefix(offline_ollama):
@@ -714,14 +726,19 @@ async def test_cancel_astream_after_first_content_keeps_prefix(offline_ollama):
                 first_content_seen.set()
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(first_content_seen.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(first_content_seen.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_ollama.requests) == 1
-    assert "".join(c.content for c in received if isinstance(c.content, str)) == "first"
-    assert body.close_count >= 1
+        # Business assertions run while the gate is still unset and before
+        # the fixture can close the client, so none of them is cleanup evidence.
+        assert len(offline_ollama.requests) == 1
+        assert "".join(c.content for c in received if isinstance(c.content, str)) == "first"
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
+
 
 
 # ---------------------------------------------------------------------------

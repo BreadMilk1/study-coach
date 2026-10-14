@@ -134,6 +134,78 @@ def sse_event(payload: str, *, event: str | None = None) -> bytes:
 DONE_EVENT = b"data: [DONE]\n\n"
 
 
+# ---------------------------------------------------------------------------
+# Bounded, test-owned cancellation observation and reclaim.
+#
+# These two helpers are deliberately narrow: they observe a cancellation the
+# test itself requested, and they reclaim a task the test itself created. They
+# are not a retry policy, a timeout policy, or a way to force any coroutine to
+# stop -- an SDK that ignores cancellation entirely is still bounded only by the
+# outer 180s process wall clock.
+# ---------------------------------------------------------------------------
+
+
+async def observe_explicit_cancellation(
+    task: "asyncio.Task[None]", *, timeout: float = 5.0
+) -> asyncio.CancelledError:
+    """Require the exact ``CancelledError`` from a task the test cancelled.
+
+    ``asyncio.shield`` is what makes this a *bounded observation* rather than a
+    second cancellation: the timeout applies to this awaiting coroutine and can
+    never be delivered to the task under test. A ``TimeoutError`` here means the
+    task did not settle within ``timeout`` and must fail the case -- it is never
+    treated as the expected cancellation. A task that swallows the cancellation
+    and returns normally fails too, by falling through to the final ``raise``.
+    """
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.CancelledError as exc:
+        assert type(exc) is asyncio.CancelledError, (
+            "the cancellation must be exactly asyncio.CancelledError"
+        )
+        assert task.cancelled(), "the cancelled task must end in the cancelled state"
+        return exc
+    raise AssertionError(
+        "the cancelled task completed normally instead of raising CancelledError"
+    )
+
+
+async def reclaim_own_task(
+    task: "asyncio.Task[None]",
+    *,
+    gate: asyncio.Event | None = None,
+    timeout: float = 5.0,
+) -> None:
+    """Bounded reclaim of a task this test created, after its assertions ran.
+
+    This is cleanup only. It releases the caller's own ``gate`` and, if the task
+    is still running, cancels it once more -- neither action may ever be counted
+    as the cancellation under test, which is why this is called from ``finally``
+    after every business assertion has already been made.
+
+    ``asyncio.wait`` observes ``done``/``pending`` without cancelling anything
+    itself, so it never manufactures a second cancellation to hide a hung task.
+    A task still pending after ``timeout`` fails the case. Only the
+    ``CancelledError`` this cleanup itself may cause is consumed; any other
+    exception the task raised is re-raised untouched, so a real failure under
+    test is still reported instead of being turned into a pass.
+    """
+    if gate is not None:
+        gate.set()
+    if not task.done():
+        task.cancel()
+    _done, pending = await asyncio.wait({task}, timeout=timeout)
+    if pending:
+        raise AssertionError(
+            "test-owned task did not settle within the bounded cleanup window"
+        )
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        raise exc
+
+
 class ScriptedByteStream(httpx.AsyncByteStream):
     """A deterministic response body whose every step is explicit.
 

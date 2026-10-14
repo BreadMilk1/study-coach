@@ -40,6 +40,8 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (shared, read-only)
     assert_module_from_backend,
     deny_sockets,
     fail_with,
+    observe_explicit_cancellation,
+    reclaim_own_task,
     send,
     sse_event,
     wait_for,
@@ -941,13 +943,18 @@ async def test_cancel_active_ainvoke_reading_body(offline_anthropic):
     model = offline_anthropic.model()
 
     task = asyncio.create_task(model.ainvoke("ping"))
-    await asyncio.wait_for(body.started.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(body.started.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_anthropic.requests) == 1
-    assert body.close_count >= 1, "response created before cancellation must close"
+        # Business assertions run while the gate is still unset and before
+        # the fixture can close the client, so none of them is cleanup evidence.
+        assert len(offline_anthropic.requests) == 1
+        assert body.close_count >= 1, "response created before cancellation must close"
+    finally:
+        await reclaim_own_task(task, gate=gate)
+
 
 
 async def test_cancel_astream_before_first_content(offline_anthropic):
@@ -973,16 +980,21 @@ async def test_cancel_astream_before_first_content(offline_anthropic):
             first_chunk_seen.set()
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(first_chunk_seen.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_anthropic.requests) == 1
-    assert "".join(c.content for c in received if isinstance(c.content, str)) == "", (
-        "only metadata frames were delivered before cancellation"
-    )
-    assert body.close_count >= 1
+        # Business assertions run while the gate is still unset and before
+        # the fixture can close the client, so none of them is cleanup evidence.
+        assert len(offline_anthropic.requests) == 1
+        assert "".join(c.content for c in received if isinstance(c.content, str)) == "", (
+            "only metadata frames were delivered before cancellation"
+        )
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
+
 
 
 async def test_cancel_astream_after_first_content_keeps_prefix(offline_anthropic):
@@ -1008,14 +1020,19 @@ async def test_cancel_astream_after_first_content_keeps_prefix(offline_anthropic
                 first_content_seen.set()
 
     task = asyncio.create_task(consume())
-    await asyncio.wait_for(first_content_seen.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(first_content_seen.wait(), timeout=5)
+        task.cancel()
+        await observe_explicit_cancellation(task, timeout=5)
 
-    assert len(offline_anthropic.requests) == 1
-    assert "".join(c.content for c in received if isinstance(c.content, str)) == "first"
-    assert body.close_count >= 1
+        # Business assertions run while the gate is still unset and before
+        # the fixture can close the client, so none of them is cleanup evidence.
+        assert len(offline_anthropic.requests) == 1
+        assert "".join(c.content for c in received if isinstance(c.content, str)) == "first"
+        assert body.close_count >= 1
+    finally:
+        await reclaim_own_task(task, gate=gate)
+
 
 
 # ---------------------------------------------------------------------------
