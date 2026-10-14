@@ -226,31 +226,170 @@ def request_json(request: httpx.Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Expected prompt bodies.
+# Expected prompt bodies -- INDEPENDENT oracle.
 #
-# These are rendered by the same frozen production builders the consumers call,
-# from this file's synthetic inputs. Nothing here compares an observed prompt
-# with itself: the expectation is built before the request is sent, and a
-# mismatch names the whole rendered prompt.
+# These expectations deliberately do NOT share a source with the code under
+# test. They are built from the two explicit golden constants registered below,
+# plus this file's own synthetic fixture values. Nothing here calls
+# ``TutorPromptTemplate.render``, ``TutorPromptTemplate.production_v2``,
+# ``load_tutor_rubric`` or ``format_context``, and nothing is read from the
+# production template or rubric file at import time. If the production
+# template, the rubric text or the formatter changes, these expectations stay
+# put and the comparison below fails -- which is the whole point of an anchor.
+#
+# The production builders remain in use for the *actual* side (the real consumer
+# under test) at their original call sites; only the expectation side changed.
 # ---------------------------------------------------------------------------
+
+# Verbatim baseline of ``app.agent.prompt.SYSTEM_INSTRUCTION`` as of the D4
+# accepted state. Registered here as a literal on purpose.
+TUTOR_SYSTEM_INSTRUCTION_GOLDEN = (
+    "You are a study coach answering questions based ONLY on the provided sources. "
+    "Cite each fact you use with [N] referring to the source list. "
+    "If the sources do not contain the answer, say you don't know — do not fabricate."
+)
+
+# Verbatim baseline of the source-list line format, and of the text used when a
+# retrieval returns nothing. Both are literals, not calls into production.
+TUTOR_SOURCE_LINE_GOLDEN = "[{index}] {source} p.{page}: {content}"
+TUTOR_EMPTY_CONTEXT_GOLDEN = "(no relevant sources retrieved)"
+
+# Verbatim baseline of ``app/agent/prompts/judge_tutor.txt`` as of the D4
+# accepted state, INCLUDING every few-shot example (A, B, C and D) and the
+# escaped braces of the JSON output block. It is formatted with the standard
+# library ``str.format`` against this file's own test data below.
+JUDGE_RUBRIC_GOLDEN = """You are an impartial Study Coach judge. Your job: rate a Tutor's answer to a student question.
+
+**Question**: {question}
+
+**Available Context** (the only material the Tutor should rely on):
+{context}
+
+**Tutor's Answer to Evaluate**:
+{answer}
+
+---
+
+## Bias-aware instruction (read first)
+
+Evaluate the answer **critically**. Do NOT give high scores merely because the answer matches your style, vocabulary, or training distribution. Be especially harsh when the answer is fluent but ungrounded, or when it sounds confident without citing the available context. Self-preference bias is real — actively counteract it.
+
+---
+
+## Rubric
+
+Rate each dimension from 1 to 5 (integer). All six dimensions are weighted equally — do not collapse pedagogical aspects into a single judgment.
+
+### Grounding (3)
+
+1. **relevance** (1-5): Does the answer directly address the question?
+2. **accuracy** (1-5): Is the information accurate **and grounded in the Available Context**? Generally-true but unsupported claims cap at 3.
+3. **citation_quality** (1-5): Are sources properly cited (e.g. `[N]`, source name, page)? Source names sufficient; page numbers a bonus.
+
+### Pedagogy (3 — rate INDEPENDENTLY, do NOT average)
+
+4. **accessibility** (1-5): How readable is the explanation for the target student?
+   - 1 = heavy unexplained jargon, opaque
+   - 3 = some unexplained terms but mostly readable
+   - 5 = plain language; any necessary jargon is defined or scaffolded
+5. **example_quality** (1-5): Are concrete examples or analogies given that aid understanding?
+   - 1 = no example at all
+   - 3 = vague or off-topic example
+   - 5 = a vivid, on-topic example that makes the concept click
+6. **learner_level_fit** (1-5): Is the depth pitched at an exam-prep student (undergrad / postgrad revising)?
+   - 1 = too shallow (oversimplified) OR too deep (research-level)
+   - 3 = approximately right but uneven
+   - 5 = pitched precisely for someone preparing for an exam
+
+**Important**: an answer with vivid examples (example_quality=5) BUT heavy jargon (accessibility=2) must still get accessibility=2 — do NOT inflate it because the example is good. Mixing aspects defeats the diagnostic value of separate dimensions.
+
+---
+
+## Few-shot calibration
+
+Example A (well-grounded, well-paced):
+- Question: "What is prompt engineering?"
+- Context: "[1] Prompt engineering is the practice of designing inputs to elicit desired outputs from LLMs."
+- Answer: "Prompt engineering is the practice of designing inputs to get useful outputs from large language models, as the source describes [1]. For exam revision, think of it like writing very precise instructions to a smart-but-literal assistant."
+- Scores: relevance=5, accuracy=5, citation_quality=4, accessibility=5, example_quality=5, learner_level_fit=5
+
+Example B (fluent but ungrounded — should score low on grounding even though it reads well):
+- Question: "What is prompt engineering?"
+- Context: "[1] Prompt engineering is the practice of designing inputs to elicit desired outputs from LLMs."
+- Answer: "Prompt engineering was pioneered by OpenAI in 2020 and forms the basis of modern AI alignment."
+- Scores: relevance=3, accuracy=1, citation_quality=1, accessibility=4, example_quality=1, learner_level_fit=3
+
+Example C (correct but over-jargon — accessibility must call this out independently):
+- Question: "What is BM25?"
+- Context: "[1] BM25 is a lexical retrieval method that ranks documents by term frequency and inverse document frequency."
+- Answer: "BM25 is an Okapi-family probabilistic ranking function leveraging IDF-weighted TF saturation with document-length normalisation."
+- Scores: relevance=5, accuracy=4, citation_quality=2, accessibility=1, example_quality=1, learner_level_fit=2
+
+Example D (good examples but lazy on grounding — pedagogy & grounding must diverge):
+- Question: "What is BM25?"
+- Context: "[1] BM25 is a lexical retrieval method that ranks documents by term frequency and inverse document frequency."
+- Answer: "BM25 is like a librarian who finds books by counting how often your keywords appear and how rare those keywords are across the whole shelf — think 'cat' vs 'the'. It's the classic keyword search algorithm."
+- Scores: relevance=5, accuracy=4, citation_quality=1, accessibility=5, example_quality=5, learner_level_fit=5
+
+---
+
+## Output format
+
+Output **only** valid JSON, nothing else (no markdown fences, no prose preamble):
+
+{{
+    "relevance": <1-5>,
+    "accuracy": <1-5>,
+    "citation_quality": <1-5>,
+    "accessibility": <1-5>,
+    "example_quality": <1-5>,
+    "learner_level_fit": <1-5>,
+    "reasoning": "<one or two sentences citing the weakest dimension>"
+}}\n"""
 
 
 def expected_tutor_prompt(chunks: list[dict]) -> str:
-    """The exact user content the Tutor must put on the wire for ``chunks``."""
-    return TutorPromptTemplate.production_v2().render(SYNTHETIC_QUESTION, chunks)
+    """The exact user content the Tutor must put on the wire for ``chunks``.
+
+    Assembled from the literal goldens above and this file's own synthetic
+    chunk inputs. This intentionally re-derives the layout instead of calling
+    the production renderer, so a production template drift cannot silently
+    move the expectation with it.
+    """
+    if not chunks:
+        source_block = TUTOR_EMPTY_CONTEXT_GOLDEN
+    else:
+        source_block = "\n\n".join(
+            TUTOR_SOURCE_LINE_GOLDEN.format(
+                index=index,
+                source=chunk["source"],
+                page=chunk["page"],
+                content=chunk["content"],
+            )
+            for index, chunk in enumerate(chunks, start=1)
+        )
+    return (
+        f"{TUTOR_SYSTEM_INSTRUCTION_GOLDEN}\n\n"
+        f"Sources:\n{source_block}\n\n"
+        f"Question: {SYNTHETIC_QUESTION}"
+    )
 
 
 def expected_judge_prompt(*, answer: str, context: str) -> str:
     """The exact user content the production Judge must put on the wire."""
-    return load_tutor_rubric().format(
+    return JUDGE_RUBRIC_GOLDEN.format(
         question=SYNTHETIC_QUESTION, answer=answer, context=context
     )
 
 
 # The Judge's inputs are fixed by ``_run_judge`` below, so the expected rubric
 # prompt is fixed too and every J case (including every retry) checks against it.
+# ``JUDGE_CONTEXT`` is the literal rendering of the single chunk the Judge sees,
+# written out here rather than produced by the production ``format_context``.
 JUDGE_ANSWER = "Synthetic answer body."
-JUDGE_CONTEXT = format_context([SYNTHETIC_CHUNK_A])
+JUDGE_CONTEXT = (
+    "[1] synthetic-retrieval.pdf p.1: Synthetic note about reciprocal rank fusion."
+)
 EXPECTED_JUDGE_PROMPT = expected_judge_prompt(
     answer=JUDGE_ANSWER, context=JUDGE_CONTEXT
 )
@@ -1099,7 +1238,7 @@ async def test_G1_production_graph_pass_path(offline_openai):
         offline_openai.requests[1],
         streaming=False,
         expected_prompt=expected_judge_prompt(
-            answer=candidate["content"], context=format_context([SYNTHETIC_CHUNK_A])
+            answer=candidate["content"], context=JUDGE_CONTEXT
         ),
     )
     assert retriever.calls == [(SYNTHETIC_QUESTION, 5)]
@@ -1181,7 +1320,7 @@ async def test_G2_production_graph_unavailable_appends_suffix(offline_openai):
         judge_requests,
         streaming=True,
         expected_prompt=expected_judge_prompt(
-            answer=body, context=format_context([SYNTHETIC_CHUNK_A])
+            answer=body, context=JUDGE_CONTEXT
         ),
     )
 
@@ -1213,3 +1352,87 @@ def graph_unavailable_suffix() -> str:
     from app.agent.graph import _UNAVAILABLE_SUFFIX
 
     return _UNAVAILABLE_SUFFIX
+
+
+# ---------------------------------------------------------------------------
+# Oracle mechanism checks: the independent expectation must actually bite.
+#
+# These two cases are pure test-logic checks. They use no provider, no SDK
+# transport and no network; they only prove that the golden expectations
+# registered above are independent anchors rather than a restatement of
+# whatever the production side happens to produce.
+#
+# Each one does both halves:
+#   * the HEALTHY baseline must be accepted, and
+#   * a MUTANT of the production side must be rejected by the very same
+#     existing full-prompt comparer the real cases use.
+# The mutants are built in memory only. No production file is written, no
+# loader is permanently changed, and a mutant is never used to generate an
+# expected value.
+# ---------------------------------------------------------------------------
+
+
+def _openai_request_with_user_content(content: str, *, stream: bool) -> httpx.Request:
+    return httpx.Request(
+        "POST",
+        "https://api.openai.com/v1/chat/completions",
+        json={"model": OPENAI_MODEL, "messages": [{"role": "user", "content": content}],
+              **({"stream": True} if stream else {})},
+    )
+
+
+def test_oracle_judge_rubric_mutant_losing_example_d_is_rejected():
+    """Dropping Example D from the Judge rubric must fail the full comparison.
+
+    The mutant keeps every ``str.format`` field intact, so it is still a legal
+    rubric; only the calibration text shrinks. A fragment-level check would not
+    notice, which is exactly the regression this anchors.
+    """
+    # Health: the production rubric text and the independent golden agree.
+    assert load_tutor_rubric() == JUDGE_RUBRIC_GOLDEN, (
+        "the registered golden must still describe the accepted rubric baseline"
+    )
+    healthy = _openai_request_with_user_content(EXPECTED_JUDGE_PROMPT, stream=False)
+    assert_openai_chat_request(healthy, streaming=False, expected_prompt=EXPECTED_JUDGE_PROMPT)
+
+    # Mutant: Example D removed in memory, every format field preserved.
+    example_d_start = JUDGE_RUBRIC_GOLDEN.index("Example D (good examples")
+    example_d_end = JUDGE_RUBRIC_GOLDEN.index("\n\n---\n\n## Output format")
+    mutant_rubric = (
+        JUDGE_RUBRIC_GOLDEN[:example_d_start] + JUDGE_RUBRIC_GOLDEN[example_d_end:]
+    )
+    mutant_prompt = mutant_rubric.format(
+        question=SYNTHETIC_QUESTION, answer=JUDGE_ANSWER, context=JUDGE_CONTEXT
+    )
+    assert "{question}" not in mutant_prompt and "{context}" not in mutant_prompt
+    assert mutant_prompt != EXPECTED_JUDGE_PROMPT, "the mutant must really differ"
+
+    mutant = _openai_request_with_user_content(mutant_prompt, stream=False)
+    with pytest.raises(AssertionError):
+        assert_openai_chat_request(mutant, streaming=False, expected_prompt=EXPECTED_JUDGE_PROMPT)
+
+
+def test_oracle_empty_evidence_tutor_mutant_without_system_instruction_is_rejected():
+    """A Tutor prompt stripped of its system instruction must be rejected.
+
+    The empty-evidence branch is the one that had no independent anchor, so the
+    golden is compared both against the healthy production render and against a
+    mutant produced by removing the system instruction in memory.
+    """
+    healthy_prompt = expected_tutor_prompt([])
+    assert healthy_prompt.startswith(TUTOR_SYSTEM_INSTRUCTION_GOLDEN)
+    assert TUTOR_EMPTY_CONTEXT_GOLDEN in healthy_prompt
+    # Health: the independent expectation reproduces the production render.
+    assert TutorPromptTemplate.production_v2().render(SYNTHETIC_QUESTION, []) == healthy_prompt
+    healthy = _openai_request_with_user_content(healthy_prompt, stream=True)
+    assert_openai_chat_request(healthy, streaming=True, expected_prompt=healthy_prompt)
+
+    # Mutant: the real render with its system instruction removed in memory.
+    production_render = TutorPromptTemplate.production_v2().render(SYNTHETIC_QUESTION, [])
+    mutant_prompt = production_render.replace(TUTOR_SYSTEM_INSTRUCTION_GOLDEN, "", 1)
+    assert mutant_prompt != healthy_prompt, "the mutant must really differ"
+    assert TUTOR_EMPTY_CONTEXT_GOLDEN in mutant_prompt
+
+    mutant = _openai_request_with_user_content(mutant_prompt, stream=True)
+    with pytest.raises(AssertionError):
+        assert_openai_chat_request(mutant, streaming=True, expected_prompt=healthy_prompt)
