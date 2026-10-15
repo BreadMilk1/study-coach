@@ -36,12 +36,10 @@ from pydantic import ValidationError
 from app.agent.agent_trace import AgentTrace
 from app.agent.planner import build_planner
 from app.agent.planner_agent import (
-    _AGENT_SYSTEM_PROMPT,
     _BUDGET_EXHAUSTED_MSG,
     _LLM_FAILED_MSG,
     build_planner_agent,
 )
-from app.agent.tools.plan import _MINDMAP_PROMPT
 from app.agent.tools.schemas import Milestone
 from app.db.models import Base, Goal, Plan, PlanMilestone
 from app.db.repositories import (
@@ -105,21 +103,98 @@ MINDMAP_MERMAID = "mindmap\n  root((HyDE))\n    Read HyDE paper"
 MINDMAP_OUTLINE = "- HyDE\n  - Read HyDE paper"
 
 # ---------------------------------------------------------------------------
-# Frozen prompt templates, read from the product's own prompt directory.
+# Prompt oracles: test-owned literals plus synthetic inputs.
+#
+# These four literals are copied into this file verbatim. The expectation side
+# never reads the product's prompt directory, never imports a production
+# template constant and never calls a production renderer, so a change in
+# production wording must break these expectations instead of being followed
+# by them.
 # ---------------------------------------------------------------------------
 
-_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "app" / "agent" / "prompts"
-GENERATE_TEMPLATE = (_PROMPTS_DIR / "planner_generate.txt").read_text(encoding="utf-8")
-CHECK_IN_TEMPLATE = (_PROMPTS_DIR / "planner_check_in.txt").read_text(encoding="utf-8")
+GENERATE_TEMPLATE = """You are a study-plan generator for an exam coach.
+
+Subject: {topic}
+{context_section}
+Student weak topics (mastery < 0.4): {weak_topics}
+Exam date (optional): {exam_date}
+Today: {today}
+
+Generate 3 to 7 milestones as a JSON array. Each milestone:
+- title: short, concrete, actionable (≤ 12 words)
+- due_at: ISO date "YYYY-MM-DD" between today and exam_date (or null if no exam_date)
+- done: false
+- topic: a sub-topic string (or null)
+
+Distribute due_at dates evenly. Cover the weak topics if any. GROUND in the source chunks if provided.
+
+Output ONLY a JSON array, no prose, no fences.
+"""
+CHECK_IN_TEMPLATE = """You are a study-plan adjuster for an exam coach.
+
+Current milestones (JSON):
+{current_milestones}
+
+Progress summary:
+- Done: {done_count} / {total_count}
+- Overdue (titles): {overdue_titles}
+- Weak topics (mastery < 0.4): {weak_topics}
+- Recent mistakes: {recent_mistake_count}
+
+User's check-in message: {user_msg}
+
+Adjust the milestones conservatively. You MAY:
+- Mark an item done only if the user explicitly said that specific item is complete.
+- Reopen an item only if the user explicitly said that specific item is not complete.
+- Postpone overdue unfinished items (push due_at later).
+
+You MUST keep id/topic_id fields unchanged when present.
+You MAY NOT add, delete, reorder, rewrite titles, change mastery, or change quiz state.
+
+Output ONLY the updated JSON array, no prose, no fences. Schema same as input.
+"""
+PLANNER_AGENT_SYSTEM_PROMPT_GOLDEN = """You are a study coach planner agent.
+
+The user wants either a new study plan or a check-in on an existing plan.
+
+Your job:
+1. Read the user's message to understand what topic they care about.
+2. If you don't know what plan (if any) they already have, call `get_existing_plan` first.
+3. If they want a NEW plan or use explicit re-plan keywords (帮我做 / make a plan / 重做):
+   - Call `retriever_search` with the topic to ground in their source materials.
+   - Call `update_study_plan` with 3-7 specific, dated milestones.
+4. If they want a CHECK-IN (existing plan + 进度 / check-in / 调整 / etc):
+   - Call `compute_progress` to see what's done/overdue.
+   - Call `update_study_plan` with the adjusted milestone list.
+   - Preserve milestone id/topic_id values from the existing plan.
+   - Do not add, delete, or reorder milestones during check-in.
+5. If they mention mindmap / 脑图 / mind map / 思维导图: call `generate_mindmap`.
+6. When done, write a short markdown summary for the user with the milestones (and mindmap if generated). Do NOT call more tools after the summary.
+
+Today is {today}. Be concise. Call tools to act, prose to summarize."""
+PLANNER_MINDMAP_PROMPT_GOLDEN = """You are a study-plan mindmap generator.
+
+Topic: {topic}
+
+Milestones:
+{milestone_lines}
+
+Output two parts:
+
+1. A valid mermaid `mindmap` block wrapped in ```mermaid fences, root labelled with the topic, branches for each milestone.
+2. After the fence, a markdown bullet outline of the same structure.
+
+Do NOT add any other commentary.
+"""
 
 
 def expected_generate_prompt(*, topic: str, chunks: list[dict], weak_topics: list[str],
                              exam_date: datetime | None, today: date) -> str:
     """The GENERATE user message this case must put on the wire.
 
-    Rebuilt here from the frozen template text plus this case's own inputs,
-    including the chunk block. If the node changes how it renders chunks, weak
-    topics, exam date or today, this expectation stops matching.
+    Rebuilt here from this file's own literal template plus this case's own
+    inputs, including the chunk block. If the node changes how it renders
+    chunks, weak topics, exam date or today, this expectation stops matching.
     """
     lines = "\n".join(f"[{i + 1}] {c.get('content', '')}" for i, c in enumerate(chunks))
     context_section = f"Source chunks:\n{lines}\n" if chunks else ""
@@ -136,7 +211,10 @@ def expected_check_in_prompt(*, current_milestones: str, done_count: int,
                              total_count: int, overdue_titles: str,
                              weak_topics: list[str], recent_mistake_count: int,
                              user_msg: str) -> str:
-    """The CHECK-IN user message this case must put on the wire."""
+    """The CHECK-IN user message this case must put on the wire.
+
+    Rendered from this file's own literal, never from the product's prompt file.
+    """
     return CHECK_IN_TEMPLATE.format(
         current_milestones=current_milestones,
         done_count=done_count,
@@ -149,18 +227,32 @@ def expected_check_in_prompt(*, current_milestones: str, done_count: int,
 
 
 def expected_agent_system_prompt() -> str:
-    """The frozen agent system prompt, with this case's date bound in."""
-    return _AGENT_SYSTEM_PROMPT.format(today=TODAY_ISO)
+    """The agent system prompt, with this case's date bound in.
+
+    Formatted from this file's own literal, never from ``planner_agent``.
+    """
+    return PLANNER_AGENT_SYSTEM_PROMPT_GOLDEN.format(today=TODAY_ISO)
+
+
+def assert_plain_messages(body: dict, expected_prompt: str) -> str:
+    """This file's complete plain-prompt expectation: one user message, whole.
+
+    The whole ``messages`` list is compared with exact equality -- not a prefix,
+    a substring, a normalised fragment or a heading. The expected prompt is
+    returned so a caller can go on asserting against the same value.
+    """
+    assert body["messages"] == [{"role": "user", "content": expected_prompt}]
+    return expected_prompt
 
 
 def expected_mindmap_prompt(*, topic: str, milestones: list[dict]) -> str:
-    """The whole internal mindmap user message, rebuilt from tools/plan.py.
+    """The whole internal mindmap user message, from this file's own literal.
 
-    Built from the frozen template plus this case's controlled inputs, so the
-    whole prompt is compared -- not a heading or the first fragment.
+    Built from the literal plus this case's controlled inputs, so the whole
+    prompt is compared -- not a heading or the first fragment.
     """
     lines = "\n".join(f"- {m['title']}" for m in milestones) or "- (no milestones)"
-    return _MINDMAP_PROMPT.format(topic=topic, milestone_lines=lines)
+    return PLANNER_MINDMAP_PROMPT_GOLDEN.format(topic=topic, milestone_lines=lines)
 
 
 # ---------------------------------------------------------------------------
@@ -563,10 +655,9 @@ async def test_P1_agent_loop_full_success_with_mindmap(offline_openai, db):
         assert_tool_set(body)
 
     # The internal mindmap turn: one tools-free user message, compared whole
-    # against the frozen tools/plan.py template filled with this case's inputs.
-    assert [m["role"] for m in bodies[2]["messages"]] == ["user"]
+    # against this file's own literal filled with this case's inputs.
     mindmap_prompt = expected_mindmap_prompt(topic="HyDE", milestones=MILESTONE_PAYLOAD)
-    assert bodies[2]["messages"][0]["content"] == mindmap_prompt
+    assert_plain_messages(bodies[2], mindmap_prompt)
     # Commit visibility as each request landed: before round 1, before round 2
     # (the update tool has not run yet), then after the tool committed, both
     # for the internal mindmap turn and for round 3.
@@ -967,7 +1058,7 @@ async def test_P6_deterministic_generate_commits_goal_then_plan(offline_openai, 
     expected_prompt = expected_generate_prompt(
         topic="HyDE", chunks=SYNTHETIC_CHUNKS, weak_topics=[], exam_date=None, today=NOW.date(),
     )
-    assert body["messages"] == [{"role": "user", "content": expected_prompt}]
+    assert_plain_messages(body, expected_prompt)
     assert "Subject: HyDE" in expected_prompt
     assert f"Source chunks:\n[1] {SYNTHETIC_CHUNK['content']}\n" in expected_prompt
     assert "Student weak topics (mastery < 0.4): (none)" in expected_prompt
@@ -1052,7 +1143,7 @@ async def test_P7_deterministic_check_in_updates_same_plan(offline_openai, db):
 
     assert len(offline_openai.requests) == 1
     body = plain_bodies(offline_openai)[0]
-    assert body["messages"] == [{"role": "user", "content": expected_prompt}]
+    assert_plain_messages(body, expected_prompt)
     assert f"- Done: {SEED_DONE} / {SEED_TOTAL}" in expected_prompt
     assert f"- Overdue (titles): {SEED_OVERDUE_TITLES}" in expected_prompt
     assert "- Weak topics (mastery < 0.4): (none)" in expected_prompt
@@ -1317,3 +1408,121 @@ def test_wire_schema_is_not_the_milestone_business_schema():
     assert ("title",) in locs, locs
     assert all(loc and loc[0] == "title" for loc in locs), locs
     assert AgentTrace(t_start=0.0).serialize()["exit_reason"] == "in_flight"
+
+
+# ===========================================================================
+# Prompt-oracle mechanism checks (P2).
+#
+# IMPORTANT: these four cases are NOT SDK, provider or full agent-loop
+# evidence. They are pure test logic over synthetic parsed bodies: no node is
+# run, no model is called, no production file is edited and no factory is
+# patched. The real SDK business cases earlier in this file remain the healthy
+# execution path and are not replaced or weakened by anything here.
+#
+# Each case proves exactly two things, in this order:
+#   1. the test-owned literal expectation ACCEPTS the healthy text the product
+#      really renders today. The healthy side is read from the frozen
+#      production source named by the task's mutation matrix, right here and
+#      only here -- never from the golden and never from an observed request.
+#   2. the same complete comparator REJECTS an in-memory mutant that differs
+#      only at that one instruction/context marker, with the roles, the model
+#      and every other request field left untouched.
+#
+# Ten green meta cases are not proof that the literals are independent and are
+# not offered as such: independence is a separate claim about the literals
+# themselves, checked by inspection and by the real SDK cases above.
+# ===========================================================================
+
+_ORACLE_MUTANT = " SYNTHETIC-ORACLE-MUTANT"
+
+_PLANNER_ORACLE_CASES = [
+    ("P-GENERATE", "You are a study-plan generator for an exam coach."),
+    ("P-CHECK-IN", "You are a study-plan adjuster for an exam coach."),
+    ("P-AGENT", "You are a study coach planner agent."),
+    ("P-MINDMAP", "You are a study-plan mindmap generator."),
+]
+
+
+@pytest.mark.parametrize("case_id,marker", _PLANNER_ORACLE_CASES)
+def test_oracle_planner_prompt_accepts_healthy_and_rejects_mutant(case_id, marker):
+    """Healthy accepted, in-memory mutant rejected, by this file's own literals."""
+    prompts_dir = Path(__file__).resolve().parents[2] / "app" / "agent" / "prompts"
+
+    if case_id == "P-GENERATE":
+        healthy = (prompts_dir / "planner_generate.txt").read_text(encoding="utf-8").format(
+            topic="HyDE",
+            context_section=(
+                "Source chunks:\n"
+                + "\n".join(
+                    f"[{i + 1}] {c.get('content', '')}" for i, c in enumerate(SYNTHETIC_CHUNKS)
+                )
+                + "\n"
+            ),
+            weak_topics="(none)",
+            exam_date="(none)",
+            today=TODAY_ISO,
+        )
+        expected = expected_generate_prompt(
+            topic="HyDE", chunks=SYNTHETIC_CHUNKS, weak_topics=[],
+            exam_date=None, today=NOW.date(),
+        )
+        kind = "plain"
+    elif case_id == "P-CHECK-IN":
+        seeded = json.dumps(SEED_MILESTONES, ensure_ascii=False)
+        healthy = (prompts_dir / "planner_check_in.txt").read_text(encoding="utf-8").format(
+            current_milestones=seeded,
+            done_count=SEED_DONE,
+            total_count=SEED_TOTAL,
+            overdue_titles=SEED_OVERDUE_TITLES,
+            weak_topics="(none)",
+            recent_mistake_count=0,
+            user_msg=CHECK_IN_USER_MSG,
+        )
+        expected = expected_check_in_prompt(
+            current_milestones=seeded, done_count=SEED_DONE, total_count=SEED_TOTAL,
+            overdue_titles=SEED_OVERDUE_TITLES, weak_topics=[], recent_mistake_count=0,
+            user_msg=CHECK_IN_USER_MSG,
+        )
+        kind = "plain"
+    elif case_id == "P-AGENT":
+        # Imported here and nowhere else: the healthy candidate only.
+        from app.agent.planner_agent import _AGENT_SYSTEM_PROMPT
+
+        healthy = _AGENT_SYSTEM_PROMPT.format(today=TODAY_ISO)
+        expected = expected_agent_system_prompt()
+        kind = "agent"
+    else:  # P-MINDMAP
+        from app.agent.tools.plan import _MINDMAP_PROMPT
+
+        healthy = _MINDMAP_PROMPT.format(
+            topic="HyDE",
+            milestone_lines="\n".join(f"- {m['title']}" for m in MILESTONE_PAYLOAD),
+        )
+        expected = expected_mindmap_prompt(topic="HyDE", milestones=MILESTONE_PAYLOAD)
+        kind = "plain"
+
+    def body_for(text):
+        if kind == "agent":
+            return {"messages": [
+                {"role": "system", "content": text},
+                {"role": "user", "content": PLAN_USER_MSG},
+            ]}
+        return {"messages": [{"role": "user", "content": text}]}
+
+    def compare(text):
+        if kind == "agent":
+            assert_agent_request(body_for(text), user_msg=PLAN_USER_MSG, rounds=[])
+        else:
+            assert_plain_messages(body_for(text), expected)
+
+    # 1. The healthy production text passes this file's own complete comparator.
+    compare(healthy)
+
+    # 2. Both shape checks happen before the expected failure, never inside it.
+    assert healthy.count(marker) == 1, f"{case_id}: marker must be unique in healthy"
+    mutant = healthy.replace(marker, marker + _ORACLE_MUTANT, 1)
+    assert mutant != healthy, f"{case_id}: the mutant must differ from healthy"
+
+    # 3. Only the comparator call is inside the expected rejection.
+    with pytest.raises(AssertionError):
+        compare(mutant)

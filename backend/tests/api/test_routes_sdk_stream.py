@@ -67,9 +67,7 @@ from tests.llm.sdk_transport_support import (  # noqa: F401  (frozen, read-only)
 from tests.llm.sdk_transport_support import offline_env as offline_env  # noqa: F401
 
 from app.agent.graph import _UNAVAILABLE_SUFFIX
-from app.agent.judge import load_tutor_rubric
 from app.agent.production_judge import TUTOR_DIMENSIONS
-from app.agent.prompt import TutorPromptTemplate, format_context
 from app.api import deps, routes
 from app.db.models import Base, Citation, Message
 from app.db.repositories import (
@@ -279,20 +277,141 @@ def judge_pass_payload() -> str:
 # ---------------------------------------------------------------------------
 # Expectations.
 #
-# Every expected prompt is rendered by the current frozen production builder
-# from this file's own synthetic inputs, before any request is sent. Nothing
-# here compares an observed prompt with itself.
+# Every expected prompt is rendered from the test-owned literals below plus this
+# file's own synthetic inputs, before any request is sent. Nothing here reads a
+# production template, a production rubric or a production renderer, and nothing
+# compares an observed prompt with itself: when the product's wording changes,
+# the expectations below stay put and the case fails.
 # ---------------------------------------------------------------------------
+
+TUTOR_SYSTEM_INSTRUCTION_GOLDEN = """You are a study coach answering questions based ONLY on the provided sources. Cite each fact you use with [N] referring to the source list. If the sources do not contain the answer, say you don't know — do not fabricate."""
+TUTOR_SOURCE_LINE_GOLDEN = """[{index}] {source} p.{page}: {content}"""
+TUTOR_EMPTY_CONTEXT_GOLDEN = """(no relevant sources retrieved)"""
+JUDGE_RUBRIC_GOLDEN = """You are an impartial Study Coach judge. Your job: rate a Tutor's answer to a student question.
+
+**Question**: {question}
+
+**Available Context** (the only material the Tutor should rely on):
+{context}
+
+**Tutor's Answer to Evaluate**:
+{answer}
+
+---
+
+## Bias-aware instruction (read first)
+
+Evaluate the answer **critically**. Do NOT give high scores merely because the answer matches your style, vocabulary, or training distribution. Be especially harsh when the answer is fluent but ungrounded, or when it sounds confident without citing the available context. Self-preference bias is real — actively counteract it.
+
+---
+
+## Rubric
+
+Rate each dimension from 1 to 5 (integer). All six dimensions are weighted equally — do not collapse pedagogical aspects into a single judgment.
+
+### Grounding (3)
+
+1. **relevance** (1-5): Does the answer directly address the question?
+2. **accuracy** (1-5): Is the information accurate **and grounded in the Available Context**? Generally-true but unsupported claims cap at 3.
+3. **citation_quality** (1-5): Are sources properly cited (e.g. `[N]`, source name, page)? Source names sufficient; page numbers a bonus.
+
+### Pedagogy (3 — rate INDEPENDENTLY, do NOT average)
+
+4. **accessibility** (1-5): How readable is the explanation for the target student?
+   - 1 = heavy unexplained jargon, opaque
+   - 3 = some unexplained terms but mostly readable
+   - 5 = plain language; any necessary jargon is defined or scaffolded
+5. **example_quality** (1-5): Are concrete examples or analogies given that aid understanding?
+   - 1 = no example at all
+   - 3 = vague or off-topic example
+   - 5 = a vivid, on-topic example that makes the concept click
+6. **learner_level_fit** (1-5): Is the depth pitched at an exam-prep student (undergrad / postgrad revising)?
+   - 1 = too shallow (oversimplified) OR too deep (research-level)
+   - 3 = approximately right but uneven
+   - 5 = pitched precisely for someone preparing for an exam
+
+**Important**: an answer with vivid examples (example_quality=5) BUT heavy jargon (accessibility=2) must still get accessibility=2 — do NOT inflate it because the example is good. Mixing aspects defeats the diagnostic value of separate dimensions.
+
+---
+
+## Few-shot calibration
+
+Example A (well-grounded, well-paced):
+- Question: "What is prompt engineering?"
+- Context: "[1] Prompt engineering is the practice of designing inputs to elicit desired outputs from LLMs."
+- Answer: "Prompt engineering is the practice of designing inputs to get useful outputs from large language models, as the source describes [1]. For exam revision, think of it like writing very precise instructions to a smart-but-literal assistant."
+- Scores: relevance=5, accuracy=5, citation_quality=4, accessibility=5, example_quality=5, learner_level_fit=5
+
+Example B (fluent but ungrounded — should score low on grounding even though it reads well):
+- Question: "What is prompt engineering?"
+- Context: "[1] Prompt engineering is the practice of designing inputs to elicit desired outputs from LLMs."
+- Answer: "Prompt engineering was pioneered by OpenAI in 2020 and forms the basis of modern AI alignment."
+- Scores: relevance=3, accuracy=1, citation_quality=1, accessibility=4, example_quality=1, learner_level_fit=3
+
+Example C (correct but over-jargon — accessibility must call this out independently):
+- Question: "What is BM25?"
+- Context: "[1] BM25 is a lexical retrieval method that ranks documents by term frequency and inverse document frequency."
+- Answer: "BM25 is an Okapi-family probabilistic ranking function leveraging IDF-weighted TF saturation with document-length normalisation."
+- Scores: relevance=5, accuracy=4, citation_quality=2, accessibility=1, example_quality=1, learner_level_fit=2
+
+Example D (good examples but lazy on grounding — pedagogy & grounding must diverge):
+- Question: "What is BM25?"
+- Context: "[1] BM25 is a lexical retrieval method that ranks documents by term frequency and inverse document frequency."
+- Answer: "BM25 is like a librarian who finds books by counting how often your keywords appear and how rare those keywords are across the whole shelf — think 'cat' vs 'the'. It's the classic keyword search algorithm."
+- Scores: relevance=5, accuracy=4, citation_quality=1, accessibility=5, example_quality=5, learner_level_fit=5
+
+---
+
+## Output format
+
+Output **only** valid JSON, nothing else (no markdown fences, no prose preamble):
+
+{{
+    "relevance": <1-5>,
+    "accuracy": <1-5>,
+    "citation_quality": <1-5>,
+    "accessibility": <1-5>,
+    "example_quality": <1-5>,
+    "learner_level_fit": <1-5>,
+    "reasoning": "<one or two sentences citing the weakest dimension>"
+}}
+"""
+
+
+def expected_context(chunks: list[dict]) -> str:
+    """The source block, rebuilt independently of ``app.agent.prompt``.
+
+    Empty input still uses the fixed no-sources line; a non-empty one rebuilds
+    each source line from this file's own literal, so the layout is decided here
+    rather than imported.
+    """
+    if not chunks:
+        return TUTOR_EMPTY_CONTEXT_GOLDEN
+    return "\n\n".join(
+        TUTOR_SOURCE_LINE_GOLDEN.format(
+            index=index, source=chunk["source"], page=chunk["page"], content=chunk["content"]
+        )
+        for index, chunk in enumerate(chunks, start=1)
+    )
 
 
 def expected_tutor_prompt(chunks: list[dict]) -> str:
     """The exact user content the Tutor must put on the wire for ``chunks``."""
-    return TutorPromptTemplate.production_v2().render(SYNTHETIC_QUESTION, chunks)
+    return (
+        f"{TUTOR_SYSTEM_INSTRUCTION_GOLDEN}\n\n"
+        f"Sources:\n{expected_context(chunks)}\n\n"
+        f"Question: {SYNTHETIC_QUESTION}"
+    )
 
 
 def expected_judge_prompt(*, answer: str, context: str) -> str:
-    """The exact user content the production Judge must put on the wire."""
-    return load_tutor_rubric().format(
+    """The exact user content the production Judge must put on the wire.
+
+    ``context`` stays a caller-supplied string; the callers below pass the
+    independently rebuilt :func:`expected_context`, never the production
+    formatter's own output.
+    """
+    return JUDGE_RUBRIC_GOLDEN.format(
         question=SYNTHETIC_QUESTION, answer=answer, context=context
     )
 
@@ -749,7 +868,7 @@ async def test_A1_chat_tutor_stream_and_judge_pass(api_db, offline_openai):
                 "role": "user",
                 "content": expected_judge_prompt(
                     answer=answer,
-                    context=format_context([SYNTHETIC_CHUNK_A]),
+                    context=expected_context([SYNTHETIC_CHUNK_A]),
                 ),
             }
         ],
@@ -1144,7 +1263,7 @@ async def test_A6_chat_judge_503_keeps_content_with_fixed_suffix(api_db, offline
         ],
     )
     expected_judge = expected_judge_prompt(
-        answer=answer, context=format_context([SYNTHETIC_CHUNK_A])
+        answer=answer, context=expected_context([SYNTHETIC_CHUNK_A])
     )
     judge_bodies = [
         assert_openai_request(
@@ -1275,7 +1394,7 @@ async def test_A7_chat_http_smoke_assembles_real_route_and_stream(api_db, offlin
             {
                 "role": "user",
                 "content": expected_judge_prompt(
-                    answer=answer, context=format_context([SYNTHETIC_CHUNK_A])
+                    answer=answer, context=expected_context([SYNTHETIC_CHUNK_A])
                 ),
             }
         ],
@@ -1715,3 +1834,110 @@ def test_Z1_source_identity_is_exact_for_this_checkout():
     assert Path(starlette.__file__).resolve() == (
         sdk_root / "starlette" / "__init__.py"
     )
+
+
+# ---------------------------------------------------------------------------
+# Prompt-oracle mechanism checks (P2).
+#
+# IMPORTANT: these three cases are NOT SDK, provider or route evidence. They are
+# pure test logic over synthetic httpx requests: no route is called, no model is
+# invoked, no production file is edited and no factory is patched. The real SDK
+# route cases earlier in this file remain the healthy execution path.
+#
+# Each case proves exactly two things, in this order:
+#   1. this file's own literal expectations ACCEPT the healthy text the real
+#      production renderer / rubric loader / context formatter produce today.
+#      Those three production entry points are imported here and only here, on
+#      the healthy side: the candidate never comes from an oracle literal.
+#   2. the same complete comparator -- assert_openai_request, including its
+#      request-shape, model, streaming and tools guards -- REJECTS an in-memory
+#      mutant that differs only at that one instruction/context marker, with the
+#      role, the model and every other request field left untouched.
+#
+# Three green meta cases are not proof that the literals are independent and are
+# not offered as such. The ping and tool-check oracles are already test-owned
+# literals and are deliberately left alone by this section.
+# ---------------------------------------------------------------------------
+
+_ORACLE_MUTANT = " SYNTHETIC-ORACLE-MUTANT"
+
+_API_ORACLE_ANSWER = "Reciprocal rank fusion."
+
+_API_ORACLE_CASES = [
+    ("A-TUTOR", TUTOR_SYSTEM_INSTRUCTION_GOLDEN),
+    (
+        "A-JUDGE",
+        "You are an impartial Study Coach judge. "
+        "Your job: rate a Tutor's answer to a student question.",
+    ),
+    ("A-CONTEXT", "[1] d4b4-synthetic-retrieval.pdf p.1:"),
+]
+
+
+@pytest.mark.parametrize("case_id,marker", _API_ORACLE_CASES)
+def test_oracle_api_prompt_accepts_healthy_and_rejects_mutant(case_id, marker):
+    """Healthy accepted, in-memory mutant rejected, by this file's own literals."""
+    # Imported here and nowhere else: the healthy candidate side only.
+    from app.agent.judge import load_tutor_rubric
+    from app.agent.prompt import TutorPromptTemplate, format_context
+
+    answer = _API_ORACLE_ANSWER
+    # The real production render of this chunk list, and this file's own
+    # independent rebuild of the very same thing.
+    production_context = format_context([SYNTHETIC_CHUNK_A])
+    rebuilt_context = expected_context([SYNTHETIC_CHUNK_A])
+    rubric = load_tutor_rubric()
+
+    if case_id == "A-TUTOR":
+        healthy = TutorPromptTemplate.production_v2().render(
+            SYNTHETIC_QUESTION, [SYNTHETIC_CHUNK_A]
+        )
+        expected = expected_tutor_prompt([SYNTHETIC_CHUNK_A])
+        model, streaming = TUTOR_MODEL, True
+    else:
+        if case_id == "A-JUDGE":
+            healthy = rubric.format(
+                question=SYNTHETIC_QUESTION, answer=answer, context=production_context
+            )
+        else:  # A-CONTEXT: same judge prompt, only the source layout is in question
+            healthy = rubric.format(
+                question=SYNTHETIC_QUESTION, answer=answer, context=production_context
+            )
+        expected = expected_judge_prompt(answer=answer, context=rebuilt_context)
+        model, streaming = JUDGE_MODEL, False
+
+    # Where the marker must be unique, and therefore what the mutant changes.
+    carrier = production_context if case_id == "A-CONTEXT" else healthy
+    assert carrier.count(marker) == 1, f"{case_id}: marker must be unique in the candidate"
+    mutant_carrier = carrier.replace(marker, marker + _ORACLE_MUTANT, 1)
+    assert mutant_carrier != carrier, f"{case_id}: the mutant must differ from the candidate"
+
+    if case_id == "A-CONTEXT":
+        mutant = rubric.format(
+            question=SYNTHETIC_QUESTION, answer=answer, context=mutant_carrier
+        )
+    else:
+        mutant = mutant_carrier
+
+    def request_for(prompt):
+        payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+        if streaming:
+            payload["stream"] = True
+        return httpx.Request(
+            "POST", "https://api.openai.com/v1/chat/completions", json=payload
+        )
+
+    def compare(prompt):
+        assert_openai_request(
+            request_for(prompt),
+            model=model,
+            streaming=streaming,
+            expected_messages=[{"role": "user", "content": expected}],
+        )
+
+    # 1. The healthy production text passes this file's own complete comparator.
+    compare(healthy)
+
+    # 3. Only the comparator call is inside the expected rejection.
+    with pytest.raises(AssertionError):
+        compare(mutant)

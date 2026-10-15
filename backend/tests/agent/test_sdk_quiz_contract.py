@@ -37,15 +37,10 @@ from pydantic import ValidationError
 
 from app.agent.quiz_master import build_quiz_master
 from app.agent.quiz_master_agent import (
-    _AGENT_SYSTEM_PROMPT,
     _BUDGET_EXHAUSTED_MSG,
     _LLM_FAILED_MSG,
     _QUIZ_PERSIST_FAILED_MSG,
     build_quiz_master_agent,
-)
-from app.agent.tools.quiz import (
-    _GROUNDED_CONTEXT_TEMPLATE,
-    _QUIZ_PROMPT_BASE,
 )
 from app.agent.tools.schemas import QuizQuestionPersist
 from app.db.models import Base, Goal, Question, Topic
@@ -109,23 +104,89 @@ QUIZ_MODEL_TEXT = json.dumps(
 
 
 # ---------------------------------------------------------------------------
-# Expected prompts, rebuilt from the product's frozen template constants plus
-# this case's own inputs.
+# Prompt oracles: test-owned literals plus synthetic inputs.
+#
+# These three literals are copied into this file verbatim. The expectation side
+# never imports a production template constant and never calls a production
+# renderer, so changed production wording must fail these expectations rather
+# than be followed by them.
 # ---------------------------------------------------------------------------
+
+QUIZ_PROMPT_BASE_GOLDEN = """You are a quiz question generator for an exam coach.
+
+Generate {n} multiple-choice question(s) on the topic: {topic_name}.
+Difficulty: {difficulty}.
+{context_section}
+Output ONLY a JSON array. Each item must have:
+- prompt: the question text
+- options: exactly 4 strings, each prefixed with "A) " "B) " "C) " "D) "
+- answer: a single letter A/B/C/D matching the correct option
+- explanation: 1-2 sentences explaining why the answer is correct
+
+Example shape:
+[
+  {{"prompt": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "A", "explanation": "..."}}
+]
+
+CRITICAL FORMATTING: Each option MUST start with exactly "A) " / "B) " / "C) " / "D) "
+(letter, closing paren, space). Never output bare option text without the prefix.
+Do NOT number with "1) " "2) " or use bullet points.
+"""
+QUIZ_GROUNDED_CONTEXT_TEMPLATE_GOLDEN = """
+GROUND your questions strictly in these source chunks. Do NOT invent facts not
+supported by them; if a chunk doesn't cover an angle, don't ask about it.
+
+{chunks}
+"""
+QUIZ_AGENT_SYSTEM_PROMPT_GOLDEN = """You are a study coach quiz generator.
+
+The user wants a multiple-choice quiz question on a topic.
+
+Your job:
+1. Read the user's message to extract the topic.
+2. Call `retriever_search` with the topic to ground in the user's PDF source material.
+3. Write a single multiple-choice question:
+   - One clear, unambiguous question prompt
+   - Exactly 4 options, each prefixed "A) ", "B) ", "C) ", "D) "
+   - Distractors should be plausible (not obviously wrong)
+   - One correct answer letter
+   - A 1-2 sentence explanation grounded in the retrieved source chunks
+4. Call `persist_quiz_question` with the question, options, answer, and explanation.
+5. After persistence succeeds, write a short markdown reply to the user showing
+   the question. Do NOT call more tools.
+
+Today is {today}. Difficulty: medium. Ground strictly in retrieved chunks; do
+not invent facts."""
 
 
 def expected_generate_prompt(*, topic_name: str, difficulty: str, n: int,
                              context_chunks: list[dict] | None) -> str:
-    """The GENERATE user message this case must put on the wire."""
+    """The GENERATE user message this case must put on the wire.
+
+    Rendered from this file's own literals, never from ``app.agent.tools.quiz``.
+    """
     lines = "\n".join(f"[{i + 1}] {c.get('content', '')}" for i, c in enumerate(context_chunks or []))
-    context_section = _GROUNDED_CONTEXT_TEMPLATE.format(chunks=lines) if context_chunks else ""
-    return _QUIZ_PROMPT_BASE.format(
+    context_section = (
+        QUIZ_GROUNDED_CONTEXT_TEMPLATE_GOLDEN.format(chunks=lines) if context_chunks else ""
+    )
+    return QUIZ_PROMPT_BASE_GOLDEN.format(
         n=n, topic_name=topic_name, difficulty=difficulty, context_section=context_section,
     )
 
 
+def assert_plain_messages(body: dict, expected_prompt: str) -> str:
+    """This file's complete plain-prompt expectation: one user message, whole.
+
+    The whole ``messages`` list is compared with exact equality -- not a prefix,
+    a substring, a normalised fragment or a heading. The expected prompt is
+    returned so a caller can go on asserting against the same value.
+    """
+    assert body["messages"] == [{"role": "user", "content": expected_prompt}]
+    return expected_prompt
+
+
 def expected_agent_system_prompt() -> str:
-    return _AGENT_SYSTEM_PROMPT.format(today=TODAY_ISO)
+    return QUIZ_AGENT_SYSTEM_PROMPT_GOLDEN.format(today=TODAY_ISO)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +507,7 @@ async def test_Q1_deterministic_generate_persists_question(offline_openai, db):
     expected_prompt = expected_generate_prompt(
         topic_name=QUESTION_TOPIC, difficulty="medium", n=1, context_chunks=SYNTHETIC_CHUNKS,
     )
-    assert body["messages"] == [{"role": "user", "content": expected_prompt}]
+    assert_plain_messages(body, expected_prompt)
     assert "Generate 1 multiple-choice question(s) on the topic: HyDE." in expected_prompt
     assert "Difficulty: medium." in expected_prompt
     assert f"[1] {SYNTHETIC_CHUNK['content']}" in expected_prompt
@@ -519,13 +580,10 @@ async def test_Q2_deterministic_empty_body_fails_narrowly(offline_openai, db):
 
     assert len(offline_openai.requests) == 1
     body = plain_bodies(offline_openai)[0]
-    assert body["messages"] == [{
-        "role": "user",
-        "content": expected_generate_prompt(
-            topic_name=QUESTION_TOPIC, difficulty="medium", n=1,
-            context_chunks=SYNTHETIC_CHUNKS,
-        ),
-    }]
+    assert_plain_messages(body, expected_generate_prompt(
+        topic_name=QUESTION_TOPIC, difficulty="medium", n=1,
+        context_chunks=SYNTHETIC_CHUNKS,
+    ))
 
     assert type(excinfo.value) is ValueError
     assert str(excinfo.value) == EMPTY_CONTENT_MESSAGE
@@ -603,9 +661,8 @@ async def test_Q3_deterministic_503_propagates_raw_sdk_error(offline_openai, db)
     )
     bodies = plain_bodies(offline_openai)
     for body in bodies:
-        assert body["messages"] == [{"role": "user", "content": expected_prompt}], (
-            "every attempt carried the same GENERATE prompt"
-        )
+        # Every attempt carried the same GENERATE prompt, compared whole.
+        assert_plain_messages(body, expected_prompt)
     # All three attempts of this one logical invocation re-sent the identical
     # parsed JSON body, not merely matching sub-fields. Headers are not
     # compared -- the SDK may add its own per-request headers.
@@ -1225,3 +1282,93 @@ def test_four_option_and_answer_rules_are_the_business_layer():
     assert options_schema == {"items": {"type": "string"}, "type": "array"}
     assert EXPECTED_TOOL_SCHEMAS[1]["parameters"]["properties"]["answer"] == {"type": "string"}
     assert "enum" not in EXPECTED_TOOL_SCHEMAS[1]["parameters"]["properties"]["answer"]
+
+
+# ===========================================================================
+# Prompt-oracle mechanism checks (P2).
+#
+# IMPORTANT: these three cases are NOT SDK, provider or full agent-loop
+# evidence. They are pure test logic over synthetic parsed bodies: no node is
+# run, no model is called, no production file is edited and no factory is
+# patched. The real SDK business cases earlier in this file remain the healthy
+# execution path and are not replaced or weakened by anything here.
+#
+# Each case proves exactly two things, in this order:
+#   1. the test-owned literal expectation ACCEPTS the healthy text the product
+#      really renders today. The healthy side is read from the frozen
+#      production constant named by the task's mutation matrix, imported here
+#      and only here -- never from the golden, never from an observed request.
+#   2. the same complete comparator REJECTS an in-memory mutant that differs
+#      only at that one instruction/context marker, with the roles, the model
+#      and every other request field left untouched.
+#
+# Three green meta cases are not proof that the literals are independent and
+# are not offered as such.
+# ===========================================================================
+
+_ORACLE_MUTANT = " SYNTHETIC-ORACLE-MUTANT"
+
+_QUIZ_ORACLE_CASES = [
+    ("Q-BASE", "You are a quiz question generator for an exam coach."),
+    (
+        "Q-CONTEXT",
+        "GROUND your questions strictly in these source chunks. Do NOT invent facts not",
+    ),
+    ("Q-AGENT", "You are a study coach quiz generator."),
+]
+
+
+@pytest.mark.parametrize("case_id,marker", _QUIZ_ORACLE_CASES)
+def test_oracle_quiz_prompt_accepts_healthy_and_rejects_mutant(case_id, marker):
+    """Healthy accepted, in-memory mutant rejected, by this file's own literals."""
+    # Imported here and nowhere else: the healthy candidate only.
+    from app.agent.quiz_master_agent import _AGENT_SYSTEM_PROMPT
+    from app.agent.tools.quiz import _GROUNDED_CONTEXT_TEMPLATE, _QUIZ_PROMPT_BASE
+
+    if case_id == "Q-AGENT":
+        healthy = _AGENT_SYSTEM_PROMPT.format(today=TODAY_ISO)
+        expected = expected_agent_system_prompt()
+        kind = "agent"
+    else:
+        # Q-BASE and Q-CONTEXT share one non-empty grounded render and differ
+        # only in which single marker the mutant is inserted after.
+        chunk_lines = "\n".join(
+            f"[{i + 1}] {c.get('content', '')}" for i, c in enumerate(SYNTHETIC_CHUNKS)
+        )
+        healthy = _QUIZ_PROMPT_BASE.format(
+            n=1,
+            topic_name=QUESTION_TOPIC,
+            difficulty="medium",
+            context_section=_GROUNDED_CONTEXT_TEMPLATE.format(chunks=chunk_lines),
+        )
+        expected = expected_generate_prompt(
+            topic_name=QUESTION_TOPIC, difficulty="medium", n=1,
+            context_chunks=SYNTHETIC_CHUNKS,
+        )
+        kind = "plain"
+
+    def body_for(text):
+        if kind == "agent":
+            return {"messages": [
+                {"role": "system", "content": text},
+                {"role": "user", "content": QUIZ_USER_MSG},
+            ]}
+        return {"messages": [{"role": "user", "content": text}]}
+
+    def compare(text):
+        if kind == "agent":
+            assert_agent_request(body_for(text), user_msg=QUIZ_USER_MSG, rounds=[])
+        else:
+            assert_plain_messages(body_for(text), expected)
+
+    # 1. The healthy production text passes this file's own complete comparator.
+    compare(healthy)
+
+    # 2. Both shape checks happen before the expected failure, never inside it.
+    assert healthy.count(marker) == 1, f"{case_id}: marker must be unique in healthy"
+    mutant = healthy.replace(marker, marker + _ORACLE_MUTANT, 1)
+    assert mutant != healthy, f"{case_id}: the mutant must differ from healthy"
+
+    # 3. Only the comparator call is inside the expected rejection.
+    with pytest.raises(AssertionError):
+        compare(mutant)
