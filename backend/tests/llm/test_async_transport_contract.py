@@ -961,3 +961,652 @@ async def test_meta_swallowed_cancel_times_out_without_second_cancel():
         await reclaim_own_task(task, gate=parked_gate, timeout=5)
 
     assert task.done(), "the reclaimed task must have settled"
+
+
+# ===========================================================================
+# D5A-1 R2: normal completion/usage projection + streamed usage position
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline and is
+# unchanged. Each fixed expectation was derived from the locked sources below,
+# not from an observed run.
+#
+#   langchain_core/language_models/chat_models.py:935-950   terminal sentinel
+#   langchain_core/language_models/chat_models.py:1797,2144-2151
+#                                                      llm_output vs combine
+#   langchain_openai/chat_models/base.py:1733-1741,1776-1796
+#                                                      _create_chat_result
+#   langchain_openai/chat_models/base.py:3996-4043       _create_usage_metadata
+#   langchain_openai/chat_models/base.py:1333-1391      chunk conversion
+#   openai/types/chat/chat_completion.py:87              system_fingerprint=None
+#   openai/types/completion_usage.py:44-60               *_details: Optional
+#   langchain_core/messages/ai.py:676-715,721-740        chunk add sums usage
+# ===========================================================================
+
+
+def d5a_add_chunks(chunks: list) -> AIMessageChunk:
+    """LangChain's own public chunk addition, applied left to right.
+
+    ``add_ai_message_chunks`` sums ``usage_metadata`` and merges
+    ``response_metadata``. Using the operator keeps the aggregated object the
+    SDK itself would build, instead of a hand-rolled counter.
+    """
+    total = chunks[0]
+    for chunk in chunks[1:]:
+        total = total + chunk
+    return total
+
+
+def d5a_assert_core_sentinel(chunk: AIMessageChunk) -> None:
+    """Pin the langchain-core terminal sentinel exactly.
+
+    ``chat_models.py:935-950`` appends this chunk itself, after the adapter's
+    stream ends, whenever the last adapter chunk carried no ``chunk_position``.
+    It is not a provider wire frame: empty content, no usage, no metadata, and
+    the only chunk marked ``last``.
+    """
+    assert chunk.content == ""
+    assert chunk.usage_metadata is None
+    assert chunk.response_metadata == {}
+    assert chunk.chunk_position == "last"
+
+
+async def test_d5a_baseline_ainvoke(offline_openai):
+    """One normal non-stream completion pins the whole usage projection."""
+    offline_openai.respond(json_response(completion_body("pong")))
+    model = offline_openai.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "pong"
+    # _create_usage_metadata renames the provider keys and drops every detail
+    # key whose source value is None. This wire carries no *_tokens_details,
+    # so the projection holds two *empty* detail dicts, not absent ones.
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    assert result.response_metadata["finish_reason"] == "stop"
+    # The standardising projection above is a *different* path from the raw
+    # publish below: _create_chat_result puts the SDK's own model_dump straight
+    # into llm_output, so the None detail keys survive here. They are nulls the
+    # SDK filled in, not nulls the wire sent.
+    assert result.response_metadata["token_usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 1,
+        "total_tokens": 4,
+        "prompt_tokens_details": None,
+        "completion_tokens_details": None,
+    }
+    # model_dump() is not exclude_unset, so ChatCompletion.system_fingerprint
+    # is always present -- as None here, and the key is not dropped.
+    assert "system_fingerprint" in result.response_metadata
+    assert result.response_metadata["system_fingerprint"] is None
+    assert result.response_metadata["id"] == "chatcmpl-offline"
+    assert result.response_metadata["model_provider"] == "openai"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    # The choice carried logprobs: None, and the adapter copies it verbatim.
+    assert result.response_metadata["logprobs"] is None
+    # service_tier is only added when truthy, and the SDK default is None.
+    assert "service_tier" not in result.response_metadata
+
+
+async def test_d5a_baseline_astream(offline_openai):
+    """Streamed usage lands on one chunk, and its position is pinned."""
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(stream_chunk("po")),
+                    sse_event(stream_chunk("ng")),
+                    sse_event(stream_chunk(finish_reason="stop")),
+                    sse_event(
+                        stream_chunk(
+                            choices=[],
+                            usage={
+                                "prompt_tokens": 3,
+                                "completion_tokens": 2,
+                                "total_tokens": 5,
+                            },
+                        )
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    body = request_json(offline_openai.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+
+    # Four adapter frames survive (two text deltas, the finish frame and the
+    # usage-only frame; [DONE] terminates the SDK stream and yields nothing),
+    # plus the langchain-core sentinel the adapter never marks itself.
+    assert len(chunks) == 5
+    assert [c.content for c in chunks] == ["po", "ng", "", "", ""]
+    # usage_metadata is absent on every chunk except the usage-only frame,
+    # which sits at index 3 -- the terminal *adapter* frame, not the last one.
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {},
+            "output_token_details": {},
+        },
+        None,
+    ]
+    # The finish frame is still index 2: the sentinel is appended after it.
+    assert chunks[2].response_metadata["finish_reason"] == "stop"
+    assert chunks[2].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert chunks[2].response_metadata["model_provider"] == "openai"
+    assert chunks[2].chunk_position is None
+    # The usage-only frame takes the len(choices)==0 branch, which builds a
+    # fresh chunk and sets no response_metadata at all.
+    assert chunks[3].response_metadata == {}
+    assert chunks[3].chunk_position is None
+    d5a_assert_core_sentinel(chunks[4])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    assert aggregated.response_metadata["finish_reason"] == "stop"
+    assert aggregated.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+
+
+async def test_d5a_usage_lifecycle_astream(offline_openai):
+    """Exactly one usage report, and it is the terminal adapter frame.
+
+    ``include_usage`` lets OpenAI emit a single usage frame per call, so a
+    single request cannot separate cumulative from incremental reporting. That
+    is a property of the wire protocol, not of this fixture: the test pins the
+    real single-terminal shape instead of inventing extra usage frames.
+    """
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(stream_chunk("po")),
+                    sse_event(stream_chunk("ng")),
+                    sse_event(
+                        stream_chunk(
+                            choices=[],
+                            usage={
+                                "prompt_tokens": 5,
+                                "completion_tokens": 2,
+                                "total_tokens": 7,
+                            },
+                        )
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "total_tokens": 7,
+            "input_token_details": {},
+            "output_token_details": {},
+        },
+        None,
+    ]
+    # Usage appears on the terminal *adapter* frame only, so the no-usage
+    # range is exactly the two content frames -- not chunks[:-1], which now
+    # includes the sentinel rather than the usage frame.
+    assert chunks[0].usage_metadata is None
+    assert chunks[1].usage_metadata is None
+    assert chunks[2].usage_metadata is not None
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "total_tokens": 7,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+
+
+# ===========================================================================
+# D5A-2: completion boundaries and missing usage (7 nodes)
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline plus
+# the accepted D5A-1 section, and is unchanged. Each fixed expectation was
+# derived from the locked sources below, not from an observed run:
+#
+#   openai/_client.py:655 + _base_client.py:673-676  strict validation is OFF
+#   openai/_models.py:663-675,706                  construct() skips Literals
+#   openai/types/chat/chat_completion.py:25        finish_reason Literal
+#   langchain_openai/chat_models/base.py:1374,1390 falsy finish_reason
+#   langchain_openai/chat_models/base.py:1778-1796 raw usage dump in llm_output
+#   langchain_core/language_models/chat_models.py:935-950  core sentinel
+#   langchain_core/messages/ai.py:676-681           no usage -> None, not zero
+#   openai/_streaming.py:172-174                   EOF without [DONE] is fine
+# ===========================================================================
+
+
+async def test_d5a_completion_missing_astream(offline_openai):
+    """No finish_reason key at all, while body text and usage stay valid.
+
+    The usage-only frame is independent of the finish reason, so usage still
+    arrives; only the completion signal is absent.
+    """
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(
+                        stream_chunk(
+                            choices=[
+                                {"index": 0, "delta": {"content": "po"}, "logprobs": None}
+                            ]
+                        )
+                    ),
+                    sse_event(
+                        stream_chunk(
+                            choices=[
+                                {"index": 0, "delta": {"content": "ng"}, "logprobs": None}
+                            ]
+                        )
+                    ),
+                    sse_event(
+                        stream_chunk(
+                            choices=[],
+                            usage={
+                                "prompt_tokens": 3,
+                                "completion_tokens": 2,
+                                "total_tokens": 5,
+                            },
+                        )
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {},
+            "output_token_details": {},
+        },
+        None,
+    ]
+    assert chunks[0].response_metadata == {"model_provider": "openai"}
+    assert chunks[2].response_metadata == {}
+    assert chunks[2].chunk_position is None
+    # No chunk reports a completion reason: the key was absent, and
+    # `if finish_reason := choice.get("finish_reason")` is false for None too.
+    assert all("finish_reason" not in c.response_metadata for c in chunks)
+    assert all("model_name" not in c.response_metadata for c in chunks)
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    assert aggregated.response_metadata == {"model_provider": "openai"}
+    assert "finish_reason" not in aggregated.response_metadata
+
+
+async def test_d5a_completion_null_astream(offline_openai):
+    """An explicit JSON null finish_reason, kept separate from the missing key.
+
+    The SDK materialises an absent key and an explicit null to the same value
+    before the adapter reads it, so this projection is byte-for-byte the same
+    as test_d5a_completion_missing_astream. That collapse is the point being
+    pinned; the wire really does differ.
+    """
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(stream_chunk("po")),
+                    sse_event(stream_chunk("ng")),
+                    sse_event(
+                        stream_chunk(
+                            choices=[],
+                            usage={
+                                "prompt_tokens": 3,
+                                "completion_tokens": 2,
+                                "total_tokens": 5,
+                            },
+                        )
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    # The two wires genuinely differ in that one key: stream_chunk(content)
+    # emits an explicit "finish_reason": null, while an explicit choices list
+    # with no finish_reason omits the key entirely.
+    with_null = json.loads(stream_chunk("po"))["choices"][0]
+    without_key = json.loads(
+        stream_chunk(
+            choices=[{"index": 0, "delta": {"content": "po"}, "logprobs": None}]
+        )
+    )["choices"][0]
+    assert with_null["finish_reason"] is None
+    assert "finish_reason" not in without_key
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {},
+            "output_token_details": {},
+        },
+        None,
+    ]
+    assert chunks[0].response_metadata == {"model_provider": "openai"}
+    assert chunks[2].response_metadata == {}
+    assert all("finish_reason" not in c.response_metadata for c in chunks)
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    assert aggregated.response_metadata == {"model_provider": "openai"}
+
+
+async def test_d5a_usage_missing_astream(offline_openai):
+    """Completion signal present, usage simply never sent.
+
+    The request still asks for usage, so this is a wire that stopped honouring
+    include_usage rather than a request that never asked.
+    """
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(stream_chunk("po")),
+                    sse_event(stream_chunk("ng")),
+                    sse_event(stream_chunk(finish_reason="stop")),
+                ]
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    body = request_json(offline_openai.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream_options"] == {"include_usage": True}
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    # No chunk carries usage, and the aggregate is None -- not a zero dict.
+    assert [c.usage_metadata for c in chunks] == [None, None, None, None]
+    assert chunks[2].response_metadata["finish_reason"] == "stop"
+    assert chunks[2].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata is None
+    assert aggregated.response_metadata["finish_reason"] == "stop"
+
+
+async def test_d5a_truncated_ainvoke(offline_openai):
+    """The protocol's own truncation reason, "length"."""
+    offline_openai.respond(json_response(completion_body("par", finish_reason="length")))
+    model = offline_openai.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "par"
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    # "length" is a real Choice.finish_reason literal; the adapter copies the
+    # value through unchanged and adds no truncation flag of its own.
+    assert result.response_metadata["finish_reason"] == "length"
+    assert result.response_metadata["token_usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 1,
+        "total_tokens": 4,
+        "prompt_tokens_details": None,
+        "completion_tokens_details": None,
+    }
+    assert result.response_metadata["id"] == "chatcmpl-offline"
+    assert result.response_metadata["model_provider"] == "openai"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["system_fingerprint"] is None
+    assert result.response_metadata["logprobs"] is None
+
+
+async def test_d5a_truncated_astream(offline_openai):
+    """The same "length" reason through the streaming entry."""
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(stream_chunk("par")),
+                    sse_event(stream_chunk(finish_reason="length")),
+                ]
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert len(chunks) == 3
+    assert [c.content for c in chunks] == ["par", "", ""]
+    assert [c.usage_metadata for c in chunks] == [None, None, None]
+    assert chunks[1].response_metadata["finish_reason"] == "length"
+    assert chunks[1].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert chunks[1].response_metadata["model_provider"] == "openai"
+    assert chunks[1].chunk_position is None
+    d5a_assert_core_sentinel(chunks[2])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "par"
+    assert aggregated.usage_metadata is None
+    assert aggregated.response_metadata["finish_reason"] == "length"
+
+
+async def test_d5a_unknown_ainvoke(offline_openai):
+    """A synthetic unknown reason is accepted, not rejected.
+
+    The SDK defaults to lenient construction, which does not validate Literal
+    fields, so "d5a_unknown" survives to response_metadata verbatim. This is
+    an observation about the locked SDK, not a product decision to tolerate
+    unknown reasons.
+    """
+    offline_openai.respond(
+        json_response(completion_body("par", finish_reason="d5a_unknown"))
+    )
+    model = offline_openai.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "par"
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    assert result.response_metadata["finish_reason"] == "d5a_unknown"
+    # Everything else is identical to the "length" case.
+    assert result.response_metadata["token_usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 1,
+        "total_tokens": 4,
+        "prompt_tokens_details": None,
+        "completion_tokens_details": None,
+    }
+    assert result.response_metadata["id"] == "chatcmpl-offline"
+    assert result.response_metadata["model_provider"] == "openai"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+
+
+async def test_d5a_terminal_frame_missing_astream(offline_openai):
+    """A complete prefix of frames with no [DONE] terminator.
+
+    The OpenAI stream only breaks on a literal [DONE] sentinel, so a raw EOF
+    ends the stream without error. The resulting projection is the same shape
+    as a terminated stream; that is exactly why this test cannot claim the SDK
+    detected the missing terminator.
+    """
+    offline_openai.respond(
+        lambda request: offline_openai.sse_response(
+            offline_openai.sse_body(
+                [
+                    sse_event(stream_chunk("po")),
+                    sse_event(stream_chunk("ng")),
+                    sse_event(stream_chunk(finish_reason="stop")),
+                    sse_event(
+                        stream_chunk(
+                            choices=[],
+                            usage={
+                                "prompt_tokens": 3,
+                                "completion_tokens": 2,
+                                "total_tokens": 5,
+                            },
+                        )
+                    ),
+                ],
+                terminator=None,
+            )
+        )
+    )
+    model = offline_openai.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_openai.requests) == 1
+    assert request_json(offline_openai.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert len(chunks) == 5
+    assert [c.content for c in chunks] == ["po", "ng", "", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {},
+            "output_token_details": {},
+        },
+        None,
+    ]
+    assert chunks[2].response_metadata["finish_reason"] == "stop"
+    assert chunks[3].response_metadata == {}
+    # The core sentinel is still appended: the adapter never marks itself last.
+    d5a_assert_core_sentinel(chunks[4])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {},
+        "output_token_details": {},
+    }
+    assert aggregated.response_metadata["finish_reason"] == "stop"

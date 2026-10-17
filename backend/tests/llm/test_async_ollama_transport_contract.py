@@ -820,3 +820,531 @@ async def test_stream_eof_without_done_frame_delivers_text(offline_ollama):
     # required for the text to surface.
     assert len(offline_ollama.requests) == 1
     assert [c.content for c in chunks] == ["par", ""]
+
+
+# ===========================================================================
+# D5A-1 R2: normal completion/usage projection + streamed usage position
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline and is
+# unchanged. The usage numbers and chunk contents are carried over from the
+# first run unchanged; only the sentinel and request assertions are added.
+#
+#   langchain_core/language_models/chat_models.py:935-950   terminal sentinel
+#   langchain_ollama/chat_models.py:102-116    _get_usage_metadata_from_generation_info
+#   langchain_ollama/chat_models.py:1152-1176  _achat_stream_with_aggregation
+#   langchain_ollama/chat_models.py:1248-1282  done-frame generation_info + usage
+#   langchain_ollama/chat_models.py:1381-1403  _agenerate final-message projection
+#   langchain_core/messages/ai.py:676-715,721-740           chunk add sums usage
+# ===========================================================================
+
+
+def d5a_add_chunks(chunks: list) -> AIMessageChunk:
+    """LangChain's own public chunk addition, applied left to right."""
+    total = chunks[0]
+    for chunk in chunks[1:]:
+        total = total + chunk
+    return total
+
+
+def d5a_assert_core_sentinel(chunk: AIMessageChunk) -> None:
+    """Pin the langchain-core terminal sentinel exactly.
+
+    ``chat_models.py:935-950`` appends this chunk itself, after the adapter's
+    stream ends, whenever the last adapter chunk carried no ``chunk_position``.
+    The Ollama adapter never sets one, so the sentinel is always present here
+    and must be asserted rather than filtered out.
+    """
+    assert chunk.content == ""
+    assert chunk.usage_metadata is None
+    assert chunk.response_metadata == {}
+    assert chunk.chunk_position == "last"
+
+
+def d5a_counted_done_line(*, prompt: int, output: int, done_reason: str = "stop") -> str:
+    """A terminal done frame carrying *both* token counters.
+
+    ``done_line`` above ships only ``eval_count``, and
+    ``_get_usage_metadata_from_generation_info`` returns None unless
+    ``prompt_eval_count`` and ``eval_count`` are both present, so that shape
+    cannot express usage at all. This builder keeps both counters.
+    """
+    return json.dumps(
+        {
+            "model": REPRESENTATIVE_MODEL,
+            "created_at": "2026-10-13T00:00:00Z",
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "done_reason": done_reason,
+            "total_duration": 1000,
+            "prompt_eval_count": prompt,
+            "eval_count": output,
+        }
+    )
+
+
+def d5a_counted_stream(*, prompt: int, output: int) -> list[bytes]:
+    """Two content frames plus a counted terminal done frame."""
+    return ndjson(
+        content_line("po"),
+        content_line("ng"),
+        d5a_counted_done_line(prompt=prompt, output=output),
+    )
+
+
+async def test_d5a_baseline_ainvoke(offline_ollama):
+    """One normal non-stream answer pins the whole usage projection."""
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(d5a_counted_stream(prompt=7, output=3))
+        )
+    )
+    model = offline_ollama.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_ollama.requests) == 1
+    assert request_json(offline_ollama.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "pong"
+    # The wire has no total counter; the adapter adds the two it reads, and
+    # emits no *_token_details keys at all (so none are present here).
+    assert result.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    # The done frame is republished as generation_info with the raw wire keys
+    # intact, minus "message", plus the adapter's own two labels.
+    assert result.response_metadata["done"] is True
+    assert result.response_metadata["done_reason"] == "stop"
+    assert result.response_metadata["prompt_eval_count"] == 7
+    assert result.response_metadata["eval_count"] == 3
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "ollama"
+    assert "message" not in result.response_metadata
+
+
+async def test_d5a_baseline_astream(offline_ollama):
+    """Streamed usage lands on the terminal done frame."""
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(d5a_counted_stream(prompt=7, output=3))
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    # Two content frames, the terminal done frame, and the langchain-core
+    # sentinel the adapter never marks itself.
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    # Content frames carry no counters, so only the done frame has usage, and
+    # it is index 2 rather than the final chunk.
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        None,
+    ]
+    assert chunks[2].response_metadata["done_reason"] == "stop"
+    assert chunks[2].response_metadata["model_provider"] == "ollama"
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert aggregated.response_metadata["done_reason"] == "stop"
+
+
+async def test_d5a_usage_lifecycle_astream(offline_ollama):
+    """Exactly one usage report, and it is the terminal adapter frame.
+
+    ``/api/chat`` reports ``prompt_eval_count`` and ``eval_count`` only on the
+    terminal done frame; content frames carry no counters. A single request
+    therefore cannot separate cumulative from incremental reporting. The test
+    pins that real single-terminal shape rather than inventing mid-stream
+    counters the protocol does not send.
+    """
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(d5a_counted_stream(prompt=7, output=3))
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        None,
+    ]
+    # The no-usage range is exactly the two content frames; the terminal
+    # adapter frame reports usage and the sentinel reports none.
+    assert chunks[0].usage_metadata is None
+    assert chunks[1].usage_metadata is None
+    assert chunks[2].usage_metadata is not None
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+
+
+# ===========================================================================
+# D5A-2: completion boundaries and missing usage (7 nodes)
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline plus
+# the accepted D5A-1 section, and is unchanged. Each fixed expectation was
+# derived from the locked sources below, not from an observed run:
+#
+#   ollama/_types.py:230-246                 done_reason: Optional[str]
+#   ollama/_client.py:785-788                ChatResponse(**part)
+#   langchain_ollama/chat_models.py:102-116  needs BOTH counters
+#   langchain_ollama/chat_models.py:1330-1342 dict(stream_resp) as generation_info
+#   langchain_ollama/chat_models.py:1172-1174 raise only when zero frames
+#   langchain_core/language_models/chat_models.py:935-950  core sentinel
+#   langchain_core/messages/ai.py:676-681    no usage -> None
+# ===========================================================================
+
+
+def d5a2_done_line(*, payload: dict) -> str:
+    """One done frame whose shape is supplied field by field.
+
+    ``done_line`` above always ships done_reason and eval_count, and
+    ``d5a_counted_done_line`` always ships both counters, so neither can express
+    "reason absent", "reason null" or "counters absent" as separate wires.
+    """
+    frame: dict = {
+        "model": REPRESENTATIVE_MODEL,
+        "created_at": "2026-10-13T00:00:00Z",
+        "message": {"role": "assistant", "content": ""},
+        "done": True,
+        "total_duration": 1000,
+    }
+    frame.update(payload)
+    return json.dumps(frame)
+
+
+def d5a2_no_reason_done_line(*, prompt: int, output: int) -> str:
+    """A counted done frame whose done_reason key is simply absent."""
+    return d5a2_done_line(
+        payload={"prompt_eval_count": prompt, "eval_count": output}
+    )
+
+
+def d5a2_null_reason_done_line(*, prompt: int, output: int) -> str:
+    """A counted done frame carrying an explicit JSON null done_reason."""
+    return d5a2_done_line(
+        payload={
+            "done_reason": None,
+            "prompt_eval_count": prompt,
+            "eval_count": output,
+        }
+    )
+
+
+def d5a2_uncounted_done_line(*, done_reason: str = "stop") -> str:
+    """A done frame with a reason but neither token counter."""
+    return d5a2_done_line(payload={"done_reason": done_reason})
+
+
+def d5a2_stream(done_line_text: str) -> list[bytes]:
+    """Two content frames plus the supplied done frame."""
+    return ndjson(content_line("po"), content_line("ng"), done_line_text)
+
+
+async def test_d5a_completion_missing_astream(offline_ollama):
+    """No done_reason key on the done frame, counters still present."""
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(
+                d5a2_stream(d5a2_no_reason_done_line(prompt=7, output=3))
+            )
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        None,
+    ]
+    # The done frame is republished verbatim, and pydantic materialises every
+    # declared field, so done_reason is present as None rather than absent.
+    assert chunks[2].response_metadata["done"] is True
+    assert "done_reason" in chunks[2].response_metadata
+    assert chunks[2].response_metadata["done_reason"] is None
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert aggregated.response_metadata["done_reason"] is None
+
+
+async def test_d5a_completion_null_astream(offline_ollama):
+    """An explicit JSON null done_reason, kept apart from the missing key.
+
+    Both shapes decode to None on a declared field, so the projection is the
+    same as test_d5a_completion_missing_astream. The wire really does differ.
+    """
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(
+                d5a2_stream(d5a2_null_reason_done_line(prompt=7, output=3))
+            )
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert "done_reason" not in json.loads(d5a2_no_reason_done_line(prompt=7, output=3))
+    assert json.loads(d5a2_null_reason_done_line(prompt=7, output=3))["done_reason"] is None
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        None,
+    ]
+    assert "done_reason" in chunks[2].response_metadata
+    assert chunks[2].response_metadata["done_reason"] is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert aggregated.response_metadata["done_reason"] is None
+
+
+async def test_d5a_usage_missing_astream(offline_ollama):
+    """Completion signal normal, neither token counter sent.
+
+    The adapter needs both counters to build any usage at all, so a frame with
+    neither produces no usage rather than a zero one.
+    """
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(d5a2_stream(d5a2_uncounted_done_line()))
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [None, None, None, None]
+    assert chunks[2].response_metadata["done_reason"] == "stop"
+    assert chunks[2].response_metadata["prompt_eval_count"] is None
+    assert chunks[2].response_metadata["eval_count"] is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata is None
+    assert aggregated.response_metadata["done_reason"] == "stop"
+
+
+async def test_d5a_truncated_ainvoke(offline_ollama):
+    """The protocol's own truncation reason, "length"."""
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(
+                d5a2_stream(
+                    d5a_counted_done_line(prompt=7, output=3, done_reason="length")
+                )
+            )
+        )
+    )
+    model = offline_ollama.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+
+    assert result.content == "pong"
+    assert result.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    # done_reason is a plain Optional[str] here, never a Literal and never
+    # branched on except for the "load" skip case.
+    assert result.response_metadata["done_reason"] == "length"
+    assert result.response_metadata["done"] is True
+    assert result.response_metadata["prompt_eval_count"] == 7
+    assert result.response_metadata["eval_count"] == 3
+    assert result.response_metadata["model_provider"] == "ollama"
+    assert "message" not in result.response_metadata
+
+
+async def test_d5a_truncated_astream(offline_ollama):
+    """The same "length" reason through the streaming entry."""
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(
+                d5a2_stream(
+                    d5a_counted_done_line(prompt=7, output=3, done_reason="length")
+                )
+            )
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        None,
+    ]
+    assert chunks[2].response_metadata["done_reason"] == "length"
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert aggregated.response_metadata["done_reason"] == "length"
+
+
+async def test_d5a_unknown_ainvoke(offline_ollama):
+    """A synthetic unknown done_reason is accepted, not rejected."""
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(
+                d5a2_stream(
+                    d5a_counted_done_line(
+                        prompt=7, output=3, done_reason="d5a_unknown"
+                    )
+                )
+            )
+        )
+    )
+    model = offline_ollama.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_ollama.requests) == 1
+    assert request_json(offline_ollama.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "pong"
+    assert result.usage_metadata == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    # The adapter never normalises the reason, so the raw string survives.
+    assert result.response_metadata["done_reason"] == "d5a_unknown"
+    assert result.response_metadata["model_provider"] == "ollama"
+    assert result.response_metadata["eval_count"] == 3
+
+
+async def test_d5a_terminal_frame_missing_astream(offline_ollama):
+    """A complete content prefix with no done frame at all.
+
+    No data is lost in the sense of raising: the text still surfaces. What is
+    missing is every completion and usage fact the done frame would have
+    carried, so the aggregate metadata is empty and the aggregate usage is None.
+    """
+    offline_ollama.respond(
+        lambda request: offline_ollama.ndjson_response(
+            offline_ollama.ndjson_body(ndjson(content_line("po"), content_line("ng")))
+        )
+    )
+    model = offline_ollama.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_ollama.requests) == 1
+    body = request_json(offline_ollama.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 3
+    assert [c.content for c in chunks] == ["po", "ng", ""]
+    assert [c.usage_metadata for c in chunks] == [None, None, None]
+    # Content frames carry no generation_info, so nothing lands in metadata.
+    assert chunks[0].response_metadata == {}
+    assert chunks[1].response_metadata == {}
+    d5a_assert_core_sentinel(chunks[2])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata is None
+    assert aggregated.response_metadata == {}
