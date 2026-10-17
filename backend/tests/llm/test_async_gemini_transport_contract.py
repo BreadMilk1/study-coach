@@ -1213,3 +1213,629 @@ async def test_stream_eof_after_content_frame_delivers_text(offline_gemini):
 
     assert len(offline_gemini.requests) == 1
     assert "".join(c.content for c in chunks if isinstance(c.content, str)) == "par"
+
+
+# ===========================================================================
+# D5A-1 R2: normal completion/usage projection + streamed usage position
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline and is
+# unchanged. The usage numbers and chunk contents are carried over from the
+# first run unchanged; only the sentinel and request assertions are added.
+#
+#   langchain_core/language_models/chat_models.py:935-950   terminal sentinel
+#   langchain_google_genai/chat_models.py:846-880    _parse_response_candidate
+#   langchain_google_genai/chat_models.py:1104-1161  _response_to_result usage
+#   langchain_google_genai/chat_models.py:1163-1223  generation_info per frame
+#   langchain_google_genai/chat_models.py:3199-3234  _astream prev_usage threading
+#   langchain_core/messages/ai.py:676-715,721-740   chunk add sums usage
+#   langchain_core/messages/ai.py:790-840          subtract_usage
+# ===========================================================================
+
+
+def d5a_add_chunks(chunks: list) -> AIMessageChunk:
+    """LangChain's own public chunk addition, applied left to right."""
+    total = chunks[0]
+    for chunk in chunks[1:]:
+        total = total + chunk
+    return total
+
+
+def d5a_assert_core_sentinel(chunk: AIMessageChunk) -> None:
+    """Pin the langchain-core terminal sentinel exactly.
+
+    ``chat_models.py:935-950`` appends this chunk itself, after the adapter's
+    stream ends, whenever the last adapter chunk carried no ``chunk_position``.
+    The Gemini adapter never sets one, so the sentinel is always present here
+    and must be asserted rather than filtered out.
+    """
+    assert chunk.content == ""
+    assert chunk.usage_metadata is None
+    assert chunk.response_metadata == {}
+    assert chunk.chunk_position == "last"
+
+
+def d5a_frame(
+    text: str,
+    *,
+    usage: dict | None = None,
+    finish_reason: str | None = None,
+) -> bytes:
+    """One Gemini streaming frame that may carry ``usageMetadata``.
+
+    ``stream_frames`` above never attaches usage, so it cannot express where
+    usage arrives. ``modelVersion`` is always included because the adapter
+    reads the model name from it.
+    """
+    payload: dict = {
+        "modelVersion": REPRESENTATIVE_MODEL,
+        "candidates": [candidate(text, finish_reason=finish_reason)],
+    }
+    if usage is not None:
+        payload["usageMetadata"] = usage
+    return sse_frame(payload)
+
+
+async def test_d5a_baseline_ainvoke(offline_gemini):
+    """One normal non-stream response pins the whole usage projection."""
+    offline_gemini.respond(json_response(generate_response("pong")))
+    model = offline_gemini.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=False)
+
+    assert result.content == "pong"
+    # totalTokenCount is read straight off the wire rather than recomputed.
+    # Note this fixture cannot by itself separate "read the total" from
+    # "recomputed 3 + 2", because 5 happens to equal 3 + 2 here.
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    # cache_read is always projected -- as 0 when the wire omits
+    # cachedContentTokenCount -- unlike OpenAI/Anthropic, which drop absent
+    # detail keys entirely.
+    assert result.response_metadata["finish_reason"] == "STOP"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "google_genai"
+    assert result.response_metadata["safety_ratings"] == []
+
+
+async def test_d5a_baseline_astream(offline_gemini):
+    """Streamed usage lands on the terminal frame, and its position is pinned."""
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body(
+                [
+                    d5a_frame("po"),
+                    d5a_frame("ng"),
+                    d5a_frame(
+                        "",
+                        finish_reason="STOP",
+                        usage={
+                            "promptTokenCount": 3,
+                            "candidatesTokenCount": 2,
+                            "totalTokenCount": 5,
+                        },
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    # Two text frames, the terminal frame, and the langchain-core sentinel the
+    # adapter never marks itself.
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    # Only the frame that actually carries usageMetadata projects a usage
+    # delta; the two text frames leave prev_usage at None and report nothing.
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {"cache_read": 0},
+        },
+        None,
+    ]
+    # model_name reaches response_metadata only on the finishing frame, so
+    # concatenating chunks does not duplicate it. That frame is index 2; the
+    # sentinel follows it.
+    assert "finish_reason" not in chunks[0].response_metadata
+    assert "model_name" not in chunks[0].response_metadata
+    assert chunks[2].response_metadata["finish_reason"] == "STOP"
+    assert chunks[2].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    assert aggregated.response_metadata["finish_reason"] == "STOP"
+
+
+async def test_d5a_usage_lifecycle_astream(offline_gemini):
+    """The wire is cumulative; the adapter projects deltas; summing recovers it.
+
+    Gemini repeats accumulated ``usageMetadata`` on later frames, so this is
+    the one provider where a single request can distinguish cumulative from
+    incremental reporting. Three frames report growing totals; the adapter
+    subtracts the running previous value, so each chunk carries the increment
+    (4,2,6) then (0,3,3) then (0,2,2). LangChain's own chunk addition then
+    reproduces the cumulative (4,7,11) with no double counting.
+    """
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body(
+                [
+                    d5a_frame(
+                        "po",
+                        usage={
+                            "promptTokenCount": 4,
+                            "candidatesTokenCount": 2,
+                            "totalTokenCount": 6,
+                        },
+                    ),
+                    d5a_frame(
+                        "ng",
+                        usage={
+                            "promptTokenCount": 4,
+                            "candidatesTokenCount": 5,
+                            "totalTokenCount": 9,
+                        },
+                    ),
+                    d5a_frame(
+                        "",
+                        finish_reason="STOP",
+                        usage={
+                            "promptTokenCount": 4,
+                            "candidatesTokenCount": 7,
+                            "totalTokenCount": 11,
+                        },
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    # Per-frame deltas, not the wire's cumulative numbers, plus the core
+    # sentinel which reports no usage at all.
+    assert len(chunks) == 4
+    assert [c.usage_metadata for c in chunks] == [
+        {
+            "input_tokens": 4,
+            "output_tokens": 2,
+            "total_tokens": 6,
+            "input_token_details": {"cache_read": 0},
+        },
+        {
+            "input_tokens": 0,
+            "output_tokens": 3,
+            "total_tokens": 3,
+            "input_token_details": {"cache_read": 0},
+        },
+        {
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "total_tokens": 2,
+            "input_token_details": {"cache_read": 0},
+        },
+        None,
+    ]
+    # Usage is present from the very first frame here, unlike the single
+    # terminal report the other three providers send.
+    assert chunks[0].usage_metadata is not None
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 4,
+        "output_tokens": 7,
+        "total_tokens": 11,
+        "input_token_details": {"cache_read": 0},
+    }
+
+
+# ===========================================================================
+# D5A-2: completion boundaries and missing usage (7 nodes)
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline plus
+# the accepted D5A-1 section, and is unchanged. Each fixed expectation was
+# derived from the locked sources below, not from an observed run:
+#
+#   google/genai/types.py:425-443            FinishReason members
+#   google/genai/_common.py:651              unknown value warns, is accepted
+#   langchain_google_genai/chat_models.py:1163-1183  finish_reason -> .name
+#   langchain_google_genai/chat_models.py:1116-1159  usage projection
+#   langchain_core/language_models/chat_models.py:935-950  core sentinel
+#   langchain_core/messages/ai.py:676-681    no usage -> None
+#   backend/pyproject.toml                   no filterwarnings config
+# ===========================================================================
+
+
+def d5a2_null_finish_frame() -> bytes:
+    """One frame whose candidate carries an explicit JSON null finishReason.
+
+    ``candidate`` above omits the key whenever finish_reason is None, so an
+    explicit null cannot be expressed with it. The usageMetadata is carried
+    exactly as in the missing-key case, so the two closing frames differ only
+    in how finishReason is expressed.
+    """
+    null_candidate = candidate("", finish_reason=None)
+    null_candidate["finishReason"] = None
+    return sse_frame(
+        {
+            "modelVersion": REPRESENTATIVE_MODEL,
+            "candidates": [null_candidate],
+            "usageMetadata": {
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 5,
+            },
+        }
+    )
+
+
+async def test_d5a_completion_missing_astream(offline_gemini):
+    """No finishReason key on the closing frame, usageMetadata still sent."""
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body(
+                [
+                    d5a_frame("po"),
+                    d5a_frame("ng"),
+                    d5a_frame(
+                        "",
+                        usage={
+                            "promptTokenCount": 3,
+                            "candidatesTokenCount": 2,
+                            "totalTokenCount": 5,
+                        },
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {"cache_read": 0},
+        },
+        None,
+    ]
+    # model_name only rides along with a truthy finish_reason, so even though
+    # the frame carries modelVersion this chunk has neither key.
+    assert chunks[2].response_metadata == {
+        "model_provider": "google_genai",
+        "safety_ratings": [],
+    }
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    assert aggregated.response_metadata == {
+        "model_provider": "google_genai",
+        "safety_ratings": [],
+    }
+
+
+async def test_d5a_completion_null_astream(offline_gemini):
+    """An explicit JSON null finishReason, kept apart from the missing key.
+
+    Candidate.finish_reason is Optional, so an absent key and an explicit null
+    decode identically and the projection matches
+    test_d5a_completion_missing_astream. The wire really does differ.
+    """
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body(
+                [
+                    d5a_frame("po"),
+                    d5a_frame("ng"),
+                    d5a2_null_finish_frame(),
+                ]
+            )
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    assert json.loads(
+        d5a_frame(
+            "",
+            usage={
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 5,
+            },
+        ).split(b"data: ", 1)[1]
+    )["candidates"][0] != json.loads(
+        d5a2_null_finish_frame().split(b"data: ", 1)[1]
+    )["candidates"][0]
+    # The two closing frames differ only in how finishReason is expressed:
+    # absent key on one side, explicit null on the other, and nothing else.
+    missing_frame = json.loads(
+        d5a_frame(
+            "",
+            usage={
+                "promptTokenCount": 3,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 5,
+            },
+        ).split(b"data: ", 1)[1]
+    )
+    null_frame = json.loads(d5a2_null_finish_frame().split(b"data: ", 1)[1])
+    missing_candidate = dict(missing_frame["candidates"][0])
+    null_candidate = dict(null_frame["candidates"][0])
+    assert "finishReason" not in missing_candidate
+    assert null_candidate["finishReason"] is None
+    del null_candidate["finishReason"]
+    assert missing_candidate == null_candidate
+    # usage must not differ either: this case is about the reason key alone.
+    assert missing_frame["usageMetadata"] == null_frame["usageMetadata"]
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {"cache_read": 0},
+        },
+        None,
+    ]
+    assert chunks[2].response_metadata == {
+        "model_provider": "google_genai",
+        "safety_ratings": [],
+    }
+    assert chunks[2].chunk_position is None
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    assert aggregated.response_metadata == {
+        "model_provider": "google_genai",
+        "safety_ratings": [],
+    }
+
+
+async def test_d5a_usage_missing_astream(offline_gemini):
+    """Completion signal normal, usageMetadata simply not sent."""
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body(
+                [d5a_frame("po"), d5a_frame("ng"), d5a_frame("", finish_reason="STOP")]
+            )
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    # No frame carries usageMetadata, so every chunk reports none and the
+    # aggregate is None rather than a zero dict.
+    assert [c.usage_metadata for c in chunks] == [None, None, None, None]
+    assert chunks[2].response_metadata["finish_reason"] == "STOP"
+    assert chunks[2].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata is None
+    assert aggregated.response_metadata["finish_reason"] == "STOP"
+
+
+async def test_d5a_truncated_ainvoke(offline_gemini):
+    """The protocol's own truncation reason, MAX_TOKENS."""
+    offline_gemini.respond(
+        json_response(generate_response("pong", finish_reason="MAX_TOKENS"))
+    )
+    model = offline_gemini.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=False)
+
+    assert result.content == "pong"
+    # cache_read is always projected, as 0 when the wire omits the field.
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    # The adapter publishes the enum member's .name, never the value object,
+    # and adds no truncation flag of its own.
+    assert result.response_metadata["finish_reason"] == "MAX_TOKENS"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "google_genai"
+    assert result.response_metadata["safety_ratings"] == []
+
+
+async def test_d5a_truncated_astream(offline_gemini):
+    """The same MAX_TOKENS reason through the streaming entry."""
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body(
+                [
+                    d5a_frame("po"),
+                    d5a_frame("ng"),
+                    d5a_frame(
+                        "",
+                        finish_reason="MAX_TOKENS",
+                        usage={
+                            "promptTokenCount": 3,
+                            "candidatesTokenCount": 2,
+                            "totalTokenCount": 5,
+                        },
+                    ),
+                ]
+            )
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        {
+            "input_tokens": 3,
+            "output_tokens": 2,
+            "total_tokens": 5,
+            "input_token_details": {"cache_read": 0},
+        },
+        None,
+    ]
+    assert chunks[2].response_metadata["finish_reason"] == "MAX_TOKENS"
+    assert chunks[2].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    d5a_assert_core_sentinel(chunks[3])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    assert aggregated.response_metadata["finish_reason"] == "MAX_TOKENS"
+
+
+async def test_d5a_unknown_ainvoke(offline_gemini):
+    """A synthetic unknown finishReason is accepted, with a warning.
+
+    The CaseInSensitiveEnum accepts any string, warns that it is not a valid
+    FinishReason, and keeps .name equal to the raw wire string. The warning is
+    part of the accepted behaviour, not a failure.
+    """
+    offline_gemini.respond(
+        json_response(generate_response("pong", finish_reason="d5a_unknown"))
+    )
+    model = offline_gemini.model()
+
+    with pytest.warns(UserWarning, match="not a valid FinishReason"):
+        result = await model.ainvoke("ping")
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=False)
+
+    assert result.content == "pong"
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+        "input_token_details": {"cache_read": 0},
+    }
+    # The raw string is passed through; the UNKNOWN_... fallback would need an
+    # integer finish reason, which this wire does not send.
+    assert result.response_metadata["finish_reason"] == "d5a_unknown"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "google_genai"
+
+
+async def test_d5a_terminal_frame_missing_astream(offline_gemini):
+    """A complete content prefix with no closing finish frame.
+
+    Every frame still carries a candidate, so the adapter never takes its
+    empty-candidates branch; what is missing is the finish reason, the model
+    name and the usage.
+    """
+    offline_gemini.respond(
+        lambda request: offline_gemini.sse_response(
+            offline_gemini.frame_body([d5a_frame("par"), d5a_frame("tial")])
+        )
+    )
+    model = offline_gemini.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_gemini.requests) == 1
+    assert_real_request(offline_gemini.requests[0], streaming=True)
+
+    assert len(chunks) == 3
+    assert [c.content for c in chunks] == ["par", "tial", ""]
+    assert [c.usage_metadata for c in chunks] == [None, None, None]
+    assert all(
+        c.response_metadata
+        == {"model_provider": "google_genai", "safety_ratings": []}
+        for c in chunks[:2]
+    )
+    d5a_assert_core_sentinel(chunks[2])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "partial"
+    assert aggregated.usage_metadata is None
+    assert aggregated.response_metadata == {
+        "model_provider": "google_genai",
+        "safety_ratings": [],
+    }
