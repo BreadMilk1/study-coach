@@ -1094,3 +1094,625 @@ async def test_stream_transport_eof_without_message_stop(offline_anthropic, even
 
     assert len(offline_anthropic.requests) == 1
     assert "".join(c.content for c in chunks if isinstance(c.content, str)) == "par"
+
+
+# ===========================================================================
+# D5A-1 R2: normal completion/usage projection + streamed usage position
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline and is
+# unchanged. Each fixed expectation was derived from the locked sources below,
+# not from an observed run. The usage numbers and chunk contents are carried
+# over from the first run unchanged; only the sentinel and request assertions
+# are added.
+#
+#   langchain_core/language_models/chat_models.py:935-950   terminal sentinel
+#   langchain_anthropic/chat_models.py:1483-1494            message_start
+#   langchain_anthropic/chat_models.py:1540-1548            text_delta
+#   langchain_anthropic/chat_models.py:1602-1631            message_delta + last
+#   langchain_anthropic/chat_models.py:1634-1689            _format_output
+#   langchain_anthropic/chat_models.py:2255-2304            _create_usage_metadata
+#   langchain_core/messages/ai.py:676-715,721-740           chunk add sums usage
+# ===========================================================================
+
+
+def d5a_add_chunks(chunks: list) -> AIMessageChunk:
+    """LangChain's own public chunk addition, applied left to right."""
+    total = chunks[0]
+    for chunk in chunks[1:]:
+        total = total + chunk
+    return total
+
+
+def d5a_stream_with_usage(open_usage: dict, final_output: int) -> list[bytes]:
+    """A legal Anthropic stream whose two usage reports both increase.
+
+    Anthropic reports ``input_tokens`` once, in ``message_start``, and a
+    growing ``output_tokens`` in ``message_delta``. Both frames are built here
+    so the lifecycle test can show where the adapter projects each one.
+    """
+    start = message_payload()
+    start["content"] = []
+    start["stop_reason"] = None
+    start["usage"] = open_usage
+    return [
+        sse_event(
+            json.dumps({"type": "message_start", "message": start}),
+            event="message_start",
+        ),
+        event_content_block_start(),
+        event_content_block_delta("po"),
+        event_content_block_delta("ng"),
+        event_content_block_stop(),
+        sse_event(
+            json.dumps(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": final_output},
+                }
+            ),
+            event="message_delta",
+        ),
+        event_message_stop(),
+    ]
+
+
+async def test_d5a_baseline_ainvoke(offline_anthropic):
+    """One normal non-stream message pins the whole usage projection."""
+    offline_anthropic.respond(json_response(message_payload("pong")))
+    model = offline_anthropic.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_anthropic.requests) == 1
+    assert request_json(offline_anthropic.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "pong"
+    # _create_usage_metadata recomposes input as base + cache_read +
+    # cache_creation and drops the cache keys when Anthropic reports them as
+    # None, so total is derived (3 + 1) rather than read off the wire.
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "input_token_details": {},
+    }
+    assert result.response_metadata["stop_reason"] == "end_turn"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "anthropic"
+    # The untouched model dump is published alongside the renamed projection.
+    assert result.response_metadata["usage"]["input_tokens"] == 3
+    assert result.response_metadata["usage"]["output_tokens"] == 1
+
+
+async def test_d5a_baseline_astream(offline_anthropic):
+    """Streamed usage lands on the terminal frame, and its position is pinned.
+
+    Anthropic is the one adapter that marks its own terminal frame with
+    ``chunk_position="last"``, so langchain-core appends no sentinel here and
+    the last chunk really is the adapter's.
+    """
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(full_text_stream("po", "ng"))
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    # message_start, two text deltas, message_delta. The text content_block
+    # frame and both stop frames are unhandled event types and yield nothing.
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["", "po", "ng", ""]
+    # message_start deliberately withholds usage ("not needed ... reported in
+    # message_delta"), and message_delta carries no input_tokens, so the
+    # streamed input count is 0 even though the opening frame reported 3.
+    # That 0 is the adapter's omission, not a provider-reported zero.
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "total_tokens": 2,
+            "input_token_details": {},
+        },
+    ]
+    assert chunks[0].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert chunks[-1].response_metadata["stop_reason"] == "end_turn"
+    assert chunks[-1].response_metadata["stop_sequence"] is None
+    assert all(c.response_metadata["model_provider"] == "anthropic" for c in chunks)
+    # The adapter marks this frame itself, which is why core adds no sentinel.
+    assert chunks[-1].chunk_position == "last"
+    assert chunks[-2].chunk_position is None
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 2,
+        "total_tokens": 2,
+        "input_token_details": {},
+    }
+    assert aggregated.response_metadata["stop_reason"] == "end_turn"
+
+
+async def test_d5a_usage_lifecycle_astream(offline_anthropic):
+    """Two increasing cumulative wire reports; only the last one is projected.
+
+    The wire raises output_tokens 1 -> 5 across the two usage frames. The
+    adapter projects neither as a running total: message_start is withheld by
+    design and message_delta is taken as-is. So the streamed lifecycle carries
+    one terminal report, and the input count reported at open is not merged.
+    """
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(
+                d5a_stream_with_usage(
+                    open_usage={"input_tokens": 3, "output_tokens": 1},
+                    final_output=5,
+                )
+            )
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    # The opening frame reports input 3 / output 1, yet it carries no
+    # usage_metadata at all.
+    assert len(chunks) == 4
+    assert chunks[0].usage_metadata is None
+    assert chunks[0].response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 5,
+            "total_tokens": 5,
+            "input_token_details": {},
+        },
+    ]
+    # Only the terminal adapter frame carries usage, and nothing follows it.
+    assert chunks[1].usage_metadata is None
+    assert chunks[2].usage_metadata is None
+    assert chunks[-1].chunk_position == "last"
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 5,
+        "total_tokens": 5,
+        "input_token_details": {},
+    }
+
+
+# ===========================================================================
+# D5A-2: completion boundaries and missing usage (7 nodes)
+#
+# Appended at EOF only. Every byte above this marker is the D4 baseline plus
+# the accepted D5A-1 section, and is unchanged. Each fixed expectation was
+# derived from the locked sources below, not from an observed run:
+#
+#   anthropic/types/raw_message_delta_event.py:25,35  stop_reason/usage
+#   anthropic/types/stop_reason.py                    StopReason Literal
+#   anthropic/_client.py:573 + _base_client.py:669   lenient construct
+#   langchain_anthropic/chat_models.py:1602-1631      message_delta + last
+#   langchain_anthropic/chat_models.py:1625-1628      message_stop unhandled
+#   langchain_anthropic/chat_models.py:2255-2304      _create_usage_metadata
+#   langchain_core/language_models/chat_models.py:935-950   core sentinel
+#   langchain_core/messages/ai.py:676-681             no usage -> None
+# ===========================================================================
+
+
+def d5a2_message_delta(
+    *,
+    stop_reason: str = "end_turn",
+    omit_stop_reason: bool = False,
+    omit_usage: bool = False,
+) -> bytes:
+    """One ``message_delta`` frame with individually removable parts.
+
+    ``event_message_delta`` above always sends both ``delta.stop_reason`` and
+    ``usage``, so it cannot express "reason absent" or "usage absent" as
+    separate wire shapes.
+
+    The missing-reason branch still carries ``stop_sequence``, so omitting the
+    reason differs from sending an explicit null in exactly one key. Both
+    fields default to None on the SDK's ``Delta``, so this changes nothing
+    about the projected message.
+    """
+    delta: dict = {"stop_sequence": None}
+    if not omit_stop_reason:
+        delta["stop_reason"] = stop_reason
+    body: dict = {"type": "message_delta", "delta": delta}
+    if not omit_usage:
+        body["usage"] = {"output_tokens": 2}
+    return sse_event(json.dumps(body), event="message_delta")
+
+
+def d5a2_stream(*, message_delta: bytes) -> list[bytes]:
+    """A full Anthropic stream whose ``message_delta`` frame is supplied."""
+    return [
+        event_message_start(),
+        event_content_block_start(),
+        event_content_block_delta("po"),
+        event_content_block_delta("ng"),
+        event_content_block_stop(),
+        message_delta,
+        event_message_stop(),
+    ]
+
+
+def d5a_assert_anthropic_sentinel(chunk: AIMessageChunk) -> None:
+    """Pin the langchain-core terminal sentinel.
+
+    ``chat_models.py:935-950`` appends this chunk whenever the adapter's last
+    chunk carries no ``chunk_position``. Anthropic normally marks its own final
+    frame, so the sentinel is expected only in the boundary cases where the
+    stop_reason that triggers that marking is absent.
+    """
+    assert chunk.content == ""
+    assert chunk.usage_metadata is None
+    assert chunk.response_metadata == {}
+    assert chunk.chunk_position == "last"
+
+
+async def test_d5a_completion_missing_astream(offline_anthropic):
+    """No stop_reason key in message_delta, while body text and usage remain.
+
+    Because the reason is falsy the adapter does not mark this frame as the
+    last one, so langchain-core appends its sentinel afterwards.
+    """
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(
+                d5a2_stream(message_delta=d5a2_message_delta(omit_stop_reason=True))
+            )
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 5
+    assert [c.content for c in chunks] == ["", "po", "ng", "", ""]
+    # message_delta carries no input_tokens, so the streamed input count is 0:
+    # the adapter withholds message_start usage by design. That 0 is an
+    # adapter omission, not a provider-reported zero.
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "total_tokens": 2,
+            "input_token_details": {},
+        },
+        None,
+    ]
+    assert chunks[3].response_metadata == {
+        "stop_reason": None,
+        "stop_sequence": None,
+        "model_provider": "anthropic",
+    }
+    assert chunks[3].chunk_position is None
+    d5a_assert_anthropic_sentinel(chunks[4])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 2,
+        "total_tokens": 2,
+        "input_token_details": {},
+    }
+    assert aggregated.response_metadata["stop_reason"] is None
+    assert aggregated.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+
+
+async def test_d5a_completion_null_astream(offline_anthropic):
+    """An explicit JSON null stop_reason, kept apart from the missing key.
+
+    Delta.stop_reason defaults to None, so an absent key and an explicit null
+    decode identically and the projection is byte-for-byte the same as
+    test_d5a_completion_missing_astream. The wire really does differ.
+    """
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(
+                d5a2_stream(message_delta=d5a2_message_delta(stop_reason=None))
+            )
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    missing_delta = json.loads(
+        d5a2_message_delta(omit_stop_reason=True).split(b"data: ", 1)[1]
+    )["delta"]
+    null_delta = json.loads(
+        d5a2_message_delta(stop_reason=None).split(b"data: ", 1)[1]
+    )["delta"]
+    # The two deltas differ in exactly one key: stop_reason is absent on one
+    # side and explicitly null on the other, with stop_sequence sent by both.
+    assert missing_delta == {"stop_sequence": None}
+    assert null_delta == {"stop_sequence": None, "stop_reason": None}
+    assert set(null_delta) - set(missing_delta) == {"stop_reason"}
+
+    assert len(chunks) == 5
+    assert [c.content for c in chunks] == ["", "po", "ng", "", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "total_tokens": 2,
+            "input_token_details": {},
+        },
+        None,
+    ]
+    assert chunks[3].response_metadata == {
+        "stop_reason": None,
+        "stop_sequence": None,
+        "model_provider": "anthropic",
+    }
+    assert chunks[3].chunk_position is None
+    d5a_assert_anthropic_sentinel(chunks[4])
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 2,
+        "total_tokens": 2,
+        "input_token_details": {},
+    }
+    assert aggregated.response_metadata["stop_reason"] is None
+
+
+async def test_d5a_usage_missing_astream(offline_anthropic):
+    """Completion signal normal, usage simply not sent.
+
+    RawMessageDeltaEvent.usage is a required field, but the SDK constructs
+    responses leniently and fills the absent field with its default None, so
+    _create_usage_metadata(None) derives an all-zero usage. Those zeros are
+    SDK-derived: the provider reported no usage at all.
+    """
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(
+                d5a2_stream(message_delta=d5a2_message_delta(omit_usage=True))
+            )
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    # stop_reason is still present, so this frame is marked last and core adds
+    # no sentinel.
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["", "po", "ng", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "input_token_details": {},
+        },
+    ]
+    assert chunks[3].response_metadata == {
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "model_provider": "anthropic",
+    }
+    assert chunks[3].chunk_position == "last"
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "input_token_details": {},
+    }
+    assert aggregated.response_metadata["stop_reason"] == "end_turn"
+
+
+async def test_d5a_truncated_ainvoke(offline_anthropic):
+    """The protocol's own truncation reason, "max_tokens"."""
+    payload = message_payload("pong")
+    payload["stop_reason"] = "max_tokens"
+    offline_anthropic.respond(json_response(payload))
+    model = offline_anthropic.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_anthropic.requests) == 1
+    assert request_json(offline_anthropic.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "pong"
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "input_token_details": {},
+    }
+    # "max_tokens" is a real StopReason literal; the adapter republishes the
+    # raw dump and adds no truncation flag of its own.
+    assert result.response_metadata["stop_reason"] == "max_tokens"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "anthropic"
+    assert result.response_metadata["usage"]["input_tokens"] == 3
+    assert result.response_metadata["usage"]["output_tokens"] == 1
+
+
+async def test_d5a_truncated_astream(offline_anthropic):
+    """The same "max_tokens" reason through the streaming entry."""
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(
+                d5a2_stream(message_delta=d5a2_message_delta(stop_reason="max_tokens"))
+            )
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["", "po", "ng", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "total_tokens": 2,
+            "input_token_details": {},
+        },
+    ]
+    assert chunks[3].response_metadata == {
+        "stop_reason": "max_tokens",
+        "stop_sequence": None,
+        "model_provider": "anthropic",
+    }
+    assert chunks[3].chunk_position == "last"
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 2,
+        "total_tokens": 2,
+        "input_token_details": {},
+    }
+    assert aggregated.response_metadata["stop_reason"] == "max_tokens"
+
+
+async def test_d5a_unknown_ainvoke(offline_anthropic):
+    """A synthetic unknown stop_reason is accepted, not rejected.
+
+    The SDK builds responses leniently and does not validate Literal fields, so
+    "d5a_unknown" reaches response_metadata verbatim.
+    """
+    payload = message_payload("pong")
+    payload["stop_reason"] = "d5a_unknown"
+    offline_anthropic.respond(json_response(payload))
+    model = offline_anthropic.model()
+
+    result = await model.ainvoke("ping")
+
+    assert len(offline_anthropic.requests) == 1
+    assert request_json(offline_anthropic.requests[0])["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+
+    assert result.content == "pong"
+    assert result.usage_metadata == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "input_token_details": {},
+    }
+    assert result.response_metadata["stop_reason"] == "d5a_unknown"
+    assert result.response_metadata["model_name"] == REPRESENTATIVE_MODEL
+    assert result.response_metadata["model_provider"] == "anthropic"
+
+
+async def test_d5a_terminal_frame_missing_astream(offline_anthropic):
+    """A complete prefix of frames with no message_stop.
+
+    message_stop reaches the SDK decoder but is an unhandled event type for
+    the adapter, and the previous frame is already marked last, so removing it
+    changes nothing observable above the adapter. This proves the prefix was
+    delivered, not that the SDK noticed the missing terminator.
+    """
+    stream = d5a2_stream(message_delta=d5a2_message_delta())
+    assert stream[-1] == event_message_stop()
+    offline_anthropic.respond(
+        lambda request: offline_anthropic.sse_response(
+            offline_anthropic.sse_body(stream[:-1])
+        )
+    )
+    model = offline_anthropic.model()
+
+    chunks = [chunk async for chunk in model.astream("ping")]
+
+    assert len(offline_anthropic.requests) == 1
+    body = request_json(offline_anthropic.requests[0])
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert body["stream"] is True
+
+    assert len(chunks) == 4
+    assert [c.content for c in chunks] == ["", "po", "ng", ""]
+    assert [c.usage_metadata for c in chunks] == [
+        None,
+        None,
+        None,
+        {
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "total_tokens": 2,
+            "input_token_details": {},
+        },
+    ]
+    assert chunks[3].response_metadata["stop_reason"] == "end_turn"
+    assert chunks[3].chunk_position == "last"
+
+    aggregated = d5a_add_chunks(chunks)
+    assert aggregated.content == "pong"
+    assert aggregated.usage_metadata == {
+        "input_tokens": 0,
+        "output_tokens": 2,
+        "total_tokens": 2,
+        "input_token_details": {},
+    }
