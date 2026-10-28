@@ -14,6 +14,10 @@ from typing import Protocol
 
 from rank_bm25 import BM25Okapi
 
+from .scope import RetrievalScope
+
+_METADATA_KEYS = ("owner", "document_id", "hash")
+
 
 class _DenseLike(Protocol):
     def search(self, query: str, top_k: int) -> list[dict]: ...
@@ -49,14 +53,19 @@ class BM25Index:
             for chunk in chunks:
                 existing_idx = by_id.get(chunk["chunk_id"])
                 if existing_idx is not None:
-                    # Update citation metadata without growing the index. Content is
-                    # stable for content-hash IDs, so BM25 tokens stay untouched.
+                    # Update citation/scope metadata without growing the index.
+                    # Content is stable for content-hash IDs, so BM25 tokens stay
+                    # untouched; owner/document_id/hash must follow a reconcile.
                     current = self._chunks[existing_idx]
-                    self._chunks[existing_idx] = {
+                    merged = {
                         **current,
                         "source": chunk["source"],
                         "page": chunk.get("page", current.get("page")),
                     }
+                    for key in _METADATA_KEYS:
+                        if key in chunk:
+                            merged[key] = chunk[key]
+                    self._chunks[existing_idx] = merged
                 else:
                     fresh.append(chunk)
             if not fresh:
@@ -67,7 +76,9 @@ class BM25Index:
             if self._tokenized:
                 self._bm25 = BM25Okapi(self._tokenized)
 
-    def search(self, query: str, top_k: int = 10) -> list[dict]:
+    def search(
+        self, query: str, top_k: int = 10, scope: RetrievalScope | None = None
+    ) -> list[dict]:
         with self._lock:
             if self._bm25 is None:
                 return []
@@ -75,8 +86,14 @@ class BM25Index:
             if not tokens:
                 return []
             scores = self._bm25.get_scores(tokens)
+            # Filter by scope *before* ranking the top_k so another owner's
+            # high-scoring chunk can never crowd out this owner's matches.
             ranked = sorted(
-                ((i, float(s)) for i, s in enumerate(scores) if s > 0),
+                (
+                    (i, float(s))
+                    for i, s in enumerate(scores)
+                    if s > 0 and (scope is None or scope.allows(self._chunks[i]))
+                ),
                 key=lambda x: x[1],
                 reverse=True,
             )[:top_k]
@@ -100,10 +117,18 @@ class HybridRetriever:
         return None
 
     def search(
-        self, query: str, top_k: int = 5, retrieval_depth: int = 20
+        self,
+        query: str,
+        top_k: int = 5,
+        retrieval_depth: int = 20,
+        scope: RetrievalScope | None = None,
     ) -> list[dict]:
-        dense_results = self.dense.search(query, top_k=retrieval_depth)
-        bm25_results = self.bm25.search(query, top_k=retrieval_depth)
+        if scope is None:
+            dense_results = self.dense.search(query, top_k=retrieval_depth)
+            bm25_results = self.bm25.search(query, top_k=retrieval_depth)
+        else:
+            dense_results = self.dense.search(query, top_k=retrieval_depth, scope=scope)
+            bm25_results = self.bm25.search(query, top_k=retrieval_depth, scope=scope)
 
         chunk_by_id: dict[str, dict] = {}
         for c in dense_results + bm25_results:
@@ -115,6 +140,11 @@ class HybridRetriever:
         ])
         ranked_ids = sorted(fused.keys(), key=lambda i: fused[i], reverse=True)[:top_k]
         return [{**chunk_by_id[cid], "score": fused[cid]} for cid in ranked_ids]
+
+    def search_scoped(
+        self, query: str, top_k: int, scope: RetrievalScope
+    ) -> list[dict]:
+        return self.search(query, top_k=top_k, scope=scope)
 
     def close(self) -> None:
         if self._closed:

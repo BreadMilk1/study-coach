@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .scope import RetrievalScope
+
 
 class _BaseRetrieverLike(Protocol):
     def search(self, query: str, top_k: int) -> list[dict]: ...
@@ -40,8 +42,16 @@ class RerankingRetriever:
             return getter(chunk_id)
         return None
 
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
-        candidates = self.base.search(query, top_k=self.retrieval_depth)
+    def search(
+        self, query: str, top_k: int = 5, scope: RetrievalScope | None = None
+    ) -> list[dict]:
+        if scope is None:
+            candidates = self.base.search(query, top_k=self.retrieval_depth)
+        else:
+            # Only scope-filtered candidates reach the cross-encoder reranker.
+            candidates = self.base.search(
+                query, top_k=self.retrieval_depth, scope=scope
+            )
         if not candidates:
             return []
         scores = self.reranker.score(
@@ -52,6 +62,11 @@ class RerankingRetriever:
             zip(candidates, scores), key=lambda x: x[1], reverse=True
         )[:top_k]
         return [{**c, "score": float(s)} for c, s in ranked]
+
+    def search_scoped(
+        self, query: str, top_k: int, scope: RetrievalScope
+    ) -> list[dict]:
+        return self.search(query, top_k=top_k, scope=scope)
 
     def close(self) -> None:
         if self._closed:

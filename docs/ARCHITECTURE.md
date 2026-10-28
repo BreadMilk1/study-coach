@@ -81,6 +81,11 @@ Run Lab is local-mode only. Evaluation execution is **single-worker**: one attac
 
 ## 3. Architecture Decision Records
 
+The bounded production retrieval hardening decision is recorded separately in
+[Owner-Scoped Production Retrieval](adr/0002-owner-scoped-production-retrieval.md).
+It narrows the historical P5 deferral without changing ADR 6's instance-wide
+deletion/reset contract or claiming multi-tenant deployment support.
+
 ### ADR 1: LangGraph StateGraph vs Chain-of-Prompts
 
 **Context:** HKBU original project used linear prompt chaining (HyDE → CoT plan → MCQ gen → Judge ablation). Each step was a standalone Python function with no shared state, no conditional routing, and no retry mechanism. The class report treated the chain as a black-box pipeline.
@@ -253,7 +258,28 @@ Key tables (full definition at `backend/app/db/models.py`):
 | `eval_scorer_executions` | `id, score_set_id, scorer_id, scorer_version, status, input_hash, output_json` | Append-only component execution; used to rebuild the ScoreSet verdict |
 
 Chunks live in **Chroma** (collection `study_coach_chunks`), not in SQL.
-SQL `documents` is the empty-corpus gate for retrieval: Chroma stores chunks, while the API refuses chat retrieval when the current user has no Library document rows. Full per-document Chroma filtering still requires adding `user_id` / `document_id` metadata to chunks and passing filters through dense, BM25, reranking, and agent-tool retrieval.
+SQL `documents` is both the empty-corpus gate and the authorization set for new
+production retrieval. Each authenticated request receives its own
+`ScopedRetriever`, bound to its user and SQL document hash/id mapping; Tutor,
+deterministic Quiz/Plan, and agent-tool retrieval keep the same search protocol.
+New chunk IDs are `v2:{owner}:{file_hash}:{page}:{index}` and Chroma metadata
+retains `owner`, `document_id`, `hash`, `source`, and `page` on upload and
+filename reconciliation. Same-PDF uploads by different identities no longer
+share an upsert identity. Dense retrieval uses positive owner/document filters
+before top-k, BM25 excludes unauthorized chunks before ranking, and fusion and
+reranking receive only authorized candidates. Restart hydration retains those
+ownership fields. Production refuses an unscoped retriever rather than falling
+back to plain search.
+
+New chunk reads require consistent ID, metadata and SQL document ownership.
+Ownerless legacy chunks remain physically stored but are not searchable through
+production retrieval. Strict legacy IDs remain readable for authorized citation
+previews when SQL confirms ownership of the corresponding file hash. Existing
+Library rows are not migrated: re-upload the original PDF to restore retrieval.
+No historical citations, frozen evaluation fixtures or artifact hashes are
+rewritten. Isolated Learning Run corpus retrieval remains ownerless and separate.
+Reset and summary remain instance-wide; this hardening is not a multi-user
+lifecycle or per-user deletion feature. See the linked ADR for rollback limits.
 
 Assistant artifacts use schema `assistant_artifacts.v1`:
 

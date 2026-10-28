@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import decode_token
 from app.db.repositories import (
+    DocumentRepository,
     GoalRepository,
     MasteryRepository,
     MistakeRepository,
@@ -98,8 +99,30 @@ def get_llm_config(
         ) from None
 
 
-def get_retriever(request: Request):
-    return request.app.state.retriever
+def get_retriever(
+    request: Request,
+    user_id: Annotated[str, Depends(require_existing_user)],
+    session: Annotated[Session, Depends(get_session)],
+):
+    """Request-scoped, owner-bound retriever.
+
+    The returned ``ScopedRetriever`` is constructed per request from
+    ``require_existing_user`` and the caller's SQL document set, so it must
+    never be cached on ``app.state`` or stored in a graph checkpoint.  The
+    agent-facing shape stays ``search(query, top_k)`` / ``get_chunk`` — the
+    model never chooses an owner.
+    """
+    from app.rag.scope import RetrievalScope, ScopedRetriever
+
+    base = request.app.state.retriever
+    documents = {
+        document.hash: document.id
+        for document in DocumentRepository(session).list_for_user(user_id)
+    }
+    return ScopedRetriever(
+        base=base,
+        scope=RetrievalScope(owner=user_id, documents=documents),
+    )
 
 
 def get_document_processor(request: Request):

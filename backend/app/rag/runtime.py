@@ -54,15 +54,21 @@ def build_retriever_for_collection(
     bm25 = BM25Index()
     if collection.count() > 0:
         data = collection.get(include=["documents", "metadatas"])
-        chunks = [
-            {
+        chunks = []
+        for i in range(len(data["ids"])):
+            meta = data["metadatas"][i] or {}
+            chunk = {
                 "chunk_id": data["ids"][i],
                 "content": data["documents"][i],
-                "source": data["metadatas"][i].get("source", ""),
-                "page": data["metadatas"][i].get("page", -1),
+                "source": meta.get("source", ""),
+                "page": meta.get("page", -1),
             }
-            for i in range(len(data["ids"]))
-        ]
+            # Preserve scope metadata across a restart so owner-scoped search
+            # and authorized readback keep working on a rehydrated BM25 index.
+            for key in ("owner", "document_id", "hash"):
+                if key in meta:
+                    chunk[key] = meta[key]
+            chunks.append(chunk)
         bm25.add_chunks(chunks)
 
     hybrid = HybridRetriever(dense=dense, bm25=bm25)

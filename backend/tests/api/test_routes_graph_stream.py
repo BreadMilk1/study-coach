@@ -34,6 +34,9 @@ class StubRetriever:
         self.last_query = query
         return self.search_returns[:top_k]
 
+    def search_scoped(self, query: str, top_k: int = 5, scope=None):
+        return self.search(query, top_k=top_k)
+
 
 class StubLLM:
     def __init__(self, tokens: list[str], quiz_json: str | None = None):
