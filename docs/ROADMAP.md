@@ -370,6 +370,12 @@ Frozen Tutor Grounded QA harness on `feat/learning-run-harness`. Shares `TutorAt
 
 **Deferred:** background queue / worker, disconnect resume, multi-worker coordinator, custom/private corpus, Plan/Quiz eval, production-fidelity profile, statistical claims about overall learning quality.
 
+## D5 — offline evidence and remaining scope (2026-10-28)
+
+- D5a completion/usage projection evidence is merged; its accepted scope is unchanged.
+- D5B-1 Judge and D5B-2 Tutor consumer characterisation have independent Mac acceptance from pre-publication working-tree snapshots. This D5b batch adds the tests and their evidence summary to the repository without changing production policy. See the D5b subsection in [Architecture](ARCHITECTURE.md#d5b-offline-consumer-completion-evidence) for the separate evidence groups and limits.
+- D5c usage recording/aggregation and D5d hash/versioned-scoring audit remain pending; D5 is not complete. Finish those bounded topics before one unified chapter closeout. Publication and merge require separate authorisation. Real provider, model-capability and billing validation remain separate batches; any approved real OpenAI/Anthropic/Gemini calls run on Mac.
+
 ## Out of scope (won't do unless asked)
 
 - Mobile-native apps (Flutter / React Native) — web is enough for portfolio

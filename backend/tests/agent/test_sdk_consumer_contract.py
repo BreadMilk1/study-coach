@@ -1516,3 +1516,319 @@ def test_oracle_empty_evidence_tutor_mutant_without_system_instruction_is_reject
     mutant = _openai_request_with_user_content(mutant_prompt, stream=True)
     with pytest.raises(AssertionError):
         assert_openai_chat_request(mutant, streaming=True, expected_prompt=healthy_prompt)
+
+
+# ---------------------------------------------------------------------------
+# D5B-1: the OpenAI Judge's completion-signal contract on the real SDK.
+#
+# This is a characterization of EXISTING behaviour, not a production repair
+# and not a RED-to-GREEN claim. The legal rubric body stays valid when the
+# provider's ``choices[0].finish_reason`` is absent, null or an unknown
+# value; only a known negative completion signal ("length") turns the very
+# same legal body into an unavailable result.
+#
+# The wire is the ONLY thing that changes between the four cases: every other
+# field of the fresh ``openai_message_body(judge_payload())`` -- including
+# the usage block -- is byte-identical, so any difference in the public
+# result can only have come from ``choices[0].finish_reason``.
+#
+# A "valid" result here means "the payload was legal". It is NOT evidence
+# that the provider really completed anything, and the SDK callback below
+# only OBSERVES the real AIMessage -- it never manufactures a value and
+# never mutates the response.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "case_id,expected_finish_reason,expected_result",
+    [
+        pytest.param(
+            "missing",
+            None,
+            {
+                "status": "valid",
+                "score": 0.8,
+                "verdict": "pass",
+                "weak_dims": [],
+                "reasoning": SYNTHETIC_REASONING_MARKER,
+            },
+            id="missing",
+        ),
+        pytest.param(
+            "null",
+            None,
+            {
+                "status": "valid",
+                "score": 0.8,
+                "verdict": "pass",
+                "weak_dims": [],
+                "reasoning": SYNTHETIC_REASONING_MARKER,
+            },
+            id="null",
+        ),
+        pytest.param(
+            "unknown",
+            "d5b_unknown",
+            {
+                "status": "valid",
+                "score": 0.8,
+                "verdict": "pass",
+                "weak_dims": [],
+                "reasoning": SYNTHETIC_REASONING_MARKER,
+            },
+            id="unknown",
+        ),
+        pytest.param(
+            "length",
+            "length",
+            {
+                "status": "unavailable",
+                "score": None,
+                "verdict": None,
+                "reason": "Judge response signalled an incomplete or blocked completion.",
+            },
+            id="length",
+        ),
+    ],
+)
+async def test_d5b_openai_judge_completion_contract(
+    offline_openai, case_id, expected_finish_reason, expected_result
+):
+    """The Judge's public result follows ``choices[0].finish_reason`` only.
+
+    Four bodies, one per completion-signal shape, each built fresh from the
+    same legal rubric payload. The expected outcomes are literals fixed by
+    the accepted contract; they are never derived from what the SDK returned.
+    """
+    from langchain_core.callbacks import AsyncCallbackHandler
+
+    captured: list = []
+
+    class Capture(AsyncCallbackHandler):
+        """Local observer of the real SDK message; it changes nothing."""
+
+        async def on_llm_end(self, response, **kwargs):
+            captured.append(response.generations[0][0].message)
+
+    payload_text = judge_payload()
+    body = openai_message_body(payload_text)
+    choice = body["choices"][0]
+
+    # The single difference between the four bodies: choices[0].finish_reason.
+    if case_id == "missing":
+        choice.pop("finish_reason")
+    elif case_id == "null":
+        choice["finish_reason"] = None
+    elif case_id == "unknown":
+        choice["finish_reason"] = "d5b_unknown"
+    else:
+        choice["finish_reason"] = "length"
+
+    # The original wire really distinguishes an absent key from a null value.
+    if case_id == "missing":
+        assert "finish_reason" not in choice, "the key is absent, not null"
+    else:
+        assert "finish_reason" in choice, "the key is present"
+    if case_id == "null":
+        assert choice["finish_reason"] is None, "an explicit null, not an absence"
+
+    # Everything else about the body is the untouched original.
+    assert body["id"] == "chatcmpl-synthetic"
+    assert body["object"] == "chat.completion"
+    assert body["created"] == 0
+    assert body["model"] == OPENAI_MODEL
+    assert body["usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+    }
+    assert choice["index"] == 0
+    assert choice["logprobs"] is None
+    assert choice["message"] == {
+        "role": "assistant",
+        "refusal": None,
+        "content": payload_text,
+    }
+
+    offline_openai.respond(json_responder(body))
+    model = offline_openai.model(callbacks=[Capture()])
+
+    result = await _run_judge(model)
+
+    # Exactly one real request on the wire, carrying the exact rubric prompt.
+    assert len(offline_openai.requests) == 1
+    assert_judge_requests(offline_openai.requests, streaming=True)
+
+    # Exactly one real AIMessage, observed but never fabricated.
+    assert len(captured) == 1
+    message = captured[0]
+    assert isinstance(message, AIMessage)
+    assert message.content == payload_text
+    assert "finish_reason" in message.response_metadata
+    assert message.response_metadata["finish_reason"] == expected_finish_reason
+
+    # The public result, compared against the predetermined literal outcome.
+    assert result == expected_result
+
+
+# ---------------------------------------------------------------------------
+# D5B-2: the OpenAI Tutor's EOF / completion-signal contract on the real SDK.
+#
+# This is a characterization of EXISTING behaviour, not a production repair and
+# not a RED-to-GREEN claim. The consumer keeps producing the same complete
+# answer whether the stream ends with a [DONE], with an explicit
+# ``finish_reason``, or with a plain transport EOF that carries neither.
+#
+# The wire is the ONLY thing that differs between the five cases: two fixed
+# body frames, one fresh empty-delta terminal frame and one unchanged usage
+# frame. Only the terminal frame's ``finish_reason`` differs, and in the two
+# "absent" cases the key is DELETED (an absent key, never an explicit null) --
+# which is what the raw streaming wire really distinguishes.
+#
+# A "completed" trace here is the local iteration/body completing, NOT evidence
+# that the provider completed anything. The ``length`` case documents the
+# consumer's current behaviour; it is not a new policy endorsement.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "case_id,expected_finish_reason",
+    [
+        pytest.param("stop", "stop", id="stop"),
+        pytest.param("missing", None, id="missing"),
+        pytest.param("unknown", "d5b_unknown", id="unknown"),
+        pytest.param("length", "length", id="length"),
+        pytest.param("bare_eof", None, id="bare_eof"),
+    ],
+)
+async def test_d5b_openai_tutor_eof_completion_contract(
+    offline_openai, case_id, expected_finish_reason
+):
+    """The Tutor's answer follows the body, not the completion signal.
+
+    Five scripted streams over one real model call: the same two body frames,
+    the same usage frame and one terminal frame whose ``finish_reason`` is
+    the only difference. ``bare_eof`` is the odd one out: it ends the HTTP
+    body with a plain EOF, so the stream carries neither a finish key nor a
+    [DONE].
+    """
+    from langchain_core.callbacks import AsyncCallbackHandler
+    from langchain_core.messages import AIMessageChunk
+
+    captured: list = []
+
+    class Capture(AsyncCallbackHandler):
+        """Local observer of the real SDK chunks; it changes nothing."""
+
+        async def on_llm_end(self, response, **kwargs):
+            captured.append(response.generations[0][0].message)
+
+    # The terminal frame is built fresh per case and is the only frame that
+    # differs. In the two "absent" cases the key is deleted, not set to null.
+    if case_id in ("missing", "bare_eof"):
+        terminal_payload = json.loads(openai_text_chunk(""))
+        terminal_payload["choices"][0].pop("finish_reason")
+        terminal = json.dumps(terminal_payload)
+    else:
+        terminal = openai_text_chunk("", finish_reason=expected_finish_reason)
+
+    frames = openai_sse(
+        openai_text_chunk("Reciprocal "),
+        openai_text_chunk("rank fusion."),
+        terminal,
+        openai_usage_chunk(),
+    )
+
+    # The terminal frame on the wire really carries this case's shape.
+    terminal_choice = sse_frame_json(frames[2])["choices"][0]
+    if case_id in ("missing", "bare_eof"):
+        assert "finish_reason" not in terminal_choice, "absent key, not null"
+    else:
+        assert terminal_choice["finish_reason"] == expected_finish_reason
+    assert terminal_choice["delta"] == {}, "the terminal frame is an empty delta"
+
+    # Every other frame and field is identical across the five cases.
+    assert sse_frame_json(frames[0])["choices"][0]["delta"] == {"content": "Reciprocal "}
+    assert sse_frame_json(frames[1])["choices"][0]["delta"] == {"content": "rank fusion."}
+    assert sse_frame_json(frames[3])["usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+    }
+    assert DONE_EVENT not in b"".join(frames), "frames must not pre-terminate"
+
+    if case_id == "bare_eof":
+        # A normal HTTP body EOF: no finish key and no [DONE] at all.
+        body = offline_openai.sse_body(frames, terminator=None)
+    else:
+        body = offline_openai.sse_body(frames, terminator=DONE_EVENT)
+    offline_openai.respond(lambda request: offline_openai.sse_response(body))
+
+    model = offline_openai.model(callbacks=[Capture()])
+    retriever = SyntheticRetriever([SYNTHETIC_CHUNK_A])
+    sink = RecordingEventSink()
+
+    candidate = await run_tutor(offline_openai, model, retriever=retriever, sink=sink)
+
+    # Exactly one real request on the wire, carrying the independent golden
+    # prompt (the file's own literal expectation, not a production render).
+    assert len(offline_openai.requests) == 1
+    assert_openai_chat_request(
+        offline_openai.requests[0],
+        streaming=True,
+        expected_prompt=expected_tutor_prompt([SYNTHETIC_CHUNK_A]),
+    )
+
+    # Exactly one recorded stream, with exactly the expected bytes delivered:
+    # the frames plus one [DONE] for the four terminated cases, and the frames
+    # alone for the bare EOF.
+    assert len(offline_openai.streams) == 1
+    if case_id == "bare_eof":
+        assert offline_openai.streams[0].bytes_sent == sum(
+            len(frame) for frame in frames
+        )
+    else:
+        assert_single_done(offline_openai.streams[0], frames)
+
+    # The same fixed consumer outcome in all five cases: the body decided the
+    # answer, the completion signal did not.
+    assert candidate.answer == "Reciprocal rank fusion."
+    assert sink.tokens() == ["Reciprocal ", "rank fusion."]
+    assert retriever.calls == [(SYNTHETIC_QUESTION, 5)]
+    assert candidate.evidence == [SYNTHETIC_CHUNK_A]
+    assert candidate.usage == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
+
+    traces = sink.traces()
+    assert candidate.trace == sink.traces()
+    assert [t["step"] for t in traces] == [
+        "retrieval",
+        "retrieval",
+        "generation",
+        "generation",
+    ]
+    assert traces[1]["status"] == "completed"
+    assert traces[3]["status"] == "completed"
+    assert traces[3]["answer_length"] == len(candidate.answer)
+    assert traces[3]["usage"] == candidate.usage
+    assert not any(t.get("status") == "failed" for t in traces)
+
+    # Exactly one captured real AIMessageChunk, observed but never fabricated.
+    assert len(captured) == 1
+    message = captured[0]
+    assert isinstance(message, AIMessageChunk)
+    assert message.content == "Reciprocal rank fusion."
+    if case_id in ("missing", "bare_eof"):
+        # An absent key on the streaming wire is an absent key here too; it is
+        # NOT the explicit null the non-streaming projection produces.
+        assert "finish_reason" not in message.response_metadata, (
+            "the key is absent, not null"
+        )
+    else:
+        assert message.response_metadata["finish_reason"] == expected_finish_reason
+
+    assert traces[0]["status"] == "started"
+    assert traces[2]["status"] == "started"
