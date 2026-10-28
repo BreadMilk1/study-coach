@@ -24,6 +24,7 @@ from app.db.repositories import (
 from app.db.session import get_session
 from app.llm.errors import normalize_llm_error
 from app.llm.provider import LLMConfig
+from app.rag.scope import build_v2_chunk_id
 
 from .deps import (
     get_document_processor,
@@ -588,11 +589,26 @@ async def upload_document(
         # SQL row wins when present; otherwise the request filename is the
         # authoritative source written to Chroma/BM25 and (on success) SQL.
         canonical_filename = existing.filename if existing else (file.filename or "uploaded.pdf")
+        # Document id is unknown for a first upload (index runs before SQL
+        # create so a failed create leaves retrievable-but-unauthorized chunks
+        # rather than an unindexed SQL row); it is bound to the SQL-winning id
+        # below before the request reports success.
+        bound_document_id = existing.id if existing else None
         for index, chunk in enumerate(chunks):
+            page = chunk.get("page", -1)
             chunk["source"] = canonical_filename
-            # Content-hash IDs stay stable across temp paths and filenames so
-            # duplicate uploads / partial retries upsert instead of accumulating.
-            chunk["chunk_id"] = f"{file_hash}:{chunk.get('page', -1)}:{index}"
+            chunk["hash"] = file_hash
+            if bound_document_id is not None:
+                chunk["document_id"] = bound_document_id
+            # Owner-namespaced content-addressed ids stay stable across temp
+            # paths and filenames so duplicate uploads / partial retries upsert
+            # instead of accumulating, while two owners never collide.
+            chunk["chunk_id"] = build_v2_chunk_id(
+                owner=user_id,
+                hash_=file_hash,
+                page=page,
+                index=index,
+            )
         if chunks:
             retriever.add_chunks(chunks)
 
@@ -602,11 +618,18 @@ async def upload_document(
             hash_=file_hash,
             chunks_count=len(chunks),
         )
-        # A concurrent first upload may have won SQL with a different filename.
-        # Reconcile index metadata to the returned document before responding.
-        if chunks and doc.filename != canonical_filename:
+        # A concurrent first upload may have won SQL with a different id and
+        # filename; a first upload always needs its document id bound. Rebind
+        # the index metadata to the SQL-winning document before responding.
+        # Never delete by hash on failure.
+        if chunks and (
+            bound_document_id is None
+            or doc.id != bound_document_id
+            or doc.filename != canonical_filename
+        ):
             for chunk in chunks:
                 chunk["source"] = doc.filename
+                chunk["document_id"] = doc.id
             retriever.add_chunks(chunks)
         return {
             "document_id": doc.id,
@@ -1064,15 +1087,14 @@ def get_chunk(
     session: Annotated[Session, Depends(get_session)],
     retriever=Depends(get_retriever),
 ):
-    """Look up a owned citation chunk by id for Chat preview."""
-    document_hash, separator, _rest = chunk_id.partition(":")
-    if not separator or DocumentRepository(session).get_by_user_and_hash(
-        user_id=user_id,
-        hash_=document_hash,
-    ) is None:
-        raise HTTPException(404, detail="chunk not found")
-    getter = getattr(retriever, "get_chunk", None)
-    chunk = getter(chunk_id) if callable(getter) else None
+    """Look up an owned citation chunk by id for Chat preview.
+
+    Authorization lives in the request-scoped retriever: v2 ids require the id
+    owner, stored metadata owner, stored document id/hash and the caller's SQL
+    document to agree; legacy ownerless ids stay readable only when the caller
+    owns the hash in SQL. An unauthorized or missing chunk is a neutral 404.
+    """
+    chunk = retriever.get_chunk(chunk_id)
     if chunk is None:
         raise HTTPException(404, detail="chunk not found")
     return ChunkOut(

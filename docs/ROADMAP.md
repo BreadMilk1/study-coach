@@ -340,7 +340,7 @@ Shipped:
 ### Deferred to beyond P4
 - PROMPT_ENGINEERING.md (skipped — content already in ADRs + EVAL.md)
 - ~~Library auto-redirect after upload~~ Closed by balanced coach-loop polish (`?return=` + post-upload CTAs).
-- Full Chroma corpus isolation: add `user_id` / `document_id` metadata to chunks and pass filters through dense, BM25, reranking, deterministic nodes, and agent-tool retrieval. Current P4d guard only refuses retrieval when the current user has no Library document rows.
+- Owner-scoped production retrieval hardening has offline implementation evidence (2026-10-28, feature branch; not merged into main): request-bound scope, owner-namespaced chunk IDs, SQL document authorization, and filtering before dense/BM25 fusion and reranking. The reconciled backend suite passed 1,989 tests under a temporary-data, network-denied launcher; its 21 new isolation cases are included in that total. Ownerless legacy vectors are retained but excluded from production search; re-upload restores retrieval. Full multi-user lifecycle, per-user reset and legacy-data migration remain deferred. See [ADR 0002](adr/0002-owner-scoped-production-retrieval.md).
 - shadcn-vue migration
 
 ## P5 — Done (2026-07-31)

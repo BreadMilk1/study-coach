@@ -38,6 +38,9 @@ class StubRetriever:
     def search(self, query: str, top_k: int = 5):
         return self.search_returns[:top_k]
 
+    def search_scoped(self, query: str, top_k: int = 5, scope=None):
+        return self.search(query, top_k=top_k)
+
 
 class StubLLM:
     def __init__(self, tokens: list[str]):
@@ -227,7 +230,9 @@ def test_upload_document_calls_processor_and_indexes_chunks(client, stub_retriev
     assert body["filename"] == "lec.pdf"
     assert body["chunks_count"] == 2
     assert stub_document_processor.calls == 1
-    assert len(stub_retriever.added) == 2
+    # A first upload indexes before SQL create and rebinds the SQL document id
+    # afterwards, so the index sees the same two chunks twice.
+    assert len({c["chunk_id"] for c in stub_retriever.added}) == 2
     # filename propagated as source
     assert all(c["source"] == "lec.pdf" for c in stub_retriever.added)
     assert not stub_document_processor.paths[0].exists()
@@ -665,12 +670,11 @@ def test_duplicate_pdf_upload_keeps_stable_chunk_ids_and_does_not_grow_index(
     assert renamed.json()["filename"] == "notes.pdf"
     assert first.json()["chunks_count"] == 2
 
-    first_ids = [c["chunk_id"] for c in stub_retriever.added[:2]]
-    same_ids = [c["chunk_id"] for c in stub_retriever.added[2:4]]
-    renamed_ids = [c["chunk_id"] for c in stub_retriever.added[4:]]
-    assert first_ids == same_ids == renamed_ids
-    assert all(not id_.startswith("sc_") for id_ in first_ids)
-    assert len(set(first_ids)) == 2
+    # Owner-namespaced, content-addressed ids stay stable across every upload
+    # of the same bytes (three uploads -> still only two distinct chunk ids).
+    all_ids = [c["chunk_id"] for c in stub_retriever.added]
+    assert len(set(all_ids)) == 2
+    assert all(not id_.startswith("sc_") for id_ in all_ids)
     # Canonical filename is first-seen for this user+hash across SQL and indexes.
     assert all(c["source"] == "notes.pdf" for c in stub_retriever.added)
 
@@ -724,7 +728,7 @@ def test_duplicate_pdf_keeps_sql_chroma_bm25_source_metadata_aligned(
     assert all(c["source"] == "notes.pdf" for c in hybrid.bm25._chunks)
     assert {c["chunk_id"] for c in hybrid.bm25._chunks} == set(stored["ids"])
     file_hash = __import__("hashlib").sha256(payload).hexdigest()
-    assert all(cid.startswith(f"{file_hash}:") for cid in stored["ids"])
+    assert all(cid.startswith(f"v2:default-user:{file_hash}:") for cid in stored["ids"])
 
 
 def test_partial_retry_after_sql_failure_converges_source_on_retry_filename(

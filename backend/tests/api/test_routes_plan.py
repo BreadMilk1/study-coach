@@ -44,6 +44,9 @@ class StubRetriever:
              "source": "p.pdf", "page": 1, "score": 0.9},
         ]
 
+    def search_scoped(self, query: str, top_k: int = 5, scope=None):
+        return self.search(query, top_k=top_k)
+
 
 class StubLLM:
     def __init__(self, responses: list[str]):

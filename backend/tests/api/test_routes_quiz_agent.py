@@ -30,6 +30,9 @@ class StubRetriever:
         return [{"chunk_id": "c1", "content": "stub",
                  "source": "p.pdf", "page": 1, "score": 0.9}]
 
+    def search_scoped(self, query, top_k=5, scope=None):
+        return self.search(query, top_k=top_k)
+
 
 @pytest.fixture
 def client_with_stubs(tmp_path, monkeypatch):

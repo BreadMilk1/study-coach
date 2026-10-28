@@ -196,9 +196,18 @@ Study Coach is local-first and requires no registration. Its learning data belon
 
 Learning reset clears documents, source chunks, vectors, Chat/Plan/Quiz/Mistake/Mastery data, retriever state, and checkpoints while preserving local model/provider/API/language/interface settings. Factory reset includes that learning scope, deletes backend user rows, clears user-facing browser state, and reloads into a new anonymous first-run state. Before the destructive request it stages one internal replacement fingerprint so response-lost and delayed tabs converge on the same new user. Reset is disabled by default; supported local configurations must bind the backend to loopback, and the shipped Compose configuration enforces this boundary.
 
+Production retrieval is bound to the authenticated identity and its SQL-owned
+documents. New uploads use owner-specific chunk IDs, including when two identities
+upload the same PDF. Legacy vectors without ownership metadata are retained but
+excluded from search; existing Library documents need the original PDF re-uploaded
+to restore retrieval. Authorized old citation previews remain readable. There is
+no automatic migration or deletion of existing data. This does **not** make reset
+per-user: reset still clears the whole local instance, so this is not a supported
+multi-tenant deployment. See [the retrieval ADR](docs/adr/0002-owner-scoped-production-retrieval.md).
+
 ### Deferred authentication work
 
-The backend Google OAuth API is frozen and deferred. It has no frontend login surface and does not provide delivered cloud continuity; future multi-user work belongs in a separate `feat/multi-user-auth` worktree and requires per-user vector ownership.
+The backend Google OAuth API is frozen and deferred. It has no frontend login surface and does not provide delivered cloud continuity; future multi-user work belongs in a separate `feat/multi-user-auth` worktree and still requires a complete user-level lifecycle, migration and continuity design beyond retrieval ownership.
 
 ## Key Empirical Results
 
