@@ -71,7 +71,7 @@ Refreshed for P5 / P4.5 product narrative: startup choice, Danger Zone lifecycle
 - **Cross-Encoder Reranking** — `jina-reranker-v2-base-multilingual` via FastEmbed
 - **Hit@5: 0.933, MRR: 0.822** on 15-query HKBU eval set (up from 0.733 / 0.633)
 - **Grounded Quiz Generation** — Questions drawn from indexed PDF chunks, not model training distribution
-- **User-corpus guard** — Chat refuses before retrieval when the current user has no uploaded documents, preventing stale Chroma chunks from leaking into answers
+- **User-corpus guard** — Chat refuses before retrieval when the current user has no uploaded documents; owner-scoped production retrieval separately excludes unauthorized and ownerless legacy chunks
 
 ### Adaptive Learning
 
@@ -94,7 +94,7 @@ Refreshed for P5 / P4.5 product narrative: startup choice, Danger Zone lifecycle
 - **Run Lab** — list, detail, and controlled compare of historical Runs, CandidateArtifacts, Hybrid ScoreSets, and scorer-v1/v2 re-scores
 - **Fresh-clone seed** — import the committed curated fixture; do not treat those 12 cases as overall Tutor quality
 
-See `docs/EVAL.md`, `docs/DEMO.md`, and `docs/adr/0001-share-tutor-attempt-not-production-orchestration.md`.
+See `CONTEXT.md` for the domain language, plus `docs/EVAL.md`, `docs/DEMO.md`, and `docs/adr/0001-share-tutor-attempt-not-production-orchestration.md`.
 
 ### BYOK Multi-Model
 
@@ -301,10 +301,12 @@ study-coach/
 │       ├── composables/                    # useMediaQuery
 │       ├── locales/                        # en.json, zh-CN.json
 │       └── lib/                            # API, parsing, quiz, lifecycle channel, and reset client-state helpers
+├── CONTEXT.md                              # Domain language: Learning Run, TutorAttempt, CandidateArtifact, ScoreSet
 ├── docs/
 │   ├── ARCHITECTURE.md                     # v2 — ER diagram + 6 ADRs + deployment topology
 │   ├── ROADMAP.md                          # P0–P5 phase history and acceptance status
 │   ├── EVAL.md                             # Judge guard + ablation methodology + empirical results
+│   ├── adr/                                # Standalone ADRs (0001 shared TutorAttempt, 0002 owner-scoped retrieval)
 │   ├── agent_loop_vs_deterministic.md      # P2.2 portfolio blog
 │   ├── quiz_ablation_followup.md           # P2.3 portfolio blog
 │   ├── p3_frontend_productize.md           # P3 portfolio blog

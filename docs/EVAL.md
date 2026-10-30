@@ -10,6 +10,14 @@
 > **Cost**: ~$3 MiniMax API for 396 cloud judgments.
 > **Data**: `backend/app/eval/p2_2_agent_ablation/output/results.jsonl` (396 rows, 0 harness_error).
 
+## Contents — all reports in this file
+
+- [Agent Loop Ablation — Empirical Report](#agent-loop-ablation--empirical-report)
+- [P2.3 Quiz Agent Loop Ablation — Empirical Report](#p23-quiz-agent-loop-ablation--empirical-report)
+- [P3 Frontend Productize — Shipping Report](#p3-frontend-productize--shipping-report)
+- [Learning Run Harness — Tutor Prompt Regression](#learning-run-harness--tutor-prompt-regression)
+- [Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring](#cloud-capability-offline-contracts--protocol-data-lifecycle-budget-scoring)
+
 ## TL;DR
 
 - **`gemma3:4b agent_loop` is a 100% negative data point** — model manifest has no `tools` capability, Ollama API returns 400 on every call. P2.2's `_format_degrade_output` handles it gracefully (42/42 cells degrade clean, no crash). Confirms spec §1.Q1a prediction.
@@ -602,6 +610,10 @@ Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alia
 - Evaluation measures one TutorAttempt, not Graph Judge retries.
 - 12 cases are a directed regression suite, not a benchmark of overall study quality.
 - Paid/remote models are not a CI gate.
+
+---
+
+# Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring
 
 ## Cloud Capability Foundation — protocol helpers and identity (offline)
 

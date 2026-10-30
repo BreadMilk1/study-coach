@@ -58,3 +58,10 @@ _Avoid_: A/B test, side-by-side view, improvement
 一组冻结、人工确认 expected behavior 的定向 cases，用于检测特定 AI 行为变化；它不是总体学习效果或统计显著性的证明。Regression 可以是同一 scorer 上的 verdict/score 变差，也可以是声明轴上的 deterministic finding 变化加上语料外常识。LLM judge 解析失败必须保持 inconclusive。Run Lab 的 Regressions 计数必须使用与 release contract 相同的 hybrid-v1 pairwise 规则，不能用 fail verdict 条数代替。Fresh clone 使用 committed curated fixture 作为演示种子；本机 raw `output/` 不进 Git。
 _Avoid_: Benchmark, comprehensive evaluation, golden truth
 
+## Candidate 与 CandidateArtifact
+
+这两个词不是同义词，分属不同阶段，不能互换：
+
+- `Candidate`：离线 cloud capability 评测（`app/eval/p2_3_cloud_capability`）里由 `CandidateStore` 记录的模型响应对象，是**未冻结**的评测对象。它可以停留在草稿（`.partial.json`）或失败标记（`.failed.json`）状态，不进入生产存储，也不带 Run 的冻结 hash。
+- `CandidateArtifact`：上文 Learning Run Harness 定义的冻结产物 —— `TutorAttempt` 完成后写入 Run、带校验 hash、可被 ScoreSet 复评；它不代表完整生产编排。
+- `TutorCandidate`：`app/agent/tutor_attempt.py` 中 `TutorAttemptEngine.answer()` 返回的内存 dataclass（answer / citations / evidence / usage / trace），是冻结前的中间结果；只有被写入 Run 的 `candidate_artifact_json` 之后才成为 `CandidateArtifact`。
