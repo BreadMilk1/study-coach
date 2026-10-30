@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 
+from app.agent.tutor_attempt import TUTOR_USAGE_CONTRACT
+
 from .contracts import (
     CandidateArtifact,
     ResolvedRunDefinition,
@@ -384,6 +386,7 @@ class RunService:
             schema_version=definition.experiment.schema_version,
             code_revision=self.code_revision,
             seed=None,
+            usage_contract=TUTOR_USAGE_CONTRACT,
         )
 
     def _artifact(

@@ -13,6 +13,7 @@ from app.agent.prompt import (
     format_context,
 )
 from app.agent.tutor_attempt import (
+    TUTOR_USAGE_CONTRACT,
     TutorAttemptConfig,
     TutorAttemptEngine,
     TutorEventSinkError,
@@ -743,3 +744,127 @@ async def test_tutor_attempt_rejects_malformed_chunk_before_any_token():
         event.get("step") == "retrieval" and event.get("status") == "completed"
         for event in sink.of_type("trace")
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch D — per-chunk usage sum (TUTOR_USAGE_CONTRACT = "tutor-chunk-sum-v1").
+#
+# The engine sums each extracted field across frames instead of keeping the last
+# non-empty extraction. ``_extract_usage`` is unchanged, so a frame that extracts
+# nothing is skipped and a frame with only some fields contributes only those
+# fields; an existing total is summed, never recomputed.
+# ---------------------------------------------------------------------------
+
+
+class MultiUsageStreamingLLM:
+    """Streams one chunk per ``(text, usage)`` pair; ``usage`` may be ``None``."""
+
+    def __init__(self, chunks: list[tuple[str, dict | None]]):
+        self.chunks = list(chunks)
+        self.prompts: list[str] = []
+
+    async def astream(self, messages, **_kwargs):
+        self.prompts.append(messages[-1].content if messages else "")
+        for text, usage in self.chunks:
+            chunk = AIMessageChunk(content=text)
+            if usage is not None:
+                chunk.usage_metadata = dict(usage)
+            yield chunk
+
+
+async def _sum_candidate(chunks: list[tuple[str, dict | None]]):
+    return await TutorAttemptEngine().answer(
+        question="What is RRF?",
+        retriever=FakeRetriever([CHUNK_A]),
+        llm=MultiUsageStreamingLLM(chunks),
+        prompt_template=TutorPromptTemplate.production_v2(),
+        event_sink=RecordingSink(),
+        attempt_config=TutorAttemptConfig.production_default(),
+    )
+
+
+def test_tutor_usage_contract_constant_is_fixed():
+    assert TUTOR_USAGE_CONTRACT == "tutor-chunk-sum-v1"
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_sums_usage_across_frames_and_skips_none():
+    candidate = await _sum_candidate(
+        [
+            ("po", {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}),
+            ("ng", {"input_tokens": 0, "output_tokens": 3, "total_tokens": 3}),
+            ("", {"input_tokens": 0, "output_tokens": 2, "total_tokens": 2}),
+            ("", None),
+        ]
+    )
+
+    assert candidate.answer == "pong"
+    assert candidate.usage == {
+        "input_tokens": 4,
+        "output_tokens": 7,
+        "total_tokens": 11,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_usage_accumulator_is_per_answer():
+    engine = TutorAttemptEngine()
+    first = await engine.answer(
+        question="q1",
+        retriever=FakeRetriever([CHUNK_A]),
+        llm=MultiUsageStreamingLLM(
+            [("a", {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})]
+        ),
+        prompt_template=TutorPromptTemplate.production_v2(),
+        event_sink=RecordingSink(),
+        attempt_config=TutorAttemptConfig.production_default(),
+    )
+    second = await engine.answer(
+        question="q2",
+        retriever=FakeRetriever([CHUNK_A]),
+        llm=MultiUsageStreamingLLM(
+            [("b", {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10})]
+        ),
+        prompt_template=TutorPromptTemplate.production_v2(),
+        event_sink=RecordingSink(),
+        attempt_config=TutorAttemptConfig.production_default(),
+    )
+
+    assert first.usage == {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    assert second.usage == {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_sums_negative_compensation_without_floor():
+    """A provider that compensates a negative delta keeps the raw per-key sum.
+
+    ``(5,0,5) + (-1,2,1)`` sums per key to ``(4,2,6)``: the negative input is not
+    floored and the total is not recomputed from input + output.
+    """
+    candidate = await _sum_candidate(
+        [
+            ("a", {"input_tokens": 5, "output_tokens": 0, "total_tokens": 5}),
+            ("b", {"input_tokens": -1, "output_tokens": 2, "total_tokens": 1}),
+        ]
+    )
+
+    assert candidate.answer == "ab"
+    assert candidate.usage == {
+        "input_tokens": 4,
+        "output_tokens": 2,
+        "total_tokens": 6,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tutor_attempt_sums_partial_usage_per_key():
+    """Each frame contributes only the fields it extracts, summed per key."""
+    candidate = await _sum_candidate(
+        [
+            ("a", {"input_tokens": 4}),
+            ("b", {"output_tokens": 2}),
+        ]
+    )
+
+    assert candidate.answer == "ab"
+    assert candidate.usage == {"input_tokens": 4, "output_tokens": 2}

@@ -973,8 +973,11 @@ class RunManifest:
     code_revision: str
     seed: int | None = None
     manifest_hash: str = field(default="", compare=True)
+    usage_contract: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.usage_contract, str):
+            raise TypeError("usage_contract must be a string")
         for field_name in (
             "task_snapshot",
             "corpus_snapshot",
@@ -1001,6 +1004,10 @@ class RunManifest:
             for key, value in vars(self).items()
             if key != "manifest_hash"
         }
+        if not payload.get("usage_contract"):
+            # The empty default is omitted so a legacy manifest keeps the exact
+            # pre-field payload and hash bytes.
+            payload.pop("usage_contract", None)
         return payload
 
     def compute_hash(self) -> str:

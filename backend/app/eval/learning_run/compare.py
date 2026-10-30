@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from app.agent.tutor_attempt import TUTOR_USAGE_CONTRACT
+
 from .contracts import is_dimension_score
 
 
@@ -31,6 +33,54 @@ _BOOKKEEPING_FIELDS = frozenset(
         "scorer_snapshot",
     }
 )
+
+# The usage contracts this comparison understands. Declaring one of these on
+# both sides is comparable; anything else (a different, unknown, or malformed
+# value) is informational because the two runs did not measure usage the same
+# way. A pair where neither side declares a contract is legacy and keeps the
+# original quality comparison untouched.
+_SUPPORTED_USAGE_CONTRACTS = frozenset({TUTOR_USAGE_CONTRACT})
+
+
+def _usage_contract_reason(
+    left_manifest: Mapping[str, Any],
+    right_manifest: Mapping[str, Any],
+) -> str | None:
+    """Return a reason when two manifests cannot share one usage contract.
+
+    ``None`` means the pair is comparable on usage: either both manifests
+    genuinely omit the key (a legacy pair, whose historical usage semantics are
+    deliberately not asserted to match), or both declare the same supported
+    contract. Every other combination -- one-sided, differing, unknown, or an
+    invalid declaration -- is informational with an explicit reason. The gate is
+    independent of ``experiment_axes`` and of ``runner_version``/``code_revision``,
+    so declaring the field as an axis cannot bypass it.
+    """
+    left_declared = "usage_contract" in left_manifest
+    right_declared = "usage_contract" in right_manifest
+    if not left_declared and not right_declared:
+        return None
+
+    left_value = left_manifest.get("usage_contract")
+    right_value = right_manifest.get("usage_contract")
+
+    def _well_formed(value: Any) -> bool:
+        return isinstance(value, str) and value != ""
+
+    if (left_declared and not _well_formed(left_value)) or (
+        right_declared and not _well_formed(right_value)
+    ):
+        return "invalid usage contract declaration; usage semantics are not comparable"
+    if not left_declared or not right_declared:
+        return "usage contract declared on one side only; usage semantics are not comparable"
+    if left_value != right_value:
+        return (
+            f"usage contracts differ ({left_value} vs {right_value}); "
+            "usage semantics are not comparable"
+        )
+    if left_value not in _SUPPORTED_USAGE_CONTRACTS:
+        return f"unsupported usage contract ({left_value}); usage semantics are not comparable"
+    return None
 
 
 def _manifest(side: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -78,6 +128,7 @@ def _undeclared_diffs(
         "variant_id",
         "experiment_axes",
         "schema_version",
+        "usage_contract",
     }
     keys = (set(left) | set(right)) - ignored
     diffs: list[str] = []
@@ -135,6 +186,12 @@ def compare_score_sets(
     undeclared = _undeclared_diffs(left_manifest, right_manifest, axes=axes)
     compatibility = "informational" if undeclared else "controlled"
     reasons.extend(undeclared)
+
+    usage_reason = _usage_contract_reason(left_manifest, right_manifest)
+    if usage_reason is not None:
+        compatibility = "informational"
+        reasons.append(usage_reason)
+
     reasons.extend(notes)
 
     left_scorer = str(_score_set(left).get("scorer_version") or "")

@@ -22,8 +22,10 @@ from app.eval.learning_run.repositories import (
     EvalRunRepository,
     EvalScoreSetRepository,
     EvalScorerExecutionRepository,
+    EvalSuiteImportRepository,
 )
 from app.eval.learning_run.runner import RunnerOperationalError
+from tests.eval.test_learning_run_import import CURATED_FIXTURE_PATH
 
 
 def _service_api():
@@ -272,6 +274,16 @@ async def test_rescore_reads_frozen_artifact_and_never_calls_tutor(session):
         connection=_connection(scorer_llm=scorer_llm),
         events=[],
     )
+    # Immutable snapshots captured before the rescore, so the post-read
+    # comparison cannot be satisfied by an in-identity-map object.
+    frozen_artifact_hash = first.run.artifact_hash
+    original_snapshot = (
+        first.score_set.id,
+        first.score_set.artifact_input_hash,
+        first.score_set.status,
+        first.score_set.scorer_version,
+    )
+
     service.tutor_runner = ExplodingDependency()
     service.attempt_engine = ExplodingDependency()
     events = []
@@ -282,13 +294,93 @@ async def test_rescore_reads_frozen_artifact_and_never_calls_tutor(session):
         events=events,
     )
     assert new_score_set.run_id == first.run.id
-    assert new_score_set.artifact_input_hash == first.run.artifact_hash
+    assert new_score_set.artifact_input_hash == frozen_artifact_hash
     assert new_score_set.scorer_version == "hybrid-v2"
     assert new_score_set.scorer_definition_hash == REGISTRY.scorer_for("hybrid-v2").definition_hash
     assert len(service.score_sets.list_for_run(first.run.id)) == 2
     assert events[0]["type"] == "score_set_created"
     assert events[0]["score_set_id"] == new_score_set.id
     assert runner.calls == 1
+
+    # The historical ScoreSet is re-read from the database and compared to the
+    # immutable pre-rescore snapshot, so the check cannot be satisfied by an
+    # identity-mapped object the rescore happened to leave in place.
+    session.expire_all()
+    reread = next(
+        row
+        for row in service.score_sets.list_for_run(first.run.id)
+        if row.id == original_snapshot[0]
+    )
+    assert (
+        reread.id,
+        reread.artifact_input_hash,
+        reread.status,
+        reread.scorer_version,
+    ) == original_snapshot
+
+
+@pytest.mark.asyncio
+async def test_historical_legacy_run_rescore_binds_old_artifact_and_leaves_it_unchanged(
+    session,
+):
+    """A genuine legacy run (no usage_contract) is rescored against its frozen artifact.
+
+    The committed curated fixture predates the optional ``usage_contract`` field,
+    so this exercises a historical run the new service never created. Rescore
+    must bind the new ScoreSet to the frozen artifact hash and leave the old
+    manifest, artifact and ScoreSet byte-for-byte unchanged. The Tutor is never
+    called, and the fixture itself is only read.
+    """
+    records = [
+        json.loads(line)
+        for line in CURATED_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    run_id = records[0]["run"]["id"]
+
+    before = EvalRunRepository(session).get_verified(run_id)
+    assert "usage_contract" not in before.manifest_json
+    manifest_snapshot = json.loads(json.dumps(before.manifest_json, sort_keys=True))
+    artifact_snapshot = json.loads(
+        json.dumps(before.candidate_artifact_json, sort_keys=True)
+    )
+    run_hash_snapshot = (before.manifest_hash, before.artifact_hash)
+    score_set_snapshot = {
+        row.id: (row.artifact_input_hash, row.status, row.scorer_version)
+        for row in EvalScoreSetRepository(session).list_for_run(run_id)
+    }
+    assert score_set_snapshot, "the fixture must already carry historical ScoreSets"
+
+    service = _service(session, RecordingTutorRunner(_candidate()), scorer_llm=FakeScorerLLM())
+    service.tutor_runner = ExplodingDependency()
+    service.attempt_engine = ExplodingDependency()
+
+    new_score_set = await service.rescore(
+        run_id=run_id,
+        scorer_version="hybrid-v2",
+        connection=_connection(scorer_llm=FakeScorerLLM()),
+    )
+
+    assert new_score_set.run_id == run_id
+    assert new_score_set.artifact_input_hash == run_hash_snapshot[1]
+
+    # Re-read through the repository; every historical value is unchanged.
+    session.expire_all()
+    after = EvalRunRepository(session).get_verified(run_id)
+    assert (after.manifest_hash, after.artifact_hash) == run_hash_snapshot
+    assert json.loads(json.dumps(after.manifest_json, sort_keys=True)) == manifest_snapshot
+    assert (
+        json.loads(json.dumps(after.candidate_artifact_json, sort_keys=True))
+        == artifact_snapshot
+    )
+
+    after_scores = {
+        row.id: (row.artifact_input_hash, row.status, row.scorer_version)
+        for row in EvalScoreSetRepository(session).list_for_run(run_id)
+    }
+    for score_set_id, snapshot in score_set_snapshot.items():
+        assert after_scores[score_set_id] == snapshot
 
 
 @pytest.mark.asyncio
@@ -510,6 +602,29 @@ async def test_manifest_is_complete_frozen_and_privacy_safe_without_connection_s
     assert "authorization" not in dumped.lower()
     assert "http://" not in dumped.lower()
     assert "https://" not in dumped.lower()
+
+
+@pytest.mark.asyncio
+async def test_new_run_manifest_declares_usage_contract_and_verifies_on_reread(session):
+    from app.agent.tutor_attempt import TUTOR_USAGE_CONTRACT
+
+    service = _service(session, RecordingTutorRunner(_candidate()))
+    result = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+
+    assert result.run.manifest_json["usage_contract"] == TUTOR_USAGE_CONTRACT
+    assert result.run.manifest_hash == canonical_hash(result.run.manifest_json)
+
+    # A verified re-read (populate_existing) returns the same declared contract.
+    session.expire_all()
+    reread = EvalRunRepository(session).get(result.run.id)
+    assert reread.manifest_json["usage_contract"] == TUTOR_USAGE_CONTRACT
+    assert reread.manifest_hash == result.run.manifest_hash
 
 
 @pytest.mark.asyncio
