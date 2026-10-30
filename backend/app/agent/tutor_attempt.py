@@ -23,6 +23,9 @@ class StreamingLLMLike(Protocol):
 
 EventSink = Callable[[dict], None]
 
+# The single public identifier for how this engine combines per-chunk usage.
+TUTOR_USAGE_CONTRACT = "tutor-chunk-sum-v1"
+
 
 class TutorEventSinkError(RuntimeError):
     """The configured event sink rejected a Tutor attempt event."""
@@ -155,7 +158,14 @@ class TutorAttemptEngine:
                     parts.append(text)
                 chunk_usage = _extract_usage(chunk)
                 if generation_open and within_deadline and chunk_usage is not None:
-                    usage = chunk_usage
+                    # Sum each extracted field across frames. No floor/max and
+                    # no total recomputation: a provider that compensates a
+                    # negative delta keeps that sum. ``_extract_usage`` is
+                    # unchanged, so a None frame is simply skipped.
+                    if usage is None:
+                        usage = {}
+                    for key, value in chunk_usage.items():
+                        usage[key] = usage.get(key, 0) + value
 
         generation_deadline = (
             None

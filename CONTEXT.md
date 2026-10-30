@@ -17,7 +17,7 @@ _Avoid_: Query, prompt, test question
 _Avoid_: Uploaded PDF, current index, document manifest
 
 **RunManifest**:
-一次 Learning Run 的冻结执行契约，记录 task、corpus、Prompt、模型、retrieval、scorer、预算、代码和 schema 版本，但不包含凭证。
+一次 Learning Run 的冻结执行契约，记录 task、corpus、Prompt、模型、retrieval、scorer、预算、代码和 schema 版本，但不包含凭证。新运行另记录 `usage_contract="tutor-chunk-sum-v1"`；历史未声明记录不补字段、不改原 hash，也不被自动追认为相同的 usage 语义。
 _Avoid_: Config, metadata, request headers
 
 **RunProfile**:
@@ -25,7 +25,7 @@ _Avoid_: Config, metadata, request headers
 _Avoid_: Mode, environment
 
 **TutorAttempt**:
-Tutor 对固定问题进行的一次 retrieval、Prompt 构造与模型生成尝试。生产 Graph 可以围绕它执行 Judge retry；evaluation profile 严格只执行一次。
+Tutor 对固定问题进行的一次 retrieval、Prompt 构造与模型生成尝试。生产 Graph 可以围绕它执行 Judge retry；evaluation profile 严格只执行一次。`tutor-chunk-sum-v1` 只累加本次模型流中现有 extraction 得到的计数，保留带符号的 chunk 补偿；它不是跨 retry、Judge 或整次 turn 的用量总账，也不恢复 adapter 已丢失的字段来源。
 _Avoid_: Tutor run, retry loop, graph run
 
 **CandidateArtifact**:
@@ -51,7 +51,7 @@ Harness、模型、retriever 或 scorer 未能按执行契约完成工作时产�
 _Avoid_: Quality failure, bad answer
 
 **Controlled Comparison**:
-两个 Runs 只在声明的 `experiment_axes` 上不同，且其余控制变量与评分版本兼容时进行的差异比较。当前持久化 CandidateArtifact 不含 `schema_version`；compare 将缺失值视为 `candidate-artifact-v1`，不得把该字段写进 artifact hash。
+两个 Runs 只在声明的 `experiment_axes` 上不同，且其余控制变量与评分版本兼容时进行的差异比较。双方均声明相同且受支持的 `usage_contract` 才能通过新的 usage 闸门；单边声明、不同、未知或非法声明降为 `informational`，不显示受控分数 delta，声明为实验轴也不能绕过。双方都未声明时保留既有质量比较行为，但不据此证明历史 usage 单位相同。当前持久化 CandidateArtifact 不含 `schema_version`；compare 将缺失值视为 `candidate-artifact-v1`，不得把该字段写进 artifact hash。
 _Avoid_: A/B test, side-by-side view, improvement
 
 **Regression Suite**:

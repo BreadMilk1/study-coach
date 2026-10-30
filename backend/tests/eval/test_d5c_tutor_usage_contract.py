@@ -9,13 +9,24 @@ Scope: one closed loop -- synthetic Gemini SSE wire -> the real locked
 scorer stays the accepted fake and retrieval stays an isolated in-process fake
 corpus (``RealPathLoader``), so no Chroma and no provider are involved.
 
-This is characterization, not a repair. A number here says what the locked code
-does today; it is NOT a billing figure, a provider-completion guarantee, or a
-product-correctness claim. Every expected value below is derived from the fixed
-synthetic wire plus the accepted projections (the locked adapter's usage
-projection and the consumer's latest-non-empty extraction), never from a run's
-own output. These expectations are fixed before execution; disagreements must be
-reported, not rewritten to make tests pass.
+This module pins the current usage contract: the Tutor now sums each extracted
+field across chunks (``TUTOR_USAGE_CONTRACT = "tutor-chunk-sum-v1"``), so the
+expected values below describe that summed behaviour. The earlier
+"last non-empty" characterization is not erased -- it is preserved in PR26 at
+commit ``1702b1d`` (``1702b1d965500c6399bc4a492426542fd02a5959``). A number here
+says what the locked code does today; it is NOT a billing figure, a
+provider-completion guarantee, or a product-correctness claim. Every expected
+value below is derived from the fixed synthetic wire plus the accepted
+projections (the locked adapter's usage projection and the consumer's per-key
+chunk sum), never from a run's own output. These expectations are fixed before
+execution; disagreements must be reported, not rewritten to make tests pass.
+
+The multi-frame and hash cases were migrated from the pre-sum expectations
+``(0,2,2)`` / ``(0,1,1)`` to the summed ``(4,7,11)`` / ``(10,5,15)`` when the
+engine adopted ``TUTOR_USAGE_CONTRACT = "tutor-chunk-sum-v1"``. The earlier bytes
+and their acceptance live in PR26 at that commit and are preserved, not erased.
+The wire frames are unchanged -- only the consumer projection moved from "last
+non-empty" to the per-key sum.
 
 The ``_connection`` helper reuses the accepted evaluation registry, whose
 ``tutor-v3`` variant is labelled ``provider="ollama"``. That label is only the
@@ -80,6 +91,8 @@ _MISSING = object()
 # ---------------------------------------------------------------------------
 # Independent expectations (never computed from the code under test)
 # ---------------------------------------------------------------------------
+
+_USAGE_COUNT_KEYS = ("input_tokens", "output_tokens", "total_tokens")
 
 
 def _chunk_usage(input_tokens: int, output_tokens: int, total_tokens: int) -> dict:
@@ -301,14 +314,14 @@ def test_d5c_guard_offline_scope_and_socket_deny(request):
 
 
 async def test_d5c_multiframe_usage_through_real_chain(eval_session, offline_gemini):
-    """Cumulative wire -> incremental deltas -> latest-non-empty consumer value.
+    """Cumulative wire -> incremental deltas -> summed consumer value.
 
     The wire repeats accumulated usage, so the adapter projects per-frame
-    deltas ``(4,2,6) (0,3,3) (0,2,2)`` plus a no-usage core sentinel. LangChain's
-    own chunk addition reproduces the cumulative ``(4,7,11)`` observed on the
-    real ``on_llm_end`` callback, while the real consumer keeps only its latest
-    non-empty extraction ``(0,2,2)``. The callback observes the aggregation; it
-    never stands in for the consumer, which is read from the frozen artifact.
+    deltas ``(4,2,6) (0,3,3) (0,2,2)`` plus a no-usage core sentinel. The
+    consumer now sums those deltas per key, so both the real ``on_llm_end``
+    callback aggregation and the real consumer land on the cumulative
+    ``(4,7,11)``. The callback still only observes the SDK aggregation; it never
+    stands in for the consumer, which is read from the frozen artifact.
     """
     capture = _EndCapture()
     frames = [
@@ -359,25 +372,28 @@ async def test_d5c_multiframe_usage_through_real_chain(eval_session, offline_gem
     assert aggregated.usage_metadata == _chunk_usage(4, 7, 11)
     assert capture.messages[0].usage_metadata == _chunk_usage(4, 7, 11)
 
-    # The real consumer keeps the latest non-empty extraction (0,2,2).
+    # The real consumer sums the deltas per key, landing on (4,7,11).
     assert len(recorder.candidates) == 1
     candidate = recorder.candidates[0]
     assert candidate.answer == "pong"
-    assert candidate.usage == _candidate_usage(0, 2, 2)
+    assert candidate.usage == _candidate_usage(4, 7, 11)
 
     assert result.run.lifecycle == "finished"
     assert result.run.outcome == "success"
     artifact = result.run.candidate_artifact_json
-    assert artifact["usage"] == _candidate_usage(0, 2, 2)
+    assert artifact["usage"] == _candidate_usage(4, 7, 11)
     completed = _generation_completed(artifact["trace"])
-    assert completed["usage"] == _candidate_usage(0, 2, 2)
+    assert completed["usage"] == _candidate_usage(4, 7, 11)
     assert completed["answer_length"] == len("pong")
     assert result.score_set is not None
 
-    # The consumer's usage is deliberately distinct from the callback
-    # aggregation: the aggregation carries input_token_details, the consumer
-    # does not, so the two must not be conflated.
-    assert candidate.usage != capture.messages[0].usage_metadata
+    # The consumer's three counts equal the callback aggregation's counts, but
+    # only the SDK aggregation keeps the cache_read detail, so the two dicts are
+    # not byte-equal and must not be compared as raw dicts.
+    callback_usage = capture.messages[0].usage_metadata
+    assert {key: callback_usage[key] for key in _USAGE_COUNT_KEYS} == candidate.usage
+    assert "input_token_details" not in candidate.usage
+    assert callback_usage["input_token_details"] == {"cache_read": 0}
 
     # The candidate trace is the frozen artifact trace, and the same completed
     # generation event is visible in the forwarded event stream.
@@ -769,8 +785,8 @@ async def test_d5c_usage_changes_artifact_hash_only(eval_session, offline_gemini
 
     a = result_a.run.candidate_artifact_json
     b = result_b.run.candidate_artifact_json
-    assert a["usage"] == _candidate_usage(0, 2, 2)
-    assert b["usage"] == _candidate_usage(0, 1, 1)
+    assert a["usage"] == _candidate_usage(4, 7, 11)
+    assert b["usage"] == _candidate_usage(10, 5, 15)
 
     # The ONLY differing positions are the two known usage spots.
     assert set(a.keys()) == set(b.keys())
@@ -817,5 +833,5 @@ async def test_d5c_usage_changes_artifact_hash_only(eval_session, offline_gemini
     assert stored_a.artifact_hash == result_a.run.artifact_hash
     assert stored_b.artifact_hash == result_b.run.artifact_hash
     assert stored_a.manifest_hash == stored_b.manifest_hash
-    assert stored_a.candidate_artifact_json["usage"] == _candidate_usage(0, 2, 2)
-    assert stored_b.candidate_artifact_json["usage"] == _candidate_usage(0, 1, 1)
+    assert stored_a.candidate_artifact_json["usage"] == _candidate_usage(4, 7, 11)
+    assert stored_b.candidate_artifact_json["usage"] == _candidate_usage(10, 5, 15)

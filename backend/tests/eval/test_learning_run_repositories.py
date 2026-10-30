@@ -8,7 +8,9 @@ tampering at the persistence boundary.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -20,6 +22,30 @@ from sqlalchemy.orm import Session
 from app.db import models
 from app.db.models import Base
 from app.eval.learning_run.contracts import CandidateArtifact, RunManifest, ScorerExecutionDraft
+
+
+CURATED_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "app"
+    / "eval"
+    / "learning_run"
+    / "fixtures"
+    / "tutor-prompt-regression-v1.jsonl"
+)
+
+# The first committed manifest record's hash, read from the curated fixture
+# before the optional usage_contract field was added. It must not move.
+LEGACY_FIXTURE_MANIFEST_HASH = (
+    "d71b9f7892a74b1c122ef3280e7bff61990b7454211082e993a462c33bfff3b3"
+)
+
+
+def _first_curated_fixture_record() -> dict:
+    with CURATED_FIXTURE_PATH.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                return json.loads(line)
+    raise AssertionError("curated fixture is empty")
 
 
 @pytest.fixture
@@ -1252,3 +1278,58 @@ def test_append_draft_persists_stable_output_envelope_and_rejects_untyped_values
     assert skipped.output_json == {"result": {"applicable": False}, "findings": []}
     with pytest.raises(TypeError):
         executions.append_draft(score_set.id, {"status": "success"})
+
+
+# ---------------------------------------------------------------------------
+# D5c-2 — the optional manifest ``usage_contract`` field.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_run_manifest_payload_and_hash_are_byte_identical():
+    """The optional usage_contract field must not move a legacy manifest.
+
+    The golden payload and hash are the committed curated fixture's first
+    record, read before the field existed; the empty default must keep the
+    payload and hash byte-for-byte identical.
+    """
+    record = _first_curated_fixture_record()
+    frozen_manifest = record["run"]["manifest"]
+    assert record["run"]["manifest_hash"] == LEGACY_FIXTURE_MANIFEST_HASH
+
+    manifest = RunManifest(**frozen_manifest)
+
+    assert manifest.payload() == frozen_manifest
+    assert "usage_contract" not in manifest.payload()
+    assert manifest.compute_hash() == LEGACY_FIXTURE_MANIFEST_HASH
+
+
+def test_new_manifest_usage_contract_field_is_saved_and_verified(session):
+    _, RunRepository, _, _, _ = _repository_api()
+    repo = RunRepository(session)
+    legacy = _manifest("usage-contract")
+    manifest = replace(legacy, usage_contract="tutor-chunk-sum-v1")
+    assert manifest.compute_hash() != legacy.compute_hash()
+
+    run = repo.create(
+        id="run-usage-contract",
+        experiment_id=manifest.experiment_id,
+        task_case_id=manifest.task_case_id,
+        task_case_version=manifest.task_case_version,
+        variant_id=manifest.variant_id,
+        run_profile=manifest.run_profile,
+        manifest=manifest,
+        manifest_hash=manifest.compute_hash(),
+    )
+
+    stored = repo.get_verified(run.id)
+    assert stored.manifest_json["usage_contract"] == "tutor-chunk-sum-v1"
+    assert stored.manifest_hash == manifest.compute_hash()
+
+
+def test_legacy_manifest_persists_and_verifies_without_usage_contract(session):
+    _, finished = _finish_run(session, "legacy-verify")
+    _, RunRepository, _, _, _ = _repository_api()
+
+    stored = RunRepository(session).get_verified(finished.id)
+    assert "usage_contract" not in stored.manifest_json
+    assert stored.manifest_hash == _manifest("legacy-verify").compute_hash()

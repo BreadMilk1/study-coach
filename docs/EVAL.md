@@ -16,6 +16,7 @@
 - [P2.3 Quiz Agent Loop Ablation — Empirical Report](#p23-quiz-agent-loop-ablation--empirical-report)
 - [P3 Frontend Productize — Shipping Report](#p3-frontend-productize--shipping-report)
 - [Learning Run Harness — Tutor Prompt Regression](#learning-run-harness--tutor-prompt-regression)
+- [D5c Tutor Usage — Offline Acceptance](#d5c-tutor-usage--offline-acceptance)
 - [Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring](#cloud-capability-offline-contracts--protocol-data-lifecycle-budget-scoring)
 
 ## TL;DR
@@ -610,6 +611,35 @@ Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alia
 - Evaluation measures one TutorAttempt, not Graph Judge retries.
 - 12 cases are a directed regression suite, not a benchmark of overall study quality.
 - Paid/remote models are not a CI gate.
+
+---
+
+# D5c Tutor Usage — Offline Acceptance
+
+Independent Mac acceptance, 2026-10-30. This batch corrects aggregation for one shared Tutor model stream; it is not a new real-model experiment or a billing/completion guarantee. The architecture and comparison contract are in [Architecture](ARCHITECTURE.md#d5c-single-tutor-call-usage-and-compatibility).
+
+## Evidence and invariants
+
+- D5c-1 ([PR #26](https://github.com/BreadMilk1/study-coach/pull/26)) accepted 12 focused / 121 related nodes before the production correction. The original file at `1702b1d965500c6399bc4a492426542fd02a5959` has SHA-256 `fbfeec4e9c66af09398f6c58828dc6654274fbcfa7dce66520e25548ce116325`. These are historical results, not the current post-fix expectations; focused is included in related.
+- The current `tests/eval/test_d5c_tutor_usage_contract.py` observes unchanged synthetic wire and SDK deltas/callback alongside the actual consumer, completed trace, artifact and a new SQLite Session's `get_verified`. Consumer counts now sum to `(4,7,11)`, matching the callback's three counts; SDK-only detail fields are not conflated with consumer counters. The usage/hash pair now expects `(4,7,11)` versus `(10,5,15)` with every other artifact input fixed.
+- `tests/agent/test_tutor_attempt.py` adds per-call accumulator isolation, no-usage tail frames, partial per-key sums and signed compensation. Existing missing/null/zero/partial projection, ReadError and cooperative-cancellation cases stay collected; there is no skip/xfail/deselect or production legacy mode.
+- Compare/service/repository/import tests cover the manifest declaration and comparison gate, an independent fixed legacy manifest hash, unchanged import of the 24 committed fixture records, and historical re-score against the old artifact without changing the historical run or the checked ScoreSet fields. No fixture or real data was edited, re-exported or re-signed.
+
+## Accepted runs and retained failures
+
+| Attempt | Result | Interpretation |
+|---|---|---|
+| R1 focused | collection error, no test calls | The new compare parametrization omitted `import pytest`; stopped and retained the complete output. Explicitly approved repair added only the import, not a changed expectation. |
+| R2 focused | **187 passed** | Six changed test files, exit 0, no skips/xfails/xpasses; stderr empty. |
+| R2 full backend | **2020 passed / 4 failed** | Four existing SDK source-identity checks failed because Python 3.11 `-S` skipped venv prefix initialization while dependencies were loaded from the correct venv. Stopped; no production or frozen-test patch. |
+| R3 source identity | **4 passed** | Separately approved launcher-only correction restored the validated venv prefixes before the first `sysconfig` import. Exact existing source checks passed unchanged. |
+| R3 full backend | **2024 passed** | Exit 0, no failures/skips/xfails/xpasses; stderr empty. The repository source is byte-identical to R2. |
+
+R3 full includes the focused and identity cases; these counts must not be added together. The earlier failed results are retained, not presented as successful runs or strict TDD RED→GREEN evidence. The 23 additional backend nodes are relative to D5c-1's 2001-node CI baseline.
+
+The task-local launcher uses Python 3.11.15 and lock-checked dependencies, `-I -S -B`, explicitly bound checkout sources, pre-import socket/DNS blocking, synthetic keys, temporary data/cache paths and disabled model downloads. R3 validates the actual `pyvenv.cfg` and restores only the venv prefixes omitted by `-S`; it neither processes editable `.pth` files nor patches `sysconfig` functions or test expectations. Full stdout/stderr/result records and all launcher revisions remain outside Git in the task's handoff evidence directory. Guard counters are process-local and some fixtures replace socket guards; they are not a global network-attempt count or an OS sandbox. Fixed original protection verification before/after acceptance exited 0 with stdout byte-equal to the original expectation.
+
+Real provider/model calls, browser/SSE timing, remote cancellation, complete costs, other provider-specific cross-layer matrices, nested/tool calls, retries and Judge totals remain outside this acceptance. No frontend/browser baseline or deployment claim is added. Broader D5c coverage and D5d remain separate work.
 
 ---
 

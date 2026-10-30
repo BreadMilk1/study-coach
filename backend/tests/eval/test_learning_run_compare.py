@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.eval.learning_run.compare import compare_score_sets
 
 
@@ -273,3 +275,122 @@ def test_compare_omits_a_delta_it_cannot_subtract():
     assert result["compatibility"] == "controlled"
     assert result["delta"] == {}
     _json.dumps(result, allow_nan=False)
+
+
+# ---------------------------------------------------------------------------
+# D5c-2 — the dedicated usage_contract gate.
+#
+# Both sides genuinely omitting the key is a legacy pair and keeps the original
+# quality comparison. Both declaring the same supported contract is comparable.
+# Every other combination is informational with an explicit reason and a None
+# delta, and it cannot be bypassed by declaring the field as an experiment axis.
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+def test_both_legacy_manifests_keep_the_original_quality_comparison():
+    """Neither manifest declares usage_contract: no gate, no added note."""
+    left = _side(run_id="left", variant_id="tutor-v2", prompt_version="tutor-v2", score=4)
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", score=2)
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["reasons"] == []
+    assert result["delta"] == {"groundedness": {"left": 4, "right": 2, "delta": -2}}
+
+
+def test_both_new_manifests_declare_the_same_supported_contract():
+    left = _side(run_id="left", variant_id="tutor-v2", prompt_version="tutor-v2", score=4)
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", score=2)
+    left["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+    right["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["reasons"] == []
+    assert result["delta"] == {"groundedness": {"left": 4, "right": 2, "delta": -2}}
+
+
+@pytest.mark.parametrize(
+    "left_value,right_value,fragment",
+    [
+        pytest.param("tutor-chunk-sum-v1", _MISSING, "one side only", id="one-sided-old-new"),
+        pytest.param("tutor-chunk-sum-v1", "tutor-latest-chunk-v1", "differ", id="different"),
+        pytest.param("tutor-unknown-v9", "tutor-unknown-v9", "unsupported", id="same-unknown"),
+        pytest.param("", "tutor-chunk-sum-v1", "invalid", id="empty"),
+        pytest.param(None, "tutor-chunk-sum-v1", "invalid", id="null"),
+        pytest.param(123, "tutor-chunk-sum-v1", "invalid", id="non-string"),
+    ],
+)
+def test_uncomparable_usage_contracts_are_informational(
+    left_value, right_value, fragment
+):
+    left = _side(run_id="left", variant_id="tutor-v2", prompt_version="tutor-v2")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    if left_value is not _MISSING:
+        left["manifest"]["usage_contract"] = left_value
+    if right_value is not _MISSING:
+        right["manifest"]["usage_contract"] = right_value
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any(fragment in reason for reason in result["reasons"])
+    # The dedicated gate reports once; the generic undeclared diff must not
+    # double-report the same field.
+    assert not any(
+        "undeclared config differs: usage_contract" in reason
+        for reason in result["reasons"]
+    )
+
+
+def test_usage_contract_cannot_be_bypassed_by_declaring_it_as_an_axis():
+    left = _side(run_id="left", variant_id="tutor-v2", prompt_version="tutor-v2")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+    left["manifest"]["experiment_axes"] = ("prompt_version", "usage_contract")
+    right["manifest"]["experiment_axes"] = ("prompt_version", "usage_contract")
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("usage contract" in reason for reason in result["reasons"])
+
+
+def test_scorer_version_difference_still_requires_rescore_under_one_contract():
+    left = _side(run_id="left", scorer_version="hybrid-v1", score=5)
+    right = _side(
+        run_id="right",
+        variant_id="tutor-v3",
+        prompt_version="tutor-v3",
+        scorer_version="hybrid-v2",
+        score=1,
+    )
+    left["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+    right["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["rescore_required"] is True
+    assert result["delta"] is None
+
+
+def test_other_undeclared_config_difference_still_reports_under_one_contract():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+    right["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+    right["manifest"]["model"] = "other-model"
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert any(
+        "undeclared" in reason or "model" in reason for reason in result["reasons"]
+    )

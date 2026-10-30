@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,34 @@ from app.eval.learning_run.contracts import canonical_hash
 from app.eval.learning_run.registry import TaskRegistry
 from app.eval.learning_run.repositories import (
     ChecksumMismatchError,
+    EvalRunRepository,
     EvalSuiteImportRepository,
 )
+
+
+CURATED_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "app"
+    / "eval"
+    / "learning_run"
+    / "fixtures"
+    / "tutor-prompt-regression-v1.jsonl"
+)
+
+
+def _stdlib_manifest_hash(payload: dict) -> str:
+    """Canonical hash computed independently, with the standard library only."""
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
 
 
 def _load_import_script():
@@ -163,3 +190,43 @@ def test_parse_jsonl_skips_blank_lines(tmp_path: Path):
     path = tmp_path / "suite.jsonl"
     path.write_text('\n{"run": {"id": "a"}}\n\n', encoding="utf-8")
     assert _load_import_script().parse_jsonl(path) == [{"run": {"id": "a"}}]
+
+
+def test_committed_24_record_fixture_imports_with_original_hashes(session):
+    """The committed suite still imports and keeps its original manifest hashes.
+
+    The records predate the optional ``usage_contract`` field, so none of them
+    carries it and every stored manifest hash must equal the committed one.
+    """
+    records = [
+        json.loads(line)
+        for line in CURATED_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 24
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+
+    assert imported == 24
+    assert session.scalar(select(func.count()).select_from(EvalRun)) == 24
+    run_repo = EvalRunRepository(session)
+    for record in records:
+        stored = run_repo.get_verified(record["run"]["id"])
+        assert stored.manifest_hash == record["run"]["manifest_hash"]
+        assert "usage_contract" not in stored.manifest_json
+
+
+def test_import_preserves_a_synthetic_usage_contract_manifest(session):
+    """A record that declares the new field is stored and verified as written."""
+    records = _complete_suite()
+    manifest = dict(records[0]["run"]["manifest"])
+    manifest["usage_contract"] = "tutor-chunk-sum-v1"
+    records[0]["run"]["manifest"] = manifest
+    records[0]["run"]["manifest_hash"] = _stdlib_manifest_hash(manifest)
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+
+    assert imported == len(records)
+    stored = EvalRunRepository(session).get_verified(records[0]["run"]["id"])
+    assert stored.manifest_json["usage_contract"] == "tutor-chunk-sum-v1"
+    assert stored.manifest_hash == records[0]["run"]["manifest_hash"]
