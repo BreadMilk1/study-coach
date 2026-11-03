@@ -616,7 +616,7 @@ Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alia
 
 # D5c Tutor Usage — Offline Acceptance
 
-Independent Mac acceptance, 2026-10-30. This batch corrects aggregation for one shared Tutor model stream; it is not a new real-model experiment or a billing/completion guarantee. The architecture and comparison contract are in [Architecture](ARCHITECTURE.md#d5c-single-tutor-call-usage-and-compatibility).
+D5c-1/2 independent Mac acceptance, 2026-10-30. D5c-2 corrects aggregation for one shared Tutor model stream; it is not a new real-model experiment or a billing/completion guarantee. The architecture and comparison contract are in [Architecture](ARCHITECTURE.md#d5c-single-tutor-call-usage-and-compatibility).
 
 ## Evidence and invariants
 
@@ -640,6 +640,25 @@ R3 full includes the focused and identity cases; these counts must not be added 
 The task-local launcher uses Python 3.11.15 and lock-checked dependencies, `-I -S -B`, explicitly bound checkout sources, pre-import socket/DNS blocking, synthetic keys, temporary data/cache paths and disabled model downloads. R3 validates the actual `pyvenv.cfg` and restores only the venv prefixes omitted by `-S`; it neither processes editable `.pth` files nor patches `sysconfig` functions or test expectations. Full stdout/stderr/result records and all launcher revisions remain outside Git in the task's handoff evidence directory. Guard counters are process-local and some fixtures replace socket guards; they are not a global network-attempt count or an OS sandbox. Fixed original protection verification before/after acceptance exited 0 with stdout byte-equal to the original expectation.
 
 Real provider/model calls, browser/SSE timing, remote cancellation, complete costs, other provider-specific cross-layer matrices, nested/tool calls, retries and Judge totals remain outside this acceptance. No frontend/browser baseline or deployment claim is added. Broader D5c coverage and D5d remain separate work.
+
+## D5c-3 cross-provider evidence
+
+Oracle acceptance reported 2026-11-03, from base `69c05ac5067f2a74aecadeb034f4107dedfa32f3` (D5c-2, PR #27). The sole new test file is `backend/tests/eval/test_d5c3_tutor_usage_providers.py`; its accepted SHA-256 is `c51967a2b24022dfc53694d73cc14de73830ffc8d63b36ed022f1bc1a6049814`. Publication documentation is added after acceptance without changing that file or any production/test-support source.
+
+| Validation | Result |
+|---|---|
+| Independent Oracle review | No blocker; four fixed wire/projection/consumer expectations, no skip/xfail/deselect |
+| Focused new file, one execution | **4 passed**, exit 0; no failures/skips/xfails/xpasses; stderr empty |
+| Related seven files, one execution | **228 passed**, exit 0; same four-node subset included exactly once; stderr empty |
+| Fixed original protection, before/after | Both exit 0; stdout byte-equal to the original expectation |
+
+Related comprises the new file, `test_tutor_attempt.py` (33), `test_learning_run_service.py` (31), `test_d5c_tutor_usage_contract.py` (12), and the OpenAI/Anthropic/Ollama async transport files (56/49/43). Counts include the new four cases; 4 and 228 are not additive. No full backend run was performed for this local tests-only acceptance. There were no failed test executions, retries or expectation/launcher patches during acceptance.
+
+The four independent consumer literals are `(3,2,5)`, `(0,5,5)`, `(0,0,0)` and `(7,3,10)`; [Architecture](ARCHITECTURE.md#d5c-3-cross-provider-tutor-usage-evidence) identifies their wire/projection boundaries. Each case asserts the raw input shape, real SDK chunks and callback aggregation, real Candidate/completed trace/artifact, and stored usage/trace through a new SQLite Session's `get_verified`. In particular, absent Anthropic terminal usage is not confused with provider-stated zero; Ollama's total is not described as a wire field. Existing registry labels remain test-seam identities, not proof of production provider/model identity.
+
+The task-local launcher retains the validated Python 3.11.15 `-I -S -B`/venv-prefix initialization, lock-checked dependencies, explicit checkout-source checks, pre-import socket/DNS blocking, synthetic keys, temporary data/cache paths and disabled downloads. Its network counter was empty but is process-local, not an OS sandbox or global count; expected fixture socket self-checks are not included. Complete parent/worker output, results, source/log hashes and the independent acceptance report remain outside Git in the D5c-3 task evidence directory (dated 2026-11-02 for task setup). Main-agent reconciliation verified these artifacts and hashes without repeating the test runs.
+
+No production code, existing tests, frozen fixture, `usage_contract`, hash/scorer/comparison policy, D5d checkout or real data was modified. Real provider reliability/billing, browser timing, tool/nested calls, retry and Judge accounting remain unverified by this batch. This is bounded consumption evidence, not a new aggregation or zero/missing policy, strict TDD claim, or completion of D5c/D5d.
 
 ---
 
