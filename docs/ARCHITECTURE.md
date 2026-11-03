@@ -436,7 +436,20 @@ New Learning Run manifests declare `usage_contract="tutor-chunk-sum-v1"`. The op
 
 Compare treats one-sided, differing, unsupported or malformed usage declarations as `informational` with `delta=None`, independently of `experiment_axes`; matching supported declarations can remain `controlled` when the other controls align. Both genuinely undeclared manifests retain the old quality comparison without asserting equal usage units. Ordinary task/corpus/artifact-schema incompatibility and scorer-version rescore rules are unchanged. Merely bumping the ignored `runner_version`/`code_revision` would not provide this gate.
 
-The cross-layer test uses synthetic Gemini wire, a fake isolated corpus/scorer and file-backed temporary SQLite. Its registry injection still carries the existing Ollama variant label; it is not production Gemini manifest-identity evidence. Independent offline acceptance and the retained failed attempts are recorded in [EVAL](EVAL.md#d5c-tutor-usage--offline-acceptance). This is a bounded aggregation correction, not provider-completion, billing or a complete provider × consumer guarantee. Further provider/call-unit coverage and the independent D5d hash/versioned-scoring audit remain pending; D5 as a whole is incomplete.
+The D5c-1/2 cross-layer test uses synthetic Gemini wire, a fake isolated corpus/scorer and file-backed temporary SQLite. Its registry injection still carries the existing Ollama variant label; it is not production Gemini manifest-identity evidence. Independent offline acceptance and the retained failed attempts are recorded in [EVAL](EVAL.md#d5c-tutor-usage--offline-acceptance). This is a bounded aggregation correction, not provider-completion, billing or a complete provider × consumer guarantee. Further call-unit coverage and the independent D5d hash/versioned-scoring audit remain pending; D5 as a whole is incomplete.
+
+### D5c-3 cross-provider Tutor usage evidence
+
+`backend/tests/eval/test_d5c3_tutor_usage_providers.py` adds four tests-only closed loops through the locked OpenAI, Anthropic and Ollama SDKs, the real shared TutorAttempt, Candidate/completed trace, Learning Run artifact and file-backed temporary SQLite with a fresh-Session verified read. It changes no production code, existing test/fixture, dependency, `usage_contract`, hash/scorer or comparison policy. Raw wire, SDK chunks/callback aggregation and the actual consumer are asserted separately; callback results never stand in for Candidate or persistence evidence.
+
+| Scripted wire | Consumer/trace/artifact usage |
+|---|---|
+| OpenAI text + finish + usage-only frame | `(3,2,5)`; the no-usage core sentinel does not erase it |
+| Anthropic opening usage `(3,1)`, terminal output `5` | `(0,5,5)`; withheld opening input is not reconstructed |
+| Anthropic `message_delta.usage` absent, opening usage still present | SDK/adapter-derived `(0,0,0)`, not provider-reported zero or `unavailable` |
+| Ollama done frame with counters `7` and `3`, no wire total | `(7,3,10)`; total is adapter-derived |
+
+The test seam deliberately retains the registry's Ollama/`llama3.2` connection label while injecting each real SDK model, so it does not establish production provider/model identity. Synthetic keys, fake isolated retrieval/scoring and MockTransport require no live cloud provider or Ollama daemon. Oracle independently accepted 4 focused and 228 related nodes (focused included), with unchanged source hashes and byte-equal original-protection checks; see [EVAL](EVAL.md#d5c-3-cross-provider-evidence). Tool loops, nested calls, retries, Judge accounting and the independent D5d audit are not added by this evidence batch.
 
 ---
 
