@@ -727,17 +727,23 @@ async def test_Q4_loop_persists_then_final_uses_saved_question(offline_openai, d
         finally:
             probe.close()
 
-    responder = ScriptedResponder(
-        bound=[
-            assistant_tool_calls(("c_rs", "retriever_search",
-                                  json.dumps({"query": QUESTION_TOPIC, "top_k": 2}))),
-            assistant_tool_calls(("c_ps", "persist_quiz_question", json.dumps(PERSIST_ARGS))),
-            # A legal model body with no usable text: unlike the Planner loop,
-            # the Quiz loop does not require_text on its final turn.
-            assistant_text(""),
-        ],
-        on_request=on_request,
-    )
+    scripted = [
+        assistant_tool_calls(("c_rs", "retriever_search",
+                              json.dumps({"query": QUESTION_TOPIC, "top_k": 2}))),
+        assistant_tool_calls(("c_ps", "persist_quiz_question", json.dumps(PERSIST_ARGS))),
+        # A legal model body with no usable text: unlike the Planner loop,
+        # the Quiz loop does not require_text on its final turn.
+        assistant_text(""),
+    ]
+    # The scripted wire usage is this case's own fixed input: 13/9/22 per turn.
+    # Pin it on the raw response payloads before any request is served, so a
+    # later fixture change fails here instead of silently moving the token
+    # expectations asserted below.
+    for response in scripted:
+        assert response["usage"] == {
+            "prompt_tokens": 13, "completion_tokens": 9, "total_tokens": 22,
+        }
+    responder = ScriptedResponder(bound=scripted, on_request=on_request)
     offline_openai.respond(responder)
 
     node = build_loop(db, offline_openai.model(callbacks=[observer]),
@@ -781,6 +787,16 @@ async def test_Q4_loop_persists_then_final_uses_saved_question(offline_openai, d
     assert len(observer.starts) == 3 and len(observer.ends) == 3
     assert observed_messages(observer, 1)[2] is observer.ends[0]
     assert observed_messages(observer, 2)[4] is observer.ends[1]
+    # The three real SDK responses carry the scripted wire usage, projected by
+    # the OpenAI adapter onto the three core usage_metadata fields. Only those
+    # three are pinned (the adapter may attach detail breakdowns), so this is a
+    # subset check, never a whole-dict equality.
+    for message in observer.ends:
+        usage = message.usage_metadata
+        assert usage is not None
+        assert usage["input_tokens"] == 13
+        assert usage["output_tokens"] == 9
+        assert usage["total_tokens"] == 22
 
     trace = update["agent_trace"]
     assert trace["exit_reason"] == "natural_stop"
@@ -790,6 +806,11 @@ async def test_Q4_loop_persists_then_final_uses_saved_question(offline_openai, d
         "retriever_search": 1, "persist_quiz_question": 1,
     }
     assert trace["tool_errors"] == 0
+    # Independent literal, not read back from a callback: the trace tallies the
+    # three successful outer iterations (13+13+13 in, 9+9+9 out). This is a
+    # per-call token sum, not a whole-turn ledger.
+    assert trace["input_tokens"] == 39
+    assert trace["output_tokens"] == 27
     assert update["quiz_action"] == "generate"
     assert update["active_quiz_question_id"] == tool_result["question_id"]
 
