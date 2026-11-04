@@ -699,6 +699,23 @@ Related file counts are Planner SDK contract 17, Planner agent loop 18 and Agent
 
 Complete parent/worker logs, results, hashes and Oracle reports remain outside Git in the `study-coach-d5c5-2026-11-04/` task evidence directory. Main-agent reconciliation verified actual logs, source/diff hashes and original-protection bytes without rerunning tests. No local full backend, live provider or billing validation was performed. Nested usage inclusion, Tutor retry/Judge accounting, public SSE persistence and remaining D5d import/execution audits are not established by this batch.
 
+## D5c-6 Tutor retry usage isolation evidence
+
+Independent Oracle acceptance on base `a157fc8f4b474b38b390504c391380b34421eda0` (PR #31). One new test is appended to `backend/tests/agent/test_sdk_consumer_contract.py`; accepted file SHA-256 is `44e0a363bdc2c01badd9ad038a438621b26d09232ca65ca82bf130779479fc7c`. Existing module functions/classes and fixtures remain unchanged; new recorder, callback and responder logic is local to the new test. Publication documentation leaves accepted test bytes unchanged.
+
+The real production-policy Graph makes four requests in stream/non-stream/stream/non-stream order, with strict Judge payloads yielding weak `0.40` then pass `0.80`. Raw Tutor finish/usage frames separately pin `(3,2,5)` and `(7,3,10)`. A transparent delegating recorder observes two real Tutor Candidates consumed by the Graph; each Candidate's usage and completed-generation trace independently match its fixed literal, separate from the two real SDK callback aggregates. Exact second-attempt `(7,3,10)` prevents cross-attempt accumulation. Full prompt checks pin the retry score/dimensions without Judge free reasoning. Final state has the second answer, one retry and one MemoryWriter call. See [Architecture](ARCHITECTURE.md#d5c-6-tutor-usage-isolation-across-a-graph-retry).
+
+| Local validation | Result |
+|---|---|
+| Focused new node, one execution | **1 passed**, 1.09s |
+| Related two files, one execution | **51 passed**, 1.61s; includes focused, not additive |
+| Parent / worker / pytest | All exit 0; no failures/skips/xfails/xpasses; stderr empty |
+| Original protection before / after | Each executed once, captured exit 0; stdout byte-equal to original expectation |
+
+Actual related counts are consumer contract 33 and Graph Judge 18; no Planner/AgentTrace or full-backend run was added locally. There were no failed executions, reruns or expectation changes in this batch, and earlier batches' counts/failures are not mixed into it. The external wrapper records `CompletedProcess.returncode` following an exit-7 self-check. The reused controlled launcher retains lock/source checks, validated venv-prefix initialization, `-I -S -B` without `.pth`, temporary data/cache paths, disabled downloads and pre-import socket/DNS guards; these are process-local guards, not an OS sandbox or global network count.
+
+Complete parent/worker logs, results, hashes and Oracle reports remain outside Git in the `study-coach-d5c6-2026-11-04/` task evidence directory. Main-agent reconciliation read actual logs and verified source/diff/log hashes and original-protection bytes without repeating tests. No production, existing helper/fixture/test, dependency, `usage_contract`, artifact/hash/scorer/comparison policy or migration is changed. Graph-visible usage, Judge usage, whole-turn billing, live provider behavior, other failure/retry shapes and remaining D5d import/execution audits are not validated by this case. It does not declare all D5 work complete.
+
 # D5d Scorer Identity — Offline Acceptance
 
 Batch 1 acceptance, 2026-11-03, with publication-base integration revalidation on 2026-11-04: complete snapshots for new scorer writes, historical hash preservation and conservative comparison identity. These are offline acceptance records, not deployment or completion of the wider D5d audit.
