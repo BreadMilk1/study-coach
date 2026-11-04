@@ -43,6 +43,17 @@ SECRET_PATTERN = re.compile(
 )
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 
+_REGISTRY = TaskRegistry.load_default()
+
+
+def _scorer_identity_fields(version: str = "hybrid-v1") -> dict:
+    """A real self-consistent scorer identity for a committed scorer version."""
+    document = dict(_REGISTRY.scorer_document(version))
+    return {
+        "scorer_definition_hash": document["definition_hash"],
+        "scorer_snapshot": document,
+    }
+
 
 def _load_script(name: str):
     path = BACKEND_ROOT / "scripts" / name
@@ -320,6 +331,7 @@ def test_regression_and_compare_agree_on_which_scores_are_comparable():
                 "scorer_id": "hybrid",
                 "scorer_version": "hybrid-v1",
                 "aggregate_scores": {"groundedness": score},
+                **_scorer_identity_fields("hybrid-v1"),
             },
         }
 
@@ -377,6 +389,7 @@ def test_compare_delta_stays_renderable_when_a_stored_score_is_non_finite():
                 "scorer_id": "hybrid",
                 "scorer_version": "hybrid-v1",
                 "aggregate_scores": {"groundedness": score},
+                **_scorer_identity_fields("hybrid-v1"),
             },
         }
 

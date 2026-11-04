@@ -733,7 +733,7 @@ def test_eval_get_lists_and_detail_are_read_only_and_checksum_verified(eval_clie
     assert experiments.json()[0]["regression_count"] == 0
 
 
-def test_imported_fixture_compare_is_controlled_and_counts_refusal_regressions(eval_client):
+def test_imported_fixture_compare_is_informational_and_counts_refusal_regressions(eval_client):
     from pathlib import Path
 
     from app.db.session import session_scope
@@ -782,13 +782,88 @@ def test_imported_fixture_compare_is_controlled_and_counts_refusal_regressions(e
     )
     assert compare.status_code == 200
     payload = compare.json()
-    assert payload["compatibility"] == "controlled"
-    # The committed fixture predates CandidateArtifact `schema_version`, so the
-    # compare infers v1. That stays `controlled`, but is now reported rather
-    # than assumed silently -- and this is the real artifact, not a synthetic one.
-    assert payload["reasons"] == [
+    # Every committed fixture ScoreSet is `partial`, so neither side offers a
+    # completed score set to pair. The scorer-identity gate then reports
+    # informational rather than controlled, because there is no identity to
+    # compare; the artifact-schema inference is still reported, not assumed.
+    assert payload["compatibility"] == "informational"
+    assert payload["delta"] is None
+    assert (
         "artifact schema not declared; assumed candidate-artifact-v1"
+        in payload["reasons"]
+    )
+    assert any("scorer identity" in reason for reason in payload["reasons"])
+
+
+def _identity_row(score_set_id, version, snapshot):
+    from types import SimpleNamespace
+
+    from app.eval.learning_run.contracts import canonical_hash
+
+    return SimpleNamespace(
+        id=score_set_id,
+        status="completed",
+        scorer_id="hybrid",
+        scorer_version=version,
+        scorer_definition_hash=canonical_hash(snapshot),
+        scorer_snapshot_json=snapshot,
+    )
+
+
+def test_compare_pairing_prefers_a_shared_complete_scorer_identity():
+    """The API pairs on the full identity, not on a shared version alone."""
+    from app.api.eval_routes import _pair_comparable_score_sets
+
+    shared = {
+        "scorer_id": "hybrid",
+        "version": "hybrid-v1",
+        "parser_version": "json-rubric-v1",
+    }
+    # Two same-version hybrid-v2 snapshots with different content hash to
+    # different identities, so only the hybrid-v1 identity is actually shared.
+    other_left = {"scorer_id": "hybrid", "version": "hybrid-v2", "parser_version": "v2"}
+    other_right = {
+        "scorer_id": "hybrid",
+        "version": "hybrid-v2",
+        "parser_version": "v2-tampered",
+    }
+    left = [
+        _identity_row("l-v1", "hybrid-v1", shared),
+        _identity_row("l-v2", "hybrid-v2", other_left),
     ]
+    right = [
+        _identity_row("r-v1", "hybrid-v1", shared),
+        _identity_row("r-v2", "hybrid-v2", other_right),
+    ]
+
+    paired_left, paired_right = _pair_comparable_score_sets(left, right)
+
+    assert paired_left.id == "l-v1"
+    assert paired_right.id == "r-v1"
+
+
+def test_compare_pairing_falls_back_to_the_latest_candidate_without_a_shared_identity():
+    from app.api.eval_routes import _pair_comparable_score_sets
+
+    left = [
+        _identity_row(
+            "l-v1",
+            "hybrid-v1",
+            {"scorer_id": "hybrid", "version": "hybrid-v1", "parser_version": "v1"},
+        )
+    ]
+    right = [
+        _identity_row(
+            "r-v2",
+            "hybrid-v2",
+            {"scorer_id": "hybrid", "version": "hybrid-v2", "parser_version": "v2"},
+        )
+    ]
+
+    paired_left, paired_right = _pair_comparable_score_sets(left, right)
+
+    assert paired_left.id == "l-v1"
+    assert paired_right.id == "r-v2"
 
 
 def test_rescore_busy_is_http_409_before_stream(eval_client):

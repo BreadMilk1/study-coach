@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 
 from app.agent.tutor_attempt import TutorCandidate
 from app.db.models import Base, EvalRun
-from app.eval.learning_run.contracts import ScorerExecutionDraft, canonical_hash
+from app.eval.learning_run.contracts import (
+    ScorerExecutionDraft,
+    canonical_hash,
+    hash_without_field,
+)
 from app.eval.learning_run.registry import TaskRegistry
 from app.eval.learning_run.repositories import (
     EvalRunRepository,
@@ -204,10 +208,10 @@ def _connection(
     )
 
 
-def _service(session, runner, *, scorer_llm=None, clock=None, scoring_factory=None):
+def _service(session, runner, *, scorer_llm=None, clock=None, scoring_factory=None, registry=None):
     _, _, RunService, _, _ = _service_api()
     return RunService(
-        registry=REGISTRY,
+        registry=registry or REGISTRY,
         tutor_runner=runner,
         runs=EvalRunRepository(session),
         score_sets=EvalScoreSetRepository(session),
@@ -216,6 +220,137 @@ def _service(session, runner, *, scorer_llm=None, clock=None, scoring_factory=No
         code_revision="test-revision",
         scoring_service_factory=scoring_factory,
     )
+
+
+class TamperedDocumentRegistry:
+    """Resolve runs and scorers from the real registry but serve a bad document."""
+
+    def __init__(self, registry, document):
+        self._registry = registry
+        self._document = document
+
+    def resolve_run(self, **kwargs):
+        return self._registry.resolve_run(**kwargs)
+
+    def scorer_for(self, version):
+        return self._registry.scorer_for(version)
+
+    def scorer_document(self, version):
+        return self._document
+
+    @property
+    def task_cases(self):
+        return self._registry.task_cases
+
+    @property
+    def experiment(self):
+        return self._registry.experiment
+
+    @property
+    def scorers(self):
+        return self._registry.scorers
+
+
+def _rehash(document: dict) -> dict:
+    document = dict(document)
+    document["definition_hash"] = hash_without_field(document, "definition_hash")
+    return document
+
+
+def _tampered_scorer_documents() -> dict[str, dict]:
+    """Documents that each break one leg of the document/bundle check.
+
+    Bundle-side checks (id/version/projection) are exercised at the repository
+    boundary; these are the document-side cases the live path must reject before
+    any Run row is written.
+    """
+
+    base = dict(REGISTRY.scorer_document("hybrid-v1"))
+    bad_hash = dict(base)
+    bad_hash["definition_hash"] = "0" * 64
+    missing_hash = dict(base)
+    missing_hash.pop("definition_hash")
+    missing_schema = dict(base)
+    missing_schema.pop("schema_version")
+    # A wrong schema cannot be self-consistent with the executing bundle's hash.
+    wrong_schema = _rehash({**base, "schema_version": "scorer-bundle-v2"})
+    # Self-consistent, but a different definition than the executing bundle.
+    bundle_hash_mismatch = _rehash({**base, "parser_version": "json-rubric-v1-other"})
+    return {
+        "hash": bad_hash,
+        "missing_hash": missing_hash,
+        "missing_schema": missing_schema,
+        "empty_schema": {**base, "schema_version": ""},
+        "illegal_schema": {**base, "schema_version": 7},
+        "wrong_schema": wrong_schema,
+        "bundle_hash_mismatch": bundle_hash_mismatch,
+    }
+
+
+_TAMPERED_SCORER_DOCUMENTS = _tampered_scorer_documents()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "document",
+    list(_TAMPERED_SCORER_DOCUMENTS.values()),
+    ids=list(_TAMPERED_SCORER_DOCUMENTS),
+)
+async def test_live_run_rejects_a_scorer_document_that_mismatches_the_bundle(
+    session, document
+):
+    _, RunRequestError, _, _, _ = _service_api()
+    registry = TamperedDocumentRegistry(REGISTRY, document)
+    service = _service(session, RecordingTutorRunner(_candidate()), registry=registry)
+
+    with pytest.raises(RunRequestError) as caught:
+        await service.run(
+            experiment_id="tutor-prompt-regression-v1",
+            task_case_id="tgqa-001",
+            variant_id="tutor-v3",
+            run_profile="evaluation",
+            connection=_connection(),
+        )
+
+    assert caught.value.code == "manifest_invalid"
+    # Rejected before any Run row is written.
+    assert session.execute(select(EvalRun)).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_rescore_rejects_a_mismatched_scorer_document_before_claiming(session):
+    _, RunRequestError, _, _, _ = _service_api()
+    first = await _service(session, RecordingTutorRunner(_candidate())).run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+    document = _rehash(
+        {
+            **dict(REGISTRY.scorer_document("hybrid-v2")),
+            "parser_version": "json-rubric-v2-tampered",
+        }
+    )
+    registry = TamperedDocumentRegistry(REGISTRY, document)
+    service = _service(
+        session,
+        RecordingTutorRunner(_candidate()),
+        scorer_llm=FakeScorerLLM(),
+        registry=registry,
+    )
+    before = len(EvalScoreSetRepository(session).list_for_run(first.run.id))
+
+    with pytest.raises(RunRequestError) as caught:
+        await service.rescore(
+            run_id=first.run.id,
+            scorer_version="hybrid-v2",
+            connection=_connection(scorer_llm=FakeScorerLLM()),
+        )
+
+    assert caught.value.code == "manifest_invalid"
+    assert len(EvalScoreSetRepository(session).list_for_run(first.run.id)) == before
 
 
 @pytest.mark.asyncio
@@ -297,6 +432,10 @@ async def test_rescore_reads_frozen_artifact_and_never_calls_tutor(session):
     assert new_score_set.artifact_input_hash == frozen_artifact_hash
     assert new_score_set.scorer_version == "hybrid-v2"
     assert new_score_set.scorer_definition_hash == REGISTRY.scorer_for("hybrid-v2").definition_hash
+    # A re-score also freezes the complete document, not a projection.
+    assert new_score_set.scorer_snapshot_json == dict(
+        REGISTRY.scorer_document("hybrid-v2")
+    )
     assert len(service.score_sets.list_for_run(first.run.id)) == 2
     assert events[0]["type"] == "score_set_created"
     assert events[0]["score_set_id"] == new_score_set.id
@@ -628,7 +767,7 @@ async def test_new_run_manifest_declares_usage_contract_and_verifies_on_reread(s
 
 
 @pytest.mark.asyncio
-async def test_manifest_scorer_snapshot_is_exact_frozen_bundle_payload_plus_hash(session):
+async def test_manifest_scorer_snapshot_is_the_complete_frozen_document(session):
     service = _service(session, RecordingTutorRunner(_candidate()))
     result = await service.run(
         experiment_id="tutor-prompt-regression-v1",
@@ -638,15 +777,49 @@ async def test_manifest_scorer_snapshot_is_exact_frozen_bundle_payload_plus_hash
         connection=_connection(),
     )
 
-    expected = SCORER.payload()
-    expected["definition_hash"] = SCORER.definition_hash
+    document = dict(REGISTRY.scorer_document("hybrid-v1"))
     snapshot = result.run.manifest_json["scorer_snapshot"]
-    assert snapshot == expected
+    assert snapshot == document
+    assert snapshot["schema_version"] == "scorer-bundle-v1"
+    assert snapshot["definition_hash"] == document["definition_hash"]
+    # The frozen document is self-consistent under the D5d rule.
+    assert (
+        hash_without_field(snapshot, "definition_hash") == snapshot["definition_hash"]
+    )
     assert snapshot["required_dimensions_by_case_type"] == {
         key: list(value)
         for key, value in SCORER.required_dimensions_by_case_type.items()
     }
     assert snapshot["calibration_hash"] == SCORER.calibration_hash
+
+
+@pytest.mark.asyncio
+async def test_new_live_score_set_freezes_the_complete_scorer_document(session):
+    service = _service(session, RecordingTutorRunner(_candidate()))
+    result = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+
+    document = dict(REGISTRY.scorer_document("hybrid-v1"))
+    score_set = result.score_set
+    assert score_set.scorer_snapshot_json == document
+    assert score_set.scorer_definition_hash == document["definition_hash"]
+    assert (
+        hash_without_field(score_set.scorer_snapshot_json, "definition_hash")
+        == document["definition_hash"]
+    )
+    projection = {
+        key: value
+        for key, value in document.items()
+        if key not in ("schema_version", "definition_hash")
+    }
+    assert projection == SCORER.payload()
+    # The manifest and the ScoreSet freeze the same document.
+    assert result.run.manifest_json["scorer_snapshot"] == score_set.scorer_snapshot_json
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ from app.eval.learning_run.repositories import (
     RepositoryConflictError,
     RepositoryNotFoundError,
 )
-from app.eval.learning_run.compare import compare_score_sets
+from app.eval.learning_run.compare import compare_score_sets, scorer_identity
 from app.eval.learning_run.regression import suite_regression_case_ids
 from app.eval.learning_run.service import (
     EvalModelConnection,
@@ -261,13 +261,46 @@ def _score_detail(row: Any) -> ScoreSetDetail:
     )
 
 
-def _latest_comparable_score_set(rows: list[Any], *, peer_versions: set[str] | None = None):
-    completed = [row for row in rows if getattr(row, "status", None) == "completed"]
-    if peer_versions:
-        matched = [row for row in completed if row.scorer_version in peer_versions]
-        if matched:
-            return matched[-1]
-    return completed[-1] if completed else None
+def _completed_score_sets(rows: list[Any]) -> list[Any]:
+    return [row for row in rows if getattr(row, "status", None) == "completed"]
+
+
+def _score_set_identity(row: Any):
+    return scorer_identity(
+        {
+            "scorer_id": row.scorer_id,
+            "scorer_version": row.scorer_version,
+            "scorer_definition_hash": getattr(row, "scorer_definition_hash", None),
+            "scorer_snapshot": getattr(row, "scorer_snapshot_json", None),
+        }
+    )
+
+
+def _pair_comparable_score_sets(left_sets: list[Any], right_sets: list[Any]):
+    """Pair the latest completed ScoreSets that share a complete scorer identity.
+
+    A shared scorer version alone is not enough: two same-version ScoreSets with
+    different or missing definition hashes must not be presented as one
+    comparison.  When no complete identity is shared, the latest completed
+    candidate on each side is kept so the pair still renders as informational or
+    as a re-score prompt.
+    """
+
+    left_completed = _completed_score_sets(left_sets)
+    right_completed = _completed_score_sets(right_sets)
+    right_by_identity: dict[tuple[str, str, str], Any] = {}
+    for row in right_completed:
+        identity = _score_set_identity(row)
+        if identity is not None:
+            right_by_identity[identity] = row
+    for row in reversed(left_completed):
+        identity = _score_set_identity(row)
+        if identity is not None and identity in right_by_identity:
+            return row, right_by_identity[identity]
+    return (
+        left_completed[-1] if left_completed else None,
+        right_completed[-1] if right_completed else None,
+    )
 
 
 def _execution_detail(row: Any) -> ScorerExecutionDetail:
@@ -465,11 +498,7 @@ def compare_runs(
             "evaluation_integrity_error",
             "evaluation artifact integrity could not be verified",
         ) from None
-    left_completed = {row.scorer_version for row in left_sets if row.status == "completed"}
-    right_completed = {row.scorer_version for row in right_sets if row.status == "completed"}
-    shared = left_completed & right_completed
-    left_score = _latest_comparable_score_set(left_sets, peer_versions=shared or None)
-    right_score = _latest_comparable_score_set(right_sets, peer_versions=shared or None)
+    left_score, right_score = _pair_comparable_score_sets(left_sets, right_sets)
     payload = compare_score_sets(
         {
             "run_id": left_run.id,
@@ -481,6 +510,8 @@ def compare_runs(
             else {
                 "scorer_id": left_score.scorer_id,
                 "scorer_version": left_score.scorer_version,
+                "scorer_definition_hash": left_score.scorer_definition_hash,
+                "scorer_snapshot": left_score.scorer_snapshot_json,
                 "aggregate_scores": left_score.aggregate_scores_json,
             },
         },
@@ -494,6 +525,8 @@ def compare_runs(
             else {
                 "scorer_id": right_score.scorer_id,
                 "scorer_version": right_score.scorer_version,
+                "scorer_definition_hash": right_score.scorer_definition_hash,
+                "scorer_snapshot": right_score.scorer_snapshot_json,
                 "aggregate_scores": right_score.aggregate_scores_json,
             },
         },

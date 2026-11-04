@@ -16,6 +16,7 @@ from app.eval.learning_run.registry import TaskRegistry
 from app.eval.learning_run.repositories import (
     ChecksumMismatchError,
     EvalRunRepository,
+    EvalScoreSetRepository,
     EvalSuiteImportRepository,
 )
 
@@ -210,10 +211,58 @@ def test_committed_24_record_fixture_imports_with_original_hashes(session):
     assert imported == 24
     assert session.scalar(select(func.count()).select_from(EvalRun)) == 24
     run_repo = EvalRunRepository(session)
+    score_repo = EvalScoreSetRepository(session)
     for record in records:
         stored = run_repo.get_verified(record["run"]["id"])
         assert stored.manifest_hash == record["run"]["manifest_hash"]
         assert "usage_contract" not in stored.manifest_json
+        for raw_score in record["score_sets"]:
+            # Historical score-set fields are re-read exactly as committed: the
+            # nine-key projection and its definition hash must not be re-signed.
+            stored_score = score_repo.get_verified(raw_score["id"])
+            assert stored_score.scorer_snapshot_json == raw_score["scorer_snapshot"]
+            assert (
+                stored_score.scorer_definition_hash
+                == raw_score["scorer_definition_hash"]
+            )
+
+
+# The committed hybrid-v1 nine-key projection hash, computed independently with
+# the standard library. It is deliberately different from the document hash.
+HYBRID_V1_PROJECTION_HASH = (
+    "80ab0249b27ff284601d5eb2da43d6442d935015ce0d9d0c062765a74fa46a60"
+)
+
+
+def test_import_accepts_both_self_consistent_scorer_snapshot_shapes(session):
+    """Historical reads accept the nine-key projection and the full document."""
+    records = _complete_suite()
+    document = dict(REGISTRY.scorer_document("hybrid-v1"))
+    projection = {
+        key: value
+        for key, value in document.items()
+        if key not in ("schema_version", "definition_hash")
+    }
+    # Independent stdlib expectation: the projection hash is not the document
+    # hash, and both shapes are stored without re-signing.
+    assert _stdlib_manifest_hash(projection) == HYBRID_V1_PROJECTION_HASH
+    assert document["definition_hash"] != HYBRID_V1_PROJECTION_HASH
+    # Default records carry the full document; make the first carry the
+    # historical nine-key projection instead.
+    records[0]["score_sets"][0]["scorer_snapshot"] = projection
+    records[0]["score_sets"][0]["scorer_definition_hash"] = HYBRID_V1_PROJECTION_HASH
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    assert imported == 24
+
+    score_repo = EvalScoreSetRepository(session)
+    stored_projection = score_repo.get_verified(records[0]["score_sets"][0]["id"])
+    assert stored_projection.scorer_snapshot_json == projection
+    assert stored_projection.scorer_definition_hash == HYBRID_V1_PROJECTION_HASH
+    # The full-document shape is preserved exactly as well.
+    stored_document = score_repo.get_verified(records[1]["score_sets"][0]["id"])
+    assert stored_document.scorer_snapshot_json == document
+    assert stored_document.scorer_definition_hash == document["definition_hash"]
 
 
 def test_import_preserves_a_synthetic_usage_contract_manifest(session):
