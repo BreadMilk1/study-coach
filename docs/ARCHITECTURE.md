@@ -465,6 +465,14 @@ D5c-5 strengthens the existing P1 in `backend/tests/agent/test_sdk_planner_contr
 
 The nested call's usage is observed at the SDK callback, but is not included in the returned trace. The four-call input/output sum would be `44/28`, not this trace's `33/21`; this characterisation does not approve that exclusion as a whole-turn accounting design. No new trace total, usage contract, artifact/hash/scorer/compare integration or public SSE persistence evidence is introduced. Retry, Judge usage, missing/failure accounting and real billing remain separate; see [acceptance](EVAL.md#d5c-5-planner-outer-and-nested-evidence).
 
+### D5c-6 Tutor usage isolation across a Graph retry
+
+`test_d5c6_graph_retry_keeps_tutor_attempt_usage_separate` in `backend/tests/agent/test_sdk_consumer_contract.py` adds one tests-only real-SDK case through the production-policy Graph: Tutor stream → valid weak Judge (`0.40`) → retry Tutor stream → valid passing Judge (`0.80`). Four scripted requests and their full prompts are checked separately, including a retry hint with the verified score/fixed dimensions and no Judge free reasoning.
+
+A transparent test-owned recorder delegates unchanged arguments to the real `TutorAttemptEngine` and returns its original Candidate to the Graph. The two real Candidates and their completed-generation traces independently carry `(3,2,5)` and `(7,3,10)`; two Tutor SDK callbacks separately assert the same fixed counts. The second attempt is not the cross-attempt sum `(10,5,15)`. The real Graph retains the two answers, ends with the revised answer, records one retry and calls MemoryWriter once after the pass.
+
+This proves per-`answer()` usage isolation for the tested retry path, not a Graph-visible usage ledger. The Graph still does not publish Candidate usage in state/stream, and Judge usage is not captured. No production, existing test/helper/fixture, usage contract, artifact/hash/scorer/compare or database-schema change is introduced. Whole-turn accounting, missing/failure usage, other retry/provider shapes, billing and remaining D5d audits stay separate. See [acceptance](EVAL.md#d5c-6-tutor-retry-usage-isolation-evidence).
+
 ### D5d batch 1: frozen scorer identity
 
 New live runs and historical re-scores freeze the complete scorer document in each new ScoreSet; new manifests use the same complete snapshot. Before claiming a Run or ScoreSet, the document must declare a non-empty string `schema_version`, its recomputed hash excluding `definition_hash` must equal the document and executing bundle's declared hash, and its ID, version and executable projection must match the bundle. An explicitly supplied expected hash must also agree. The live path no longer silently substitutes a projection hash when the document hash disagrees.
