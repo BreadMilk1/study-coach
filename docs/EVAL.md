@@ -663,6 +663,25 @@ No production code, existing tests, frozen fixture, `usage_contract`, hash/score
 
 ---
 
+## D5c-4 Quiz outer-iteration evidence
+
+Independent Oracle acceptance on base `06ff5f8f0e747ef02c46e1120165266f37f37bd8` (PR #29). Only Q4 in `backend/tests/agent/test_sdk_quiz_contract.py` changes; accepted file SHA-256 is `2ec2717f52366f262a3e1480b106c7195c80c4b35c626b578a617978be776d9b`. Publication documentation does not change that accepted test. No new test node, production, shared fixture/builder, dependency, `usage_contract`, artifact, hash, scorer or comparison change is included.
+
+The case pins three scripted wire usage dictionaries to `(13,9,22)`, separately checks each real locked SDK callback message's core usage fields, and independently asserts returned consumer trace totals `39/27`. Existing history, tool and fresh-Session SQLite question assertions remain. Callback sums do not replace consumer evidence. This is successful outer-iteration accumulation only, not provider billing, complete turn usage, missing/failure accounting or public SSE persistence evidence; see [Architecture](ARCHITECTURE.md#d5c-4-quiz-outer-iteration-usage-evidence).
+
+| Local r2 validation | Result |
+|---|---|
+| Focused Q4, first pytest execution | **1 passed**, 0.80s |
+| Related three files, first related execution | **37 passed**, 0.82s; includes focused, not additive |
+| Parent / worker / pytest exit codes | All 0; no failures/skips/xfails/xpasses; stderr empty |
+| Original protection before / after | Both captured exit 0, stdout byte-equal to original expectation |
+
+Related file counts are Quiz SDK contract 15, Quiz agent loop 9 and AgentTrace 13. No local full-backend or live-provider run was performed. The controlled launcher retains lock/source checks, validated venv-prefix initialization before `sysconfig`, `-I -S -B` without `.pth` processing, temporary data/cache paths, disabled downloads and pre-import socket/DNS guards. These are process-local guards, not an OS sandbox or global network count.
+
+The batch had an initial wrapper failure, retained as r1: the original protection verifier ran once and produced byte-equal stdout with empty stderr, but assigning `$?` to zsh's read-only `status` lost its exit code. No success result was fabricated and pytest did not start. After explicit user authorization, r2 changed only the launcher's evidence directory and used an external Python `subprocess` wrapper. A harmless `SystemExit(7)` self-check captured 7 before execution; verifier results use `CompletedProcess.returncode`. r2 repeated protection before once, then executed focused and related once each, followed by protection after once. It is not a failure-free or retry-free batch; there was no pytest rerun or expectation change.
+
+Complete r1 failure records and r2 parent/worker logs, results, source hashes and acceptance reports remain outside Git in the task evidence directory `study-coach-d5c4-2026-11-04/`, with r2 isolated under `r2/`; nothing was overwritten. Main-agent reconciliation checked the actual logs, source/diff hashes and protection bytes without repeating tests. Planner/nested calls, Tutor retry/Judge units, D5d's remaining audits and real provider reliability/billing remain separate work.
+
 # D5d Scorer Identity — Offline Acceptance
 
 Batch 1 acceptance, 2026-11-03, with publication-base integration revalidation on 2026-11-04: complete snapshots for new scorer writes, historical hash preservation and conservative comparison identity. These are offline acceptance records, not deployment or completion of the wider D5d audit.

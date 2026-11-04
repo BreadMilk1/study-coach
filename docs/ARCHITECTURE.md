@@ -453,6 +453,12 @@ The test seam deliberately retains the registry's Ollama/`llama3.2` connection l
 
 ---
 
+### D5c-4 Quiz outer-iteration usage evidence
+
+D5c-4 strengthens the existing Q4 in `backend/tests/agent/test_sdk_quiz_contract.py` without changing production code, shared response builders or test nodes. Three non-stream OpenAI SDK calls perform retrieval, question persistence and a final empty-body response. Each scripted response carries `(13,9,22)`; each real SDK callback message separately projects those three counts. The real Quiz node's returned `agent_trace` independently reports `input_tokens=39` and `output_tokens=27`. Existing message-history, tool-schema and fresh-Session question-read assertions remain intact.
+
+This characterises `AgentTrace.record_iteration` and its returned serialization over three successful outer iterations, not the single-Tutor `tutor-chunk-sum-v1` contract. No trace total field, Learning Run artifact/hash/compare integration, public SSE persistence evidence or new usage policy is introduced. It is not a whole-turn billing ledger: Planner nested calls, Tutor retries, Judge usage, missing counters and failure accounting remain outside this case. D5d's remaining import/execution audits are independent. See [acceptance](EVAL.md#d5c-4-quiz-outer-iteration-evidence).
+
 ### D5d batch 1: frozen scorer identity
 
 New live runs and historical re-scores freeze the complete scorer document in each new ScoreSet; new manifests use the same complete snapshot. Before claiming a Run or ScoreSet, the document must declare a non-empty string `schema_version`, its recomputed hash excluding `definition_hash` must equal the document and executing bundle's declared hash, and its ID, version and executable projection must match the bundle. An explicitly supplied expected hash must also agree. The live path no longer silently substitutes a projection hash when the document hash disagrees.
