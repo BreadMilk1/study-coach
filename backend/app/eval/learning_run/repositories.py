@@ -332,6 +332,68 @@ def _resolve_scorer_identity(
     return str(scorer_id), str(scorer_version)
 
 
+# The two fields a complete scorer document adds on top of the nine-key
+# `ScorerBundle.payload()` projection.  The projection of a frozen document is
+# the payload the bundle executes, so removing these two keys is what the
+# document-to-bundle check compares.
+_SCORER_DOCUMENT_META_FIELDS = frozenset({"schema_version", "definition_hash"})
+
+
+def freeze_scorer_document(
+    document: Mapping[str, Any],
+    *,
+    bundle: ScorerBundle,
+    expected_definition_hash: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Validate a complete frozen scorer document against its executing bundle.
+
+    New live and re-score ScoreSets must carry the whole frozen scorer document,
+    not a projection, so a later reader can audit the exact definition.  The
+    document has to declare the existing fixed scorer schema as a non-empty
+    string and its own ``definition_hash``; that hash must equal the executing
+    bundle's declared hash, and a caller-supplied expected hash, when present,
+    must agree as well.  The document must also name the bundle's id and version
+    and project onto exactly the payload the bundle will execute.  Any mismatch
+    is raised here, before a Run or ScoreSet row is written, with no silent
+    fallback to a re-derived hash.
+    """
+
+    snapshot = as_plain(document)
+    if not isinstance(snapshot, dict) or not snapshot:
+        raise ValueError("scorer document must be a non-empty mapping")
+    schema_version = snapshot.get("schema_version")
+    if not isinstance(schema_version, str) or not schema_version:
+        raise ChecksumMismatchError("scorer document is missing schema_version")
+    declared = snapshot.get("definition_hash")
+    if not isinstance(declared, str) or not declared:
+        raise ChecksumMismatchError("scorer document is missing definition_hash")
+    if hash_without_field(snapshot, "definition_hash") != declared:
+        raise ChecksumMismatchError("scorer document definition hash mismatch")
+    bundle_hash = getattr(bundle, "definition_hash", None)
+    if not isinstance(bundle_hash, str) or not bundle_hash:
+        raise ChecksumMismatchError("scorer bundle is missing definition_hash")
+    if declared != bundle_hash:
+        raise ChecksumMismatchError(
+            "scorer document definition hash does not match the executing bundle"
+        )
+    if expected_definition_hash is not None and str(expected_definition_hash) != declared:
+        raise ChecksumMismatchError(
+            "scorer document definition hash does not match the expected hash"
+        )
+    if str(snapshot.get("scorer_id") or "") != str(bundle.scorer_id):
+        raise ChecksumMismatchError("scorer document id mismatch")
+    if str(snapshot.get("version") or "") != str(bundle.version):
+        raise ChecksumMismatchError("scorer document version mismatch")
+    projection = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in _SCORER_DOCUMENT_META_FIELDS
+    }
+    if projection != bundle.payload():
+        raise ChecksumMismatchError("scorer document projection mismatch")
+    return snapshot, declared
+
+
 def _freeze_scorer_audit(
     *,
     scorer_id: str,
@@ -343,6 +405,16 @@ def _freeze_scorer_audit(
     """Freeze a ScoreSet's scorer document so historical re-score stays auditable."""
 
     if scorer_snapshot is not None:
+        if isinstance(scorer_bundle, ScorerBundle):
+            # New live/rescore rows must freeze the complete document and prove
+            # it projects onto the bundle that actually executes.  A supplied
+            # expected hash must agree; a conflicting expectation is rejected
+            # rather than silently dropped.
+            return freeze_scorer_document(
+                scorer_snapshot,
+                bundle=scorer_bundle,
+                expected_definition_hash=scorer_definition_hash,
+            )
         snapshot = as_plain(scorer_snapshot)
         if not isinstance(snapshot, dict) or not snapshot:
             raise ValueError("scorer_snapshot must be a non-empty mapping")
@@ -355,17 +427,12 @@ def _freeze_scorer_audit(
         return snapshot, expected
 
     if isinstance(scorer_bundle, ScorerBundle):
-        snapshot = scorer_bundle.payload()
-        if scorer_bundle.definition_hash:
-            snapshot = {**snapshot, "definition_hash": scorer_bundle.definition_hash}
-            expected = scorer_bundle.definition_hash
-            actual = hash_without_field(snapshot, "definition_hash")
-            if actual != expected:
-                snapshot = scorer_bundle.payload()
-                expected = canonical_hash(snapshot)
-        else:
-            expected = canonical_hash(snapshot)
-        return snapshot, expected
+        # A bundle alone cannot freeze a complete document.  Refuse to re-derive
+        # a projection hash that would silently diverge from the stored
+        # definition; callers must pass the frozen scorer document.
+        raise ValueError(
+            "a complete frozen scorer document is required to freeze a ScoreSet"
+        )
 
     if isinstance(scorer_bundle, Mapping):
         snapshot = as_plain(scorer_bundle)
@@ -1789,6 +1856,7 @@ __all__ = [
     "EvalSuiteImportRepository",
     "EvaluationBusyError",
     "EvaluationUnavailableError",
+    "freeze_scorer_document",
     "InvalidTransitionError",
     "LearningRunRepositoryError",
     "RepositoryConflictError",

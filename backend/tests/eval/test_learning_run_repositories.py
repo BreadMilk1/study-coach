@@ -651,6 +651,87 @@ def test_score_set_history_is_append_only_and_each_row_terminal_once(session):
     assert score_repo.get_verified(first.id).status == "completed"
 
 
+def _stdlib_hash_without_field(payload: dict, field: str) -> str:
+    """Independent definition hash, computed with the standard library only."""
+    import hashlib
+
+    body = {key: value for key, value in payload.items() if key != field}
+    return hashlib.sha256(
+        json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+
+
+def test_create_rejects_an_invalid_scorer_document_before_insert(session):
+    from app.eval.learning_run.registry import TaskRegistry
+
+    ChecksumMismatch, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "scorer-document")
+    registry = TaskRegistry.load_default()
+    bundle = registry.scorer_for("hybrid-v1")
+    document = dict(registry.scorer_document("hybrid-v1"))
+    score_repo = ScoreSetRepository(session)
+
+    def _create(snapshot, *, scorer_bundle=bundle, expected=None):
+        return score_repo.create(
+            run_id=finished.id,
+            artifact_input_hash=finished.artifact_hash,
+            scorer_bundle=scorer_bundle,
+            scorer_snapshot=snapshot,
+            scorer_definition_hash=expected,
+        )
+
+    bad_hash = {**document, "definition_hash": "0" * 64}
+    missing_hash = {key: value for key, value in document.items() if key != "definition_hash"}
+    missing_schema = {key: value for key, value in document.items() if key != "schema_version"}
+    empty_schema = {**document, "schema_version": ""}
+    illegal_schema = {**document, "schema_version": 7}
+    # A wrong non-empty schema still changes the document hash, so a
+    # self-consistent document can never match the executing bundle's hash.
+    wrong_schema = {**document, "schema_version": "scorer-bundle-v2"}
+    wrong_schema["definition_hash"] = _stdlib_hash_without_field(
+        wrong_schema, "definition_hash"
+    )
+    # Self-consistent (stdlib-hashed) but a different definition than the
+    # executing bundle declares.
+    other_definition = {**document, "parser_version": "json-rubric-v1-other"}
+    other_definition["definition_hash"] = _stdlib_hash_without_field(
+        other_definition, "definition_hash"
+    )
+
+    rejected = {
+        "hash": (bad_hash, bundle, None),
+        "missing_hash": (missing_hash, bundle, None),
+        "missing_schema": (missing_schema, bundle, None),
+        "empty_schema": (empty_schema, bundle, None),
+        "illegal_schema": (illegal_schema, bundle, None),
+        "wrong_schema": (wrong_schema, bundle, None),
+        "bundle_hash_mismatch": (other_definition, bundle, None),
+        "bundle_missing_hash": (document, replace(bundle, definition_hash=""), None),
+        "explicit_hash_mismatch": (document, bundle, "1" * 64),
+        "bundle_id_mismatch": (document, replace(bundle, scorer_id="other"), None),
+        "bundle_version_mismatch": (document, replace(bundle, version="hybrid-v9"), None),
+        "bundle_projection_mismatch": (
+            document,
+            replace(bundle, parser_version="json-rubric-v1-tampered"),
+            None,
+        ),
+    }
+    for name, (snapshot, scorer_bundle, expected) in rejected.items():
+        with pytest.raises(ChecksumMismatch):
+            _create(snapshot, scorer_bundle=scorer_bundle, expected=expected)
+        assert session.query(models.EvalScoreSet).count() == 0, name
+
+    created = _create(document)
+    assert created.scorer_snapshot_json == document
+    assert created.scorer_definition_hash == document["definition_hash"]
+
+
 def test_score_set_finalize_requires_running_and_rejects_pending_without_mutation(session):
     _, finished = _finish_run(session, "pending-finalize")
     _, _, ScoreSetRepository, _, Conflict = _repository_api()

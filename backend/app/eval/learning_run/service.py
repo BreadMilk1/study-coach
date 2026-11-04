@@ -28,6 +28,7 @@ from .repositories import (
     EvaluationBusyError,
     EvaluationUnavailableError,
     RepositoryNotFoundError,
+    freeze_scorer_document,
 )
 from .runner import RunnerOperationalError
 from .scoring import ScoringService, derive_score_set
@@ -142,6 +143,7 @@ class PreparedRun:
     definition: ResolvedRunDefinition
     connection: EvalModelConnection
     manifest: RunManifest
+    scorer_snapshot: Mapping[str, Any]
     run: Any
     started: float
     cancellation: CancellationToken = field(default_factory=CancellationToken, compare=False)
@@ -335,6 +337,7 @@ class RunService:
         self,
         definition: ResolvedRunDefinition,
         connection: EvalModelConnection,
+        scorer_snapshot: Mapping[str, Any],
     ) -> RunManifest:
         from .runner import resolved_retrieval_config
 
@@ -353,8 +356,6 @@ class RunService:
             "reranker_config_version": definition.corpus.reranker_config_version,
             "chunk_hashes": [chunk.content_hash for chunk in definition.corpus.chunks],
         }
-        scorer_snapshot = definition.scorer.payload()
-        scorer_snapshot["definition_hash"] = definition.scorer.definition_hash
         return RunManifest(
             experiment_id=definition.experiment.experiment_id,
             task_case_id=definition.task.task_case_id,
@@ -500,7 +501,13 @@ class RunService:
             raise RunRequestError("manifest_invalid", _safe_exception_message("learning run definition is invalid", exc)) from exc
         try:
             self._validate_connection(definition, connection)
-            manifest = self._manifest(definition, connection)
+            # Validate the complete frozen scorer document against the bundle
+            # that will actually execute before any Run row is written.
+            scorer_snapshot = freeze_scorer_document(
+                self.registry.scorer_document(definition.scorer.version),
+                bundle=definition.scorer,
+            )[0]
+            manifest = self._manifest(definition, connection, scorer_snapshot)
         except RunRequestError:
             raise
         except Exception as exc:
@@ -531,6 +538,7 @@ class RunService:
             definition=definition,
             connection=connection,
             manifest=manifest,
+            scorer_snapshot=scorer_snapshot,
             run=run,
             started=self.clock.monotonic(),
         )
@@ -740,6 +748,7 @@ class RunService:
             score_set = self.score_sets.create(
                 run_id=run.id,
                 scorer_bundle=definition.scorer,
+                scorer_snapshot=prepared.scorer_snapshot,
                 artifact_input_hash=run.artifact_hash,
             )
             score_set = self.score_sets.claim_running(score_set.id)
@@ -1043,6 +1052,16 @@ class RunService:
                 task = self.registry.task_cases[run.task_case_id]
         except Exception as exc:
             raise RunRequestError("manifest_invalid", "scorer version is not in the registry") from exc
+
+        try:
+            # Validate the frozen document against the bundle that will execute
+            # before claiming a ScoreSet, so a mismatch never reaches persistence.
+            freeze_scorer_document(document, bundle=bundle)
+        except Exception as exc:
+            raise RunRequestError(
+                "manifest_invalid",
+                "scorer document does not match the executing bundle",
+            ) from exc
 
         scorer_config = as_plain(bundle.model_config)
         expected_scorer = {

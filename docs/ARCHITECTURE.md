@@ -453,6 +453,16 @@ The test seam deliberately retains the registry's Ollama/`llama3.2` connection l
 
 ---
 
+### D5d batch 1: frozen scorer identity
+
+New live runs and historical re-scores freeze the complete scorer document in each new ScoreSet; new manifests use the same complete snapshot. Before claiming a Run or ScoreSet, the document must declare a non-empty string `schema_version`, its recomputed hash excluding `definition_hash` must equal the document and executing bundle's declared hash, and its ID, version and executable projection must match the bundle. An explicitly supplied expected hash must also agree. The live path no longer silently substitutes a projection hash when the document hash disagrees.
+
+Historical nine-key projections and complete documents remain readable/importable under their original self-consistent hashes. Old manifests, artifacts, ScoreSets, definitions and curated fixtures are not migrated, supplemented or re-signed. CandidateArtifact fields, both usage hash positions and the hash algorithm are unchanged. The new manifest snapshot changes new manifest payloads only; it does not repair old embedded scorer snapshots in place.
+
+Comparison requires a non-empty, self-consistent `(scorer_id, scorer_version, scorer_definition_hash)` identity: the frozen snapshot must hash to the stored value and name the same scorer ID/version. Equal version labels alone are insufficient. Missing ScoreSets/identities or differing identities yield `informational` with `delta=None`; differing versions additionally request re-score. No projection-to-document hash bridge or current-registry backfill is inferred. The API prefers a pair of completed ScoreSets sharing the full identity; otherwise it presents the latest completed candidates under the same conservative gate. Existing task/corpus/artifact alignment, experiment axes and D5c usage checks still apply.
+
+This is application-level checksum and identity validation, not authenticated provenance or tamper-proof storage. It does not complete D5d's import privacy/lifecycle/relationship audit or execution-derived ScoreSet/rescore audit. Provider, nested/tool-call and retry accounting remain separate D5c work. Bounded offline evidence is recorded in [EVAL](EVAL.md#d5d-scorer-identity--offline-acceptance).
+
 ## 9. Frontend Architecture
 
 ```

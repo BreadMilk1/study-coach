@@ -17,6 +17,7 @@
 - [P3 Frontend Productize — Shipping Report](#p3-frontend-productize--shipping-report)
 - [Learning Run Harness — Tutor Prompt Regression](#learning-run-harness--tutor-prompt-regression)
 - [D5c Tutor Usage — Offline Acceptance](#d5c-tutor-usage--offline-acceptance)
+- [D5d Scorer Identity — Offline Acceptance](#d5d-scorer-identity--offline-acceptance)
 - [Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring](#cloud-capability-offline-contracts--protocol-data-lifecycle-budget-scoring)
 
 ## TL;DR
@@ -661,6 +662,33 @@ The task-local launcher retains the validated Python 3.11.15 `-I -S -B`/venv-pre
 No production code, existing tests, frozen fixture, `usage_contract`, hash/scorer/comparison policy, D5d checkout or real data was modified. Real provider reliability/billing, browser timing, tool/nested calls, retry and Judge accounting remain unverified by this batch. This is bounded consumption evidence, not a new aggregation or zero/missing policy, strict TDD claim, or completion of D5c/D5d.
 
 ---
+
+# D5d Scorer Identity — Offline Acceptance
+
+Batch 1 acceptance, 2026-11-03, with publication-base integration revalidation on 2026-11-04: complete snapshots for new scorer writes, historical hash preservation and conservative comparison identity. These are offline acceptance records, not deployment or completion of the wider D5d audit.
+
+- Independent focused acceptance: **291 passed**, exit 0, no failures/skips/xfails/xpasses or collection errors; stderr empty. The seven files are `tests/eval/test_learning_run_{compare,service,scoring,repositories,import,release_contract}.py` and `tests/api/test_eval_routes.py`.
+- Cases cover new live/re-score snapshot identity, new manifest internal consistency, hash/schema/ID/version/bundle mismatch refusal before insertion, both historical snapshot shapes, the unchanged 24-record fixture import, missing/different scorer identities and full-identity pair selection. Updated historical compare expectations reflect the identity gate, not altered fixture scores or hashes.
+- The task-local launcher uses Python 3.11.15 with lock-checked installed dependencies, `-I -S -B`, validated venv prefixes restored before `sysconfig`, explicit checkout imports without processing editable `.pth` files, disabled pytest plugin autoload, pre-pytest socket/DNS guards, synthetic credentials, temporary default data/cache paths and model-download denial. Focused guard hits were zero; process-local guards can be replaced by fixtures and are not an OS sandbox or a global network-attempt counter.
+- The curated fixture SHA-256 remains `1da3e0c10c09c79cf108368cd57676a459aab8529e5b56b345e8ec35e6f7cbf7`. Old artifacts, manifests and ScoreSet references are not re-signed. Full logs and launcher remain in the task's external acceptance directory, not in Git.
+- An independent static review requested four corrections (missing ScoreSet gate, complete-document/bundle binding, an existing scoring-test call site, and snapshot/row identity agreement); incremental review confirmed those corrections. No test run preceded these corrections, so this is not a strict RED→GREEN claim or a separate security review.
+
+The first full-backend attempt failed: the final report was **2,045 passed / 2 failed**, exit 1, no skips/xfails/xpasses, with empty stderr. `test_concurrent_appends_do_not_lose_executions` and `test_concurrent_commits_do_not_lose_updates` use multiprocessing `spawn`. The new launcher lacked a `__main__` entry guard, so child bootstrap re-entered pytest, emitted repeated suite output and raised the standard multiprocessing bootstrap RuntimeError instead of signalling worker readiness. These are retained launcher-failure records, not a full-backend pass or evidence of a D5d production defect; child reports must not be added together. Execution stopped without a launcher/code repair or retry. The fixture remained unchanged; the fixed original verifier again exited 0 with byte-identical stdout, and a process check found no remaining launcher instance.
+
+After separate approval, R2 corrected the external launcher only: pytest starts under `if __name__ == "__main__"`, while spawned workers still initialize validated import paths/prefixes and network guards before importing their target modules. Independent static review approved this correction. Production source and project tests were unchanged for revalidation.
+
+| R2 run | Result | Evidence boundary |
+|---|---|---|
+| Original two multiprocessing cases | **2 passed** | Exit 0, no skips/xfails/xpasses; stderr empty. Four worker bootstrap records identify the parent, validated venv and installed guards, without entering pytest. |
+| Full backend | **2,047 passed** | Exit 0, no failures/skips/xfails/xpasses or collection errors; stderr empty. Includes the 291 focused cases and both multiprocessing cases; counts are not additive. |
+
+The R1 failure and both launcher revisions remain retained, not overwritten. R2's parent guard counter was zero; child bootstrap records establish guard installation, not a global network-attempt count. The fixture hash is unchanged and the final fixed original verifier exited 0 with byte-identical stdout. No frontend/browser, real provider/model, billing, deployed behavior or real-data verification is claimed. Import privacy/lifecycle/relationship validation and execution-derived scoring remain separate batches.
+
+## D5d publication-base integration
+
+The publication branch was fast-forwarded to `ac7cc73169d75026ebdf03aa0407ddbb33a9f8c0` (PR #28) before restoring the saved D5d batch 1 changes. The only content conflict was in ROADMAP; both D5c-3 and D5d records were retained. All eleven D5d production/test files remained byte-identical to their prior accepted versions. PR #28's four-node test file retained SHA-256 `c51967a2b24022dfc53694d73cc14de73830ffc8d63b36ed022f1bc1a6049814`.
+
+On that integrated source, independent offline focused acceptance passed **295 tests** (the seven D5d files plus the unchanged PR #28 test file), and the full backend passed **2,051 tests**. Both exited 0, with no failures/skips/xfails/xpasses or collection errors and empty stderr. Full includes focused; these counts are not additive. The launcher retains R2's spawn-safe entry and guards, with separate new logs/results; no business/test expectation or dependency changes were needed for integration. Prior snapshots, stash and acceptance/failure records are preserved outside Git in `Study-Coach-Handoffs/D5D-1-PUBLICATION-2026-11-04`.
 
 # Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring
 

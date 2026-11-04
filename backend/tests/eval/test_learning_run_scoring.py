@@ -205,9 +205,12 @@ def _running_score_set(session, artifact: CandidateArtifact):
         artifact_hash=artifact.compute_hash(),
     )
     score_repo = EvalScoreSetRepository(session)
+    # New ScoreSets must freeze the complete registry document alongside the
+    # bundle; the document is the same scorer SCORER was built from.
     score_set = score_repo.create(
         run_id=finished.id,
         scorer_bundle=SCORER,
+        scorer_snapshot=REGISTRY.scorer_document(SCORER.version),
         artifact_input_hash=artifact.compute_hash(),
         id="score-set-scoring-identity",
     )

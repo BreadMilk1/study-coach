@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from app.eval.learning_run.compare import compare_score_sets
+from app.eval.learning_run.compare import compare_score_sets, scorer_identity
+from app.eval.learning_run.contracts import hash_without_field
+from app.eval.learning_run.registry import TaskRegistry
 
 
 FIXTURE_PATH = (
@@ -18,6 +20,31 @@ FIXTURE_PATH = (
     / "fixtures"
     / "tutor-prompt-regression-v1.jsonl"
 )
+
+_REGISTRY = TaskRegistry.load_default()
+
+# The committed hybrid-v1 nine-key projection hash, computed independently with
+# the standard library. Distinct from the full document hash.
+HYBRID_V1_PROJECTION_HASH = (
+    "80ab0249b27ff284601d5eb2da43d6442d935015ce0d9d0c062765a74fa46a60"
+)
+
+
+def _identity(version: str) -> dict:
+    """A real, self-consistent frozen scorer identity for a registry version.
+
+    The definition hash is read from the committed scorer document, not invented,
+    so the identity gate is exercised with the same frozen document a live run
+    would carry rather than a fake constant.
+    """
+
+    document = dict(_REGISTRY.scorer_document(version))
+    return {
+        "scorer_id": document["scorer_id"],
+        "scorer_version": version,
+        "scorer_definition_hash": document["definition_hash"],
+        "scorer_snapshot": document,
+    }
 
 
 def _side(
@@ -31,7 +58,15 @@ def _side(
     artifact_schema: str = "candidate-artifact-v1",
     scorer_version: str = "hybrid-v1",
     score: int = 4,
+    identity: bool = True,
 ) -> dict:
+    score_set = {
+        "scorer_id": "hybrid",
+        "scorer_version": scorer_version,
+        "aggregate_scores": {"groundedness": score},
+    }
+    if identity:
+        score_set.update(_identity(scorer_version))
     return {
         "run_id": run_id,
         "variant_id": variant_id,
@@ -45,11 +80,7 @@ def _side(
             "schema_version": "learning-run-v1",
         },
         "artifact": {"schema_version": artifact_schema, "answer": f"answer-{run_id}"},
-        "score_set": {
-            "scorer_id": "hybrid",
-            "scorer_version": scorer_version,
-            "aggregate_scores": {"groundedness": score},
-        },
+        "score_set": score_set,
     }
 
 
@@ -161,6 +192,8 @@ def test_curated_fixture_prompt_axis_pair_is_controlled_without_schema_version()
             "score_set": {
                 "scorer_id": left_score["scorer_id"],
                 "scorer_version": left_score["scorer_version"],
+                "scorer_definition_hash": left_score["scorer_definition_hash"],
+                "scorer_snapshot": left_score["scorer_snapshot"],
                 "aggregate_scores": left_score["aggregate_scores"],
             },
         },
@@ -172,6 +205,8 @@ def test_curated_fixture_prompt_axis_pair_is_controlled_without_schema_version()
             "score_set": {
                 "scorer_id": right_score["scorer_id"],
                 "scorer_version": right_score["scorer_version"],
+                "scorer_definition_hash": right_score["scorer_definition_hash"],
+                "scorer_snapshot": right_score["scorer_snapshot"],
                 "aggregate_scores": right_score["aggregate_scores"],
             },
         },
@@ -376,9 +411,13 @@ def test_scorer_version_difference_still_requires_rescore_under_one_contract():
 
     result = compare_score_sets(left, right)
 
-    assert result["compatibility"] == "controlled"
+    # A different scorer version is a different scorer identity, so the D5d
+    # identity gate downgrades the pair to informational even though the usage
+    # contract matches; the version difference still requires a re-score.
+    assert result["compatibility"] == "informational"
     assert result["rescore_required"] is True
     assert result["delta"] is None
+    assert any("versions differ" in reason for reason in result["reasons"])
 
 
 def test_other_undeclared_config_difference_still_reports_under_one_contract():
@@ -394,3 +433,223 @@ def test_other_undeclared_config_difference_still_reports_under_one_contract():
     assert any(
         "undeclared" in reason or "model" in reason for reason in result["reasons"]
     )
+
+
+# ---------------------------------------------------------------------------
+# D5d-1 -- the dedicated scorer identity gate.
+#
+# A controlled comparison needs both sides to carry a complete, self-consistent
+# (scorer_id, scorer_version, scorer_definition_hash) and for the two to be
+# equal. Missing or inconsistent identities, and same-version/different-hash
+# pairs, are informational with a None delta; a version difference additionally
+# sets rescore_required. The gate reads only the frozen snapshot and never
+# back-infers a historical identity from today's registry.
+# ---------------------------------------------------------------------------
+
+
+def test_scorer_identity_is_complete_and_self_consistent_for_both_shapes():
+    document = dict(_REGISTRY.scorer_document("hybrid-v1"))
+    assert scorer_identity(
+        {
+            "scorer_id": "hybrid",
+            "scorer_version": "hybrid-v1",
+            "scorer_definition_hash": document["definition_hash"],
+            "scorer_snapshot": document,
+        }
+    ) == ("hybrid", "hybrid-v1", document["definition_hash"])
+
+    # The nine-key projection is the historical shape and must recompute to the
+    # stored hash under the same rule. The expected hash is the independently
+    # computed fixed value, not the production helper echoed back.
+    projection = {
+        key: value
+        for key, value in document.items()
+        if key not in ("schema_version", "definition_hash")
+    }
+    assert hash_without_field(projection, "definition_hash") == HYBRID_V1_PROJECTION_HASH
+    assert scorer_identity(
+        {
+            "scorer_id": "hybrid",
+            "scorer_version": "hybrid-v1",
+            "scorer_definition_hash": HYBRID_V1_PROJECTION_HASH,
+            "scorer_snapshot": projection,
+        }
+    ) == ("hybrid", "hybrid-v1", HYBRID_V1_PROJECTION_HASH)
+
+    # A snapshot whose recomputed hash does not match the stored hash is not a
+    # trusted identity, even though it declares its own definition_hash.
+    assert (
+        scorer_identity(
+            {
+                "scorer_id": "hybrid",
+                "scorer_version": "hybrid-v1",
+                "scorer_definition_hash": "0" * 64,
+                "scorer_snapshot": document,
+            }
+        )
+        is None
+    )
+
+
+def test_same_self_consistent_identity_stays_controlled():
+    result = compare_score_sets(
+        _side(run_id="left", variant_id="tutor-v2", prompt_version="tutor-v2", score=4),
+        _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", score=2),
+    )
+
+    assert result["compatibility"] == "controlled"
+    assert result["rescore_required"] is False
+    assert result["delta"] == {"groundedness": {"left": 4, "right": 2, "delta": -2}}
+
+
+def test_missing_identity_on_both_sides_is_not_controlled():
+    """Equal-but-empty identities must not read as a match."""
+    left = _side(run_id="left", identity=False)
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", identity=False)
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert result["rescore_required"] is False
+    assert any("scorer identity" in reason for reason in result["reasons"])
+
+
+def test_one_sided_identity_is_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", identity=False)
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("scorer identity" in reason for reason in result["reasons"])
+
+
+def test_same_version_different_definition_hash_is_informational():
+    left = _side(run_id="left", score=4)
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3", score=2)
+
+    # A self-consistent identity at the same version but a different definition.
+    other = dict(_REGISTRY.scorer_document("hybrid-v1"))
+    other["parser_version"] = "json-rubric-v1-tampered"
+    other["definition_hash"] = hash_without_field(other, "definition_hash")
+    right["score_set"].update(
+        {
+            "scorer_definition_hash": other["definition_hash"],
+            "scorer_snapshot": other,
+        }
+    )
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert result["rescore_required"] is False
+    assert any("definition hash differs" in reason for reason in result["reasons"])
+
+
+def test_different_version_identity_is_informational_and_requires_rescore():
+    left = _side(run_id="left", scorer_version="hybrid-v1", score=5)
+    right = _side(
+        run_id="right",
+        variant_id="tutor-v3",
+        prompt_version="tutor-v3",
+        scorer_version="hybrid-v2",
+        score=1,
+    )
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert result["rescore_required"] is True
+    assert any("versions differ" in reason for reason in result["reasons"])
+
+
+def test_scorer_identity_rejects_a_snapshot_that_does_not_name_the_row_identity():
+    """The snapshot's own id/version must match the row, not just its hash."""
+    document = dict(_REGISTRY.scorer_document("hybrid-v1"))
+
+    wrong_id = {**document, "scorer_id": "not-hybrid"}
+    wrong_id_hash = hash_without_field(wrong_id, "definition_hash")
+    assert (
+        scorer_identity(
+            {
+                "scorer_id": "hybrid",
+                "scorer_version": "hybrid-v1",
+                "scorer_definition_hash": wrong_id_hash,
+                "scorer_snapshot": wrong_id,
+            }
+        )
+        is None
+    )
+
+    wrong_version = {**document, "version": "hybrid-v9"}
+    wrong_version_hash = hash_without_field(wrong_version, "definition_hash")
+    assert (
+        scorer_identity(
+            {
+                "scorer_id": "hybrid",
+                "scorer_version": "hybrid-v1",
+                "scorer_definition_hash": wrong_version_hash,
+                "scorer_snapshot": wrong_version,
+            }
+        )
+        is None
+    )
+
+    # A snapshot missing the naming fields cannot be tied to the row identity,
+    # even when its recomputed hash still matches the stored definition hash.
+    for missing_field in ("scorer_id", "version"):
+        partial = {key: value for key, value in document.items() if key != missing_field}
+        partial_hash = hash_without_field(partial, "definition_hash")
+        assert (
+            scorer_identity(
+                {
+                    "scorer_id": "hybrid",
+                    "scorer_version": "hybrid-v1",
+                    "scorer_definition_hash": partial_hash,
+                    "scorer_snapshot": partial,
+                }
+            )
+            is None
+        )
+
+
+def test_no_score_set_on_both_sides_is_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["score_set"] = None
+    right["score_set"] = None
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert result["rescore_required"] is False
+    assert any("scorer identity" in reason for reason in result["reasons"])
+
+
+def test_one_sided_missing_score_set_is_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    right["score_set"] = None
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("scorer identity" in reason for reason in result["reasons"])
+
+
+def test_empty_score_set_mapping_is_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    right["score_set"] = {}
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("scorer identity" in reason for reason in result["reasons"])

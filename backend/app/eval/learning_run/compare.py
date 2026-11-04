@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from app.agent.tutor_attempt import TUTOR_USAGE_CONTRACT
 
-from .contracts import is_dimension_score
+from .contracts import hash_without_field, is_dimension_score
 
 
 _ALIGN_FIELDS = (
@@ -115,6 +115,80 @@ def _score_set(side: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def scorer_identity(
+    score_set: Mapping[str, Any],
+) -> tuple[str, str, str] | None:
+    """Return a complete, self-consistent scorer identity or ``None``.
+
+    The identity is ``(scorer_id, scorer_version, scorer_definition_hash)``.  It
+    is only returned when all three are non-empty, the frozen scorer snapshot
+    names the same id and version, and the snapshot still hashes to the stored
+    definition hash.  A snapshot's own ``definition_hash`` field is never trusted
+    by itself; the hash is recomputed from the rest of the snapshot.  Both the
+    nine-key projection and the complete document are accepted, because both
+    carry ``scorer_id``/``version`` and recompute to the stored hash under the
+    same rule.  This reads only the frozen snapshot -- it never consults today's
+    registry to back-infer a historical identity.
+    """
+
+    scorer_id = score_set.get("scorer_id")
+    scorer_version = score_set.get("scorer_version")
+    scorer_definition_hash = score_set.get("scorer_definition_hash")
+    if not (
+        isinstance(scorer_id, str)
+        and scorer_id
+        and isinstance(scorer_version, str)
+        and scorer_version
+        and isinstance(scorer_definition_hash, str)
+        and scorer_definition_hash
+    ):
+        return None
+    snapshot = score_set.get("scorer_snapshot")
+    if not isinstance(snapshot, Mapping) or not snapshot:
+        return None
+    if str(snapshot.get("scorer_id") or "") != scorer_id:
+        return None
+    if str(snapshot.get("version") or "") != scorer_version:
+        return None
+    if hash_without_field(snapshot, "definition_hash") != scorer_definition_hash:
+        return None
+    return (scorer_id, scorer_version, scorer_definition_hash)
+
+
+def _scorer_identity_reason(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> str | None:
+    """Return a reason when two sides cannot share one scorer identity.
+
+    ``None`` means both sides carry a complete, self-consistent identity and the
+    two are equal.  A side with no score set, an empty ``{}`` score set, or a
+    score set whose identity is missing or inconsistent is informational -- two
+    equal-but-empty identities never count as a match.  Same-version/different-
+    hash is informational; a version difference additionally raises
+    ``rescore_required`` in the caller.
+    """
+
+    left_identity = scorer_identity(_score_set(left))
+    right_identity = scorer_identity(_score_set(right))
+    if left_identity is not None and left_identity == right_identity:
+        return None
+    if left_identity is None or right_identity is None:
+        return (
+            "scorer identity is missing or not self-consistent on one or both "
+            "sides; scorer versions are not comparable"
+        )
+    if left_identity[1] != right_identity[1]:
+        return (
+            f"scorer versions differ ({left_identity[1]} vs {right_identity[1]}); "
+            "a re-score is required"
+        )
+    return (
+        f"scorer definition hash differs at the same version ({left_identity[1]}); "
+        "scorer definitions are not comparable"
+    )
+
+
 def _undeclared_diffs(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
@@ -192,6 +266,11 @@ def compare_score_sets(
         compatibility = "informational"
         reasons.append(usage_reason)
 
+    identity_reason = _scorer_identity_reason(left, right)
+    if identity_reason is not None:
+        compatibility = "informational"
+        reasons.append(identity_reason)
+
     reasons.extend(notes)
 
     left_scorer = str(_score_set(left).get("scorer_version") or "")
@@ -238,4 +317,8 @@ def compare_score_sets(
     }
 
 
-__all__ = ["CANDIDATE_ARTIFACT_SCHEMA", "compare_score_sets"]
+__all__ = [
+    "CANDIDATE_ARTIFACT_SCHEMA",
+    "compare_score_sets",
+    "scorer_identity",
+]

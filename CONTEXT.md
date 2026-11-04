@@ -35,7 +35,7 @@ _Avoid_: Response, result JSON, assistant message
 ## Evaluation
 
 **ScoreSet**:
-一组版本化 scorer 对同一个 CandidateArtifact 生成的评估结果。Historical re-score 会追加新的 ScoreSet，不覆盖旧结果。
+一组版本化 scorer 对同一个 CandidateArtifact 生成的评估结果。Historical re-score 会追加新的 ScoreSet，不覆盖旧结果。新 live/re-score ScoreSet 冻结完整 scorer document；评分身份由 `scorer_id`、`scorer_version` 和冻结文档的 `scorer_definition_hash` 共同确定。历史投影快照及完整文档各保留原 hash，不重签，也不按当前 Registry 补认身份。
 _Avoid_: Judge score, evaluation result
 
 **ScorerExecution**:
@@ -51,7 +51,7 @@ Harness、模型、retriever 或 scorer 未能按执行契约完成工作时产�
 _Avoid_: Quality failure, bad answer
 
 **Controlled Comparison**:
-两个 Runs 只在声明的 `experiment_axes` 上不同，且其余控制变量与评分版本兼容时进行的差异比较。双方均声明相同且受支持的 `usage_contract` 才能通过新的 usage 闸门；单边声明、不同、未知或非法声明降为 `informational`，不显示受控分数 delta，声明为实验轴也不能绕过。双方都未声明时保留既有质量比较行为，但不据此证明历史 usage 单位相同。当前持久化 CandidateArtifact 不含 `schema_version`；compare 将缺失值视为 `candidate-artifact-v1`，不得把该字段写进 artifact hash。
+两个 Runs 只在声明的 `experiment_axes` 上不同，且其余控制变量与评分身份兼容时进行的差异比较。评分身份须非空、与冻结快照自洽且双方完全相同；缺评分、缺身份或身份不一致降为 `informational`、无分数 delta，版本不同另要求 re-score。双方均声明相同且受支持的 `usage_contract` 才能通过 usage 闸门；单边声明、不同、未知或非法声明降为 `informational`，不显示受控分数 delta，声明为实验轴也不能绕过。双方都未声明时不增加 usage 阻断，但不据此证明历史 usage 单位相同。当前持久化 CandidateArtifact 不含 `schema_version`；compare 将缺失值视为 `candidate-artifact-v1`，不得把该字段写进 artifact hash。
 _Avoid_: A/B test, side-by-side view, improvement
 
 **Regression Suite**:
