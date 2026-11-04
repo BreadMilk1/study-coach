@@ -682,6 +682,23 @@ The batch had an initial wrapper failure, retained as r1: the original protectio
 
 Complete r1 failure records and r2 parent/worker logs, results, source hashes and acceptance reports remain outside Git in the task evidence directory `study-coach-d5c4-2026-11-04/`, with r2 isolated under `r2/`; nothing was overwritten. Main-agent reconciliation checked the actual logs, source/diff hashes and protection bytes without repeating tests. Planner/nested calls, Tutor retry/Judge units, D5d's remaining audits and real provider reliability/billing remain separate work.
 
+## D5c-5 Planner outer and nested evidence
+
+Independent Oracle acceptance on base `eaac6d81aaa53e109ff0642504a0083da7558116` (PR #30). Only the existing P1 in `backend/tests/agent/test_sdk_planner_contract.py` changes; accepted file SHA-256 is `7f1e93ac809e4315b1c1e1792b7782a2801bee34c7c8fc00eacf0420fbe4ad02`. Publication documentation leaves that accepted source unchanged. No new test node, production, shared fixture/builder, dependency, usage contract, artifact, hash, scorer or comparison change is included.
+
+The existing three bound outer calls and one plain nested mindmap call retain their declared prompts/history and SQLite commit checks. All four raw response payloads directly assert `(11,7,18)` before execution; four real SDK callback messages independently assert those core usage fields. The real returned consumer trace separately asserts `33/21` across three outer iterations. The nested call at callback index 2 remains outside that trace, so this is not a complete four-call/whole-turn ledger or a new product accounting policy. See [Architecture](ARCHITECTURE.md#d5c-5-planner-outer-and-nested-usage-boundary).
+
+| Local validation | Result |
+|---|---|
+| Focused P1, one execution | **1 passed**, 0.83s |
+| Related three files, one execution | **48 passed**, 1.11s; includes focused, not additive |
+| Parent / worker / pytest | All exit 0; no failures/skips/xfails/xpasses; stderr empty |
+| Original protection before / after | Each executed once, captured exit 0; stdout byte-equal to original expectation |
+
+Related file counts are Planner SDK contract 17, Planner agent loop 18 and AgentTrace 13, from actual collection rather than an AST estimate. This batch had no failed execution or rerun; the earlier D5c-4 wrapper failure remains that batch's separate history. The external Python wrapper records `CompletedProcess.returncode`, with an exit-7 self-check before acceptance. The reused launcher retains validated venv-prefix initialization, `-I -S -B` without `.pth`, lock/source checks, temporary data/cache paths, disabled downloads and pre-import socket/DNS guards. Its residual D5c-4/Quiz diagnostic labels do not identify the targets: recorded source paths, hashes and runtime targets are the Planner files above. Network counters remain process-local, not an OS sandbox or global monitor.
+
+Complete parent/worker logs, results, hashes and Oracle reports remain outside Git in the `study-coach-d5c5-2026-11-04/` task evidence directory. Main-agent reconciliation verified actual logs, source/diff hashes and original-protection bytes without rerunning tests. No local full backend, live provider or billing validation was performed. Nested usage inclusion, Tutor retry/Judge accounting, public SSE persistence and remaining D5d import/execution audits are not established by this batch.
+
 # D5d Scorer Identity — Offline Acceptance
 
 Batch 1 acceptance, 2026-11-03, with publication-base integration revalidation on 2026-11-04: complete snapshots for new scorer writes, historical hash preservation and conservative comparison identity. These are offline acceptance records, not deployment or completion of the wider D5d audit.
