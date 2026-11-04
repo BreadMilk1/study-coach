@@ -622,20 +622,28 @@ async def test_P1_agent_loop_full_success_with_mindmap(offline_openai, db):
         finally:
             probe.close()
 
+    scripted_bound = [
+        assistant_tool_calls(("call_rs", "retriever_search",
+                              json.dumps({"query": "HyDE", "top_k": 3}))),
+        assistant_tool_calls(
+            ("call_up", "update_study_plan",
+             json.dumps({"milestones": MILESTONE_PAYLOAD})),
+            ("call_mm", "generate_mindmap",
+             json.dumps({"topic": "HyDE", "milestones": MILESTONE_PAYLOAD})),
+        ),
+        assistant_text(FINAL_SUMMARY),
+    ]
+    scripted_plain = [
+        assistant_text(f"```mermaid\n{MINDMAP_MERMAID}\n```\n\n{MINDMAP_OUTLINE}"),
+    ]
+    # Every scripted response carries the same synthetic usage, so the usage
+    # the real SDK parses back on each wire turn is a declared literal.
+    for raw in (*scripted_bound, *scripted_plain):
+        assert raw["usage"] == {
+            "prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
+        }
     responder = ScriptedResponder(
-        bound=[
-            assistant_tool_calls(("call_rs", "retriever_search",
-                                  json.dumps({"query": "HyDE", "top_k": 3}))),
-            assistant_tool_calls(
-                ("call_up", "update_study_plan",
-                 json.dumps({"milestones": MILESTONE_PAYLOAD})),
-                ("call_mm", "generate_mindmap",
-                 json.dumps({"topic": "HyDE", "milestones": MILESTONE_PAYLOAD})),
-            ),
-            assistant_text(FINAL_SUMMARY),
-        ],
-        plain=[assistant_text(f"```mermaid\n{MINDMAP_MERMAID}\n```\n\n{MINDMAP_OUTLINE}")],
-        on_request=on_request,
+        bound=scripted_bound, plain=scripted_plain, on_request=on_request,
     )
     offline_openai.respond(responder)
 
@@ -714,6 +722,18 @@ async def test_P1_agent_loop_full_success_with_mindmap(offline_openai, db):
         "the retriever result is still in history on the final round"
     )
 
+    # Every real SDK callback message carries the same synthetic usage; the
+    # three core fields are checked independently as a subset. ``ends[2]`` is
+    # the nested mindmap call -- round index 2 is the tools-free turn whose
+    # prompt was checked above -- so it is a wire call but not an outer
+    # agent-trace iteration.
+    for index, message in enumerate(observer.ends):
+        metadata = message.usage_metadata
+        assert metadata is not None, index
+        assert metadata["input_tokens"] == 11, index
+        assert metadata["output_tokens"] == 7, index
+        assert metadata["total_tokens"] == 18, index
+
     # -- natural stop, real ids, real committed rows -----------------------
     assert "degraded" not in update
     assert update["plan_action"] == "generate"
@@ -723,6 +743,13 @@ async def test_P1_agent_loop_full_success_with_mindmap(offline_openai, db):
     trace = update["agent_trace"]
     assert trace["exit_reason"] == "natural_stop"
     assert trace["total_iterations"] == 3
+    # Only the three outer iterations are in the trace: 3 * 11 = 33 input and
+    # 3 * 7 = 21 output. The nested mindmap call (observer.ends[2]) is not one
+    # of them; all four wire calls including it would total 44 / 28, which is
+    # not this trace. Whether excluding the nested call is the right product
+    # accounting is not judged here.
+    assert trace["input_tokens"] == 33
+    assert trace["output_tokens"] == 21
     assert trace["total_tool_calls"] == 3
     assert trace["tool_call_breakdown"] == {
         "retriever_search": 1, "update_study_plan": 1, "generate_mindmap": 1,

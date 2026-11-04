@@ -459,6 +459,12 @@ D5c-4 strengthens the existing Q4 in `backend/tests/agent/test_sdk_quiz_contract
 
 This characterises `AgentTrace.record_iteration` and its returned serialization over three successful outer iterations, not the single-Tutor `tutor-chunk-sum-v1` contract. No trace total field, Learning Run artifact/hash/compare integration, public SSE persistence evidence or new usage policy is introduced. It is not a whole-turn billing ledger: Planner nested calls, Tutor retries, Judge usage, missing counters and failure accounting remain outside this case. D5d's remaining import/execution audits are independent. See [acceptance](EVAL.md#d5c-4-quiz-outer-iteration-evidence).
 
+### D5c-5 Planner outer and nested usage boundary
+
+D5c-5 strengthens the existing P1 in `backend/tests/agent/test_sdk_planner_contract.py`, with no production, shared builder or test-node change. Four real non-stream OpenAI SDK calls follow the existing bound/bound/plain/bound sequence: the plain call is the nested mindmap tool. Each scripted wire and each real callback message separately carries `(11,7,18)`; the returned real `AgentTrace` independently reports `input_tokens=33`, `output_tokens=21` across three outer iterations. Existing prompt, history, tool-schema, object-identity and fresh-Session SQLite assertions remain intact.
+
+The nested call's usage is observed at the SDK callback, but is not included in the returned trace. The four-call input/output sum would be `44/28`, not this trace's `33/21`; this characterisation does not approve that exclusion as a whole-turn accounting design. No new trace total, usage contract, artifact/hash/scorer/compare integration or public SSE persistence evidence is introduced. Retry, Judge usage, missing/failure accounting and real billing remain separate; see [acceptance](EVAL.md#d5c-5-planner-outer-and-nested-evidence).
+
 ### D5d batch 1: frozen scorer identity
 
 New live runs and historical re-scores freeze the complete scorer document in each new ScoreSet; new manifests use the same complete snapshot. Before claiming a Run or ScoreSet, the document must declare a non-empty string `schema_version`, its recomputed hash excluding `definition_hash` must equal the document and executing bundle's declared hash, and its ID, version and executable projection must match the bundle. An explicitly supplied expected hash must also agree. The live path no longer silently substitutes a projection hash when the document hash disagrees.
