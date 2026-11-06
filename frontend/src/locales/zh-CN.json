@@ -164,6 +164,25 @@
     "trace": "轨迹与用量",
     "compare": "比较",
     "caseDelta": "case delta",
-    "suiteDelta": "frozen 12-case suite delta"
+    "suiteDelta": "frozen 12-case suite delta",
+    "backToLab": "返回 Run Lab",
+    "deltaUnavailable": "此比较没有可用的分数差异；这不代表两次运行的分数相同。",
+    "comparisonReasons": "比较说明",
+    "scoreDelta": "分数比较",
+    "dimension": "维度",
+    "delta": "差异",
+    "leftVariant": "左侧变体",
+    "rightVariant": "右侧变体",
+    "scorer": "Scorer",
+    "scorerVersion": "版本",
+    "scoringStatus": "评分状态",
+    "answer": "答案",
+    "noFindings": "没有记录到质量发现。",
+    "scoreUnavailable": "分数不可用",
+    "detailsLoading": "运行详情尚未加载。",
+    "answerUnavailable": "没有记录到答案。",
+    "findingsUnavailable": "质量发现不可用。",
+    "comparisonLoading": "正在加载比较…",
+    "selectComparison": "请在 Run Lab 选择两次运行进行比较。"
   }
 }

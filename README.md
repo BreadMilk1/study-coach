@@ -11,10 +11,9 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1c3c3c)](https://langchain.com/langgraph)
 [![Vue](https://img.shields.io/badge/Vue-3.5-4fc08d)](https://vuejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6)](https://www.typescriptlang.org/)
 [![Tailwind](https://img.shields.io/badge/Tailwind-4-06b6d4)](https://tailwindcss.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed)](https://www.docker.com/)
-[![Tests](https://img.shields.io/badge/Tests-569%20passed-10b981)]()
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -33,7 +32,17 @@ Upload your course PDFs → adaptive quiz loop → spaced-repetition mastery —
 
 ## Screenshots
 
-Refreshed for P5 / P4.5 product narrative: startup choice, Danger Zone lifecycle controls, grounded Chat with citations, and the Overview shell with the `P5 · local-first` sidebar mark. Plan / Quiz / Library / Mistakes / Onboarding / Mobile still show the earlier product shell (layout unchanged).
+Run Lab, Run detail, compare and Settings Connection screenshots were refreshed on 2026-11-06. Compare includes the local display refinement: clearly divided result rows and formatted Markdown answers. Run data comes from the committed historical curated fixture, not new model runs. Compare correctly stays informational without a score delta because these historical ScoreSets lack the required full scorer identity; Settings remains untested. See [the screenshot method](docs/DEMO.md#screenshot-refresh--2026-11-06).
+
+| Run Lab | Run Detail |
+|:---:|:---:|
+| ![Run Lab](docs/screenshots/run-lab.png) | ![Run Detail](docs/screenshots/run-detail.png) |
+
+| Compare · Informational | Settings · Connection |
+|:---:|:---:|
+| ![Informational Compare](docs/screenshots/run-compare.png) | ![Settings Connection](docs/screenshots/settings-connection.png) |
+
+The retained P5 / P4.5 screenshots show the historical product shell: startup choice, Danger Zone lifecycle controls, grounded Chat with citations, and the Overview shell with the `P5 · local-first` sidebar mark. Plan / Quiz / Library / Mistakes / Onboarding / Mobile still show the earlier product shell (layout unchanged).
 
 | Startup Gate (P5) | Settings · Danger Zone |
 |:---:|:---:|
@@ -132,6 +141,7 @@ brew install pnpm node
 # LLM — host-run Ollama (canonical local path; see Docker alternative below)
 brew install ollama
 ollama pull gemma4:e4b          # verified tool-calling chat model for agent-loop demo
+ollama pull qwen2.5:7b          # distinct Judge model for the reviewer demo
 ollama pull nomic-embed-text    # required for embeddings / PDF indexing
 ollama serve                    # leave running on 127.0.0.1:11434
 ```
@@ -168,14 +178,16 @@ docker compose up
 
 ### Tests
 
-Automated verification (2026-08-10): 414 backend tests and 155 frontend tests across 30 Vitest files passed (569 total); the production build passed.
+Local automated verification (2026-11-06): the backend baseline on main `cba634d` passed 2,144 tests; the frontend including the Compare display refinement passed 270 tests across 38 Vitest files and typecheck/production build. `docker compose config --quiet` also passed. These checks call no live provider and are not a new full-browser acceptance. D5 is complete within its [approved offline scope](docs/EVAL.md#d5-final-evidence-index--2026-11-06).
+
+Historical automated verification (2026-08-10): 414 backend tests and 155 frontend tests across 30 Vitest files passed (569 total); the production build passed.
 
 ```bash
 cd backend
-uv run pytest -q        # 414 tests, no live Ollama required
+uv run pytest -q        # no live Ollama required
 
 cd ../frontend
-pnpm test --run         # 155 tests across 30 Vitest files
+pnpm test --run
 pnpm build              # typecheck + production build
 ```
 
@@ -233,7 +245,7 @@ See `docs/ARCHITECTURE.md` v2 for:
 ## API Reference
 
 <details>
-<summary>View all API endpoints</summary>
+<summary>Core API endpoints</summary>
 
 | Method | Path | Auth | Response |
 |--------|------|------|----------|
@@ -267,6 +279,8 @@ All AI-bearing routes read **BYOK headers** per request. Learning routes require
 
 The `quiz_question` SSE event and restored `quiz_question_id` field are additive persisted-identity signals. Tutor, grade, and degraded/unpersisted quiz paths do not fabricate them; restored history does not infer an ID from assistant prose. Legacy or missing artifact rows may return `quiz_question_id` as `null` or omit it.
 
+Learning Run APIs are documented in [Architecture](docs/ARCHITECTURE.md#7-api-routes) and the [Run Lab demo](docs/DEMO.md#6-run-lab-five-minute-eval-path); their route implementation is `backend/app/api/eval_routes.py`.
+
 The Google auth endpoints above are frozen backend-only interfaces; the shipped frontend has no Google login or upgrade surface.
 
 </details>
@@ -278,7 +292,7 @@ study-coach/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                         # FastAPI app factory + retriever wiring
-│   │   ├── api/{routes,deps,auth_routes,data_routes}.py # learning, auth, and lifecycle APIs
+│   │   ├── api/{routes,deps,auth_routes,data_routes,eval_routes}.py # learning, auth, lifecycle, eval APIs
 │   │   ├── data_lifecycle.py               # shared/exclusive gate + ordered reset coordinator
 │   │   ├── agent/
 │   │   │   ├── graph.py                    # LangGraph: memory → router → {tutor,quiz,plan} → judge → memory
@@ -290,27 +304,27 @@ study-coach/
 │   │   ├── rag/                            # Dense, BM25/RRF hybrid, reranking retriever + runtime reset
 │   │   ├── llm/provider.py                 # BYOK headers → LLMConfig → init_chat_model
 │   │   ├── db/{models,repositories,session}.py # SQLAlchemy + Alembic
-│   │   ├── eval/                           # P2.2 / P2.3 ablation harnesses
+│   │   ├── eval/                           # P2.2 / P2.3 ablations, cloud contracts, learning_run/ harness
 │   │   └── srs/sm2.py                      # SM-2 spaced repetition scheduler
-│   └── tests/                              # 414 backend tests
+│   └── tests/                              # Backend unit, integration and offline contract tests
 ├── frontend/
 │   └── src/
-│       ├── views/                          # 8 views: Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding
-│       ├── components/                     # ~20 shared + view-specific components
+│       ├── views/                          # Overview, Chat, Plan, Quiz, Mistakes, Library, Settings, Onboarding, Run Lab
+│       ├── components/                     # Shared + view-specific components
 │       ├── stores/                         # Pinia stores, including data lifecycle, activity, and notifications
 │       ├── composables/                    # useMediaQuery
 │       ├── locales/                        # en.json, zh-CN.json
 │       └── lib/                            # API, parsing, quiz, lifecycle channel, and reset client-state helpers
 ├── CONTEXT.md                              # Domain language: Learning Run, TutorAttempt, CandidateArtifact, ScoreSet
 ├── docs/
-│   ├── ARCHITECTURE.md                     # v2 — ER diagram + 6 ADRs + deployment topology
-│   ├── ROADMAP.md                          # P0–P5 phase history and acceptance status
+│   ├── ARCHITECTURE.md                     # ER diagram, architecture decisions, contracts + deployment topology
+│   ├── ROADMAP.md                          # Phase history, D5 offline closeout and acceptance status
 │   ├── EVAL.md                             # Judge guard + ablation methodology + empirical results
 │   ├── adr/                                # Standalone ADRs (0001 shared TutorAttempt, 0002 owner-scoped retrieval)
 │   ├── agent_loop_vs_deterministic.md      # P2.2 portfolio blog
 │   ├── quiz_ablation_followup.md           # P2.3 portfolio blog
 │   ├── p3_frontend_productize.md           # P3 portfolio blog
-│   └── screenshots/                        # Portfolio UI screenshots (P5 startup gate + Danger Zone refreshed)
+│   └── screenshots/                        # Portfolio UI screenshots, including Run Lab + Settings
 ├── design-system/MASTER.md                 # Modern Dark Cinema design tokens
 ├── docker-compose.yml                      # Local 3-service deployment
 ├── fly.toml                                # Deferred cloud-deployment scaffold; not verified
@@ -335,8 +349,8 @@ study-coach/
 - **Agent loop treated empirically**: 792 runs across the two primary matrices, plus a 396-run P2.3 no-retriever pilot (1,188 raw runs total) — not assumed, measured
 - **JadeAI patterns ported to Python**: BYOK header, repository pattern, contract-first `ARCHITECTURE.md`, persisted chat sessions, tool-calling agent loop, SSE streaming
 - **Product around research**: Eval results surface in the UI via ModeChip, EmptyCorpusBanner, and optional Debug Mode Agent Trace / Agent Run
-- **Local-first product closure (P5)**: Startup gate + two-scope Danger Zone resets, with no Google login surface; multi-user ownership deferred
-- **Portfolio-grade engineering**: 569 automated tests, Alembic migrations, i18n, Docker Compose, mobile responsive
+- **Local-first product closure (P5)**: Startup gate + two-scope Danger Zone resets, with no Google login surface; retrieval ownership delivered, full multi-user lifecycle deferred
+- **Portfolio-grade engineering**: automated backend/frontend tests, offline SDK contracts, Alembic migrations, i18n, Docker Compose, mobile responsive
 
 ## Origin
 

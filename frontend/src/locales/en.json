@@ -164,6 +164,25 @@
     "trace": "Trace and usage",
     "compare": "Compare",
     "caseDelta": "case delta",
-    "suiteDelta": "frozen 12-case suite delta"
+    "suiteDelta": "frozen 12-case suite delta",
+    "backToLab": "Back to Run Lab",
+    "deltaUnavailable": "Score delta is unavailable for this comparison. This does not mean the runs have equal scores.",
+    "comparisonReasons": "Comparison details",
+    "scoreDelta": "Score comparison",
+    "dimension": "Dimension",
+    "delta": "Delta",
+    "leftVariant": "Left variant",
+    "rightVariant": "Right variant",
+    "scorer": "Scorer",
+    "scorerVersion": "Version",
+    "scoringStatus": "Scoring status",
+    "answer": "Answer",
+    "noFindings": "No findings recorded.",
+    "scoreUnavailable": "Score unavailable",
+    "detailsLoading": "Run details not yet loaded.",
+    "answerUnavailable": "No answer recorded.",
+    "findingsUnavailable": "Findings unavailable.",
+    "comparisonLoading": "Loading comparison…",
+    "selectComparison": "Select two runs in Run Lab to compare."
   }
 }

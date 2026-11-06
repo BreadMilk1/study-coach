@@ -22,7 +22,9 @@ P4.5 made this path stable before larger harness, durable memory, or multi-agent
 
 ## Verified Commands
 
-Automated verification re-verified on 2026-08-10:
+Local automated verification (2026-11-06): the backend baseline on main `cba634d` passed **2,144 tests**; the frontend including the Compare display refinement passed **270 tests across 38 files** and typecheck/production build. Compose config also passed. This is separate from historical browser/model acceptance and invokes no live provider. See the [D5 final evidence index](EVAL.md#d5-final-evidence-index--2026-11-06).
+
+Historical automated verification re-verified on 2026-08-10:
 
 ```bash
 cd backend
@@ -65,6 +67,7 @@ This guide has two **mutually exclusive** local paths. Pick one; do not run host
 
 ```bash
 ollama pull gemma4:e4b          # verified tool-calling model for agent-loop demo
+ollama pull qwen2.5:7b          # distinct Judge model for the reviewer demo
 ollama pull nomic-embed-text    # required for PDF indexing
 ollama serve
 ```
@@ -398,10 +401,56 @@ Injected Chroma failure, SQLite failure, lock conflict, stale response, and idem
 
 ---
 
+## Screenshot Refresh — 2026-11-06
+
+The Run Lab, Run detail, compare and Settings Connection gallery images use a temporary SQLite database and the committed historical curated fixture. The original capture used main `cba634d`; Compare was then refreshed with the local UI refinement, which separates result rows and renders Markdown answers. No provider is called and no new model run is created. These screenshots illustrate the UI and historical evidence, not live-model or full-browser acceptance. Settings Connection remains `Not tested` / `Untested`.
+
+The detail and comparison images use `tgqa-008` (`tutor-v3` detail; `tutor-v2` versus `tutor-v3` comparison). Open **Trace and usage** in the detail. Compare displays **Informational** with no score delta: the historical partial ScoreSets lack the full scorer identity required by the current comparison gate. Preserve that result and the original fixture; do not backfill identities or re-score just to change the screenshot. For the Settings image, enter `gemma4:e4b` and `qwen2.5:7b`, save, and return to the top without starting either model check. The gallery uses a 1440 × 1080 viewport.
+
+For Compare, check that verdict, answer and findings rows align across the two variants, and that bold text and lists render as Markdown. On a narrow screen the full variants stack vertically without page-wide horizontal overflow. A delta table appears only when the existing controlled-comparison gate allows it. Browser-only hostile-content probes must stay outside the stored fixture and final screenshots.
+
+To reproduce this display-only environment, run the following from `backend/` in one terminal. The temporary database receives the current migrations and curated import; it does not modify the normal instance database. Test mode skips model initialization, so the ordinary app factory lacks `retriever_runtime`. The in-memory adapter below supplies only the vector-count function required by the startup summary, backed by an empty temporary Chroma collection; it provides no retrieval or model runtime.
+
+```bash
+export SCREENSHOT_DIR=$(mktemp -d)
+env DATABASE_URL="sqlite:///$SCREENSHOT_DIR/screenshots.db" \
+  STUDY_COACH_TEST_MODE=1 .venv/bin/python -c \
+  'from app.db.session import migrate_to_head; migrate_to_head()'
+env PYTHONPATH=. .venv/bin/python scripts/import_learning_run_suite.py \
+  app/eval/learning_run/fixtures/tutor-prompt-regression-v1.jsonl \
+  --database-url "sqlite:///$SCREENSHOT_DIR/screenshots.db"
+env DATABASE_URL="sqlite:///$SCREENSHOT_DIR/screenshots.db" \
+  CHROMA_PATH="$SCREENSHOT_DIR/chroma" STUDY_COACH_TEST_MODE=1 \
+  STUDY_COACH_LOCAL_MODE=1 CORS_ORIGINS=http://127.0.0.1:5174 \
+  ANONYMIZED_TELEMETRY=False .venv/bin/python - <<'PYTHON'
+import os
+from types import SimpleNamespace
+
+import chromadb
+import uvicorn
+from app.main import create_app
+
+app = create_app()
+client = chromadb.PersistentClient(path=os.environ["CHROMA_PATH"])
+collection = client.get_or_create_collection("study_coach_chunks")
+app.state.retriever_runtime = SimpleNamespace(vector_count=collection.count)
+uvicorn.run(app, host="127.0.0.1", port=8011)
+PYTHON
+```
+
+In another terminal, from `frontend/`:
+
+```bash
+env VITE_API_PROXY_TARGET=http://127.0.0.1:8011 \
+  pnpm dev --host 127.0.0.1 --port 5174 --strictPort
+```
+
+Open <http://127.0.0.1:5174>, choose Continue if prompted, and inspect Run Lab and Settings. Keep this environment display-only: do not upload, generate Chat, start a Run, re-score, reset, or run model checks. Stop both servers with Ctrl+C after capture. The temporary data is separate from the normal instance; the inline adapter is not a supported model-runtime configuration.
+
 ## Known Deferred Work
 
-- Full Chroma per-user / per-document filtering.
-- Agent Runs analytics page.
+- Full multi-user lifecycle, per-user reset/deletion, legacy-data migration and account continuity. Owner/document-scoped production retrieval filtering is delivered (PR #24); reset remains instance-wide.
+- Production Agent Runs analytics. Learning Run list/detail/compare is already available in Run Lab.
 - Durable learning memory timeline.
 - OpenTelemetry / token-cost dashboard.
 - Multi-agent orchestration beyond the current LangGraph node dispatch.
