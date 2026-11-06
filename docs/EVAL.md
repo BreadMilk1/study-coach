@@ -16,6 +16,7 @@
 - [P2.3 Quiz Agent Loop Ablation — Empirical Report](#p23-quiz-agent-loop-ablation--empirical-report)
 - [P3 Frontend Productize — Shipping Report](#p3-frontend-productize--shipping-report)
 - [Learning Run Harness — Tutor Prompt Regression](#learning-run-harness--tutor-prompt-regression)
+- [D5 Final Evidence Index — 2026-11-06](#d5-final-evidence-index--2026-11-06)
 - [D5c Tutor Usage — Offline Acceptance](#d5c-tutor-usage--offline-acceptance)
 - [D5d Scorer Identity — Offline Acceptance](#d5d-scorer-identity--offline-acceptance)
 - [D5d Import and Execution Integrity — Offline Acceptance](#d5d-import-and-execution-integrity--offline-acceptance)
@@ -615,6 +616,22 @@ Third real local suite on 2026-08-17 after repointing the frozen `llama3.2` alia
 - Paid/remote models are not a CI gate.
 
 ---
+
+# D5 Final Evidence Index — 2026-11-06
+
+D5 is complete within the approved offline scope as of 2026-11-06. D5a/D5b (PR #22/#23), D5c-1–6 (PR #26/#27/#28/#30/#31/#32), and both D5d batches (PR #29/#33) are merged through `cba634d`. This does not establish a complete provider × consumer matrix, Judge/Graph or whole-turn/run billing, real-provider reliability/capability/cost, authenticated provenance, tamper-proof storage, or deployment verification. Historical artifacts, hashes, fixtures and acceptance/failure records remain unchanged; any expansion requires a separately approved scope.
+
+| Delivered scope | Merged PRs | Contract / acceptance evidence |
+|---|---|---|
+| D5a SDK completion/usage projections; D5b Judge/Tutor consumer signals | [#22](https://github.com/BreadMilk1/study-coach/pull/22), [#23](https://github.com/BreadMilk1/study-coach/pull/23) | [D5a](ARCHITECTURE.md#d5a-offline-completion-and-usage-projection-evidence), [D5b](ARCHITECTURE.md#d5b-offline-consumer-completion-evidence) |
+| D5c-1/2 Gemini cross-layer characterization and single-Tutor aggregation | [#26](https://github.com/BreadMilk1/study-coach/pull/26), [#27](https://github.com/BreadMilk1/study-coach/pull/27) | [Tutor usage acceptance](#d5c-tutor-usage--offline-acceptance) |
+| D5c-3 bounded cross-provider Tutor evidence | [#28](https://github.com/BreadMilk1/study-coach/pull/28) | [Cross-provider evidence](#d5c-3-cross-provider-evidence) |
+| D5c-4/5/6 Quiz outer, Planner outer/nested and Tutor retry evidence | [#30](https://github.com/BreadMilk1/study-coach/pull/30), [#31](https://github.com/BreadMilk1/study-coach/pull/31), [#32](https://github.com/BreadMilk1/study-coach/pull/32) | [Quiz](#d5c-4-quiz-outer-iteration-evidence), [Planner](#d5c-5-planner-outer-and-nested-evidence), [Tutor retry](#d5c-6-tutor-retry-usage-isolation-evidence) |
+| D5d frozen scorer identity and import/execution integrity | [#29](https://github.com/BreadMilk1/study-coach/pull/29), [#33](https://github.com/BreadMilk1/study-coach/pull/33) | [Scorer identity](#d5d-scorer-identity--offline-acceptance), [import/execution integrity](#d5d-import-and-execution-integrity--offline-acceptance) |
+
+PR #33 was squash-merged as `cba634d` on 2026-11-06 after Backend (2,144 passed), Frontend tests/build and Compose config CI succeeded. Its final independent Oracle review returned APPROVE; Codex review completed with no findings. The earlier local acceptance was 417 focused / 2,144 full backend (focused included), with the failed first focused attempt retained below. These publication records do not rewrite historical acceptance or imply an independent security review.
+
+A separate local verification on the same main `cba634d` on 2026-11-06 passed 2,144 backend tests, 259 frontend tests across 37 files, typecheck/production build and Compose config. Neither that automated run nor the fixture-based screenshot refresh is live-provider, model-capability, billing, deployment or full-browser acceptance.
 
 # D5c Tutor Usage — Offline Acceptance
 
