@@ -229,6 +229,14 @@ def test_active_score_set_blocks_new_run_and_terminal_rows_do_not(tmp_path):
     EvalExecutionClaimRepository, EvaluationBusyError = _claim_api()
     path = tmp_path / "score-set-flight.db"
     engine = _engine(path)
+    manifest = {
+        "id": "existing",
+        "experiment_id": "experiment-test",
+        "task_case_id": "case-existing",
+        "task_case_version": "1",
+        "variant_id": "tutor-v3",
+        "run_profile": "evaluation",
+    }
     with Session(engine) as session:
         repo = EvalExecutionClaimRepository(session)
         # A legitimate terminal parent/score-set row is needed for SQLite FK
@@ -243,8 +251,8 @@ def test_active_score_set_blocks_new_run_and_terminal_rows_do_not(tmp_path):
                 run_profile="evaluation",
                 lifecycle="finished",
                 outcome="success",
-                manifest_json={"id": "existing"},
-                manifest_hash=canonical_hash({"id": "existing"}),
+                manifest_json=manifest,
+                manifest_hash=canonical_hash(manifest),
                 candidate_artifact_json={"answer": "existing"},
                 artifact_hash=canonical_hash({"answer": "existing"}),
             )

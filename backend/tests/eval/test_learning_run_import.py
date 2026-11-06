@@ -17,6 +17,7 @@ from app.eval.learning_run.repositories import (
     ChecksumMismatchError,
     EvalRunRepository,
     EvalScoreSetRepository,
+    EvalScorerExecutionRepository,
     EvalSuiteImportRepository,
 )
 
@@ -95,7 +96,9 @@ def _record(
     manifest = {
         "experiment_id": REGISTRY.experiment.experiment_id,
         "task_case_id": case_id,
+        "task_case_version": case.task_case_version,
         "variant_id": variant_id,
+        "run_profile": "evaluation",
         "prompt_version": variant_id,
     }
     return {
@@ -279,3 +282,382 @@ def test_import_preserves_a_synthetic_usage_contract_manifest(session):
     stored = EvalRunRepository(session).get_verified(records[0]["run"]["id"])
     assert stored.manifest_json["usage_contract"] == "tutor-chunk-sum-v1"
     assert stored.manifest_hash == records[0]["run"]["manifest_hash"]
+
+
+# ---------------------------------------------------------------------------
+# D5d batch A — explicit Run identity, terminal lifecycle, artifact/relation
+# and component integrity on the suite-import boundary.
+# ---------------------------------------------------------------------------
+
+
+def _fixture_records() -> list[dict]:
+    return [
+        json.loads(line)
+        for line in CURATED_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _assert_zero_rows(session) -> None:
+    assert session.scalar(select(func.count()).select_from(EvalRun)) == 0
+    assert session.scalar(select(func.count()).select_from(EvalScoreSet)) == 0
+
+
+def test_committed_fixture_every_record_is_verified_read_after_import(session):
+    """Every frozen row is verified-read with its original snapshot/hash bytes.
+
+    The committed fixture predates the optional usage_contract field, so the
+    import must neither supplement nor re-sign any manifest, artifact or scorer
+    snapshot.  Each record carries two ScoreSets and eight ScorerExecutions.
+    """
+    records = _fixture_records()
+    assert len(records) == 24
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    assert imported == 24
+
+    run_repo = EvalRunRepository(session)
+    score_repo = EvalScoreSetRepository(session)
+    execution_repo = EvalScorerExecutionRepository(session)
+    for record in records:
+        stored_run = run_repo.get_verified(record["run"]["id"])
+        assert stored_run.manifest_json == record["run"]["manifest"]
+        assert stored_run.manifest_hash == record["run"]["manifest_hash"]
+        assert "usage_contract" not in stored_run.manifest_json
+        assert stored_run.candidate_artifact_json == record["run"]["candidate_artifact"]
+        assert stored_run.artifact_hash == record["run"]["artifact_hash"]
+
+        assert len(record["score_sets"]) == 2
+        assert len(record["executions"]) == 8
+        assert len(score_repo.list_verified(record["run"]["id"])) == 2
+        for raw_score in record["score_sets"]:
+            stored_score = score_repo.get_verified(raw_score["id"])
+            assert stored_score.scorer_snapshot_json == raw_score["scorer_snapshot"]
+            assert stored_score.scorer_definition_hash == raw_score["scorer_definition_hash"]
+            assert stored_score.artifact_input_hash == raw_score["artifact_input_hash"]
+        for raw_execution in record["executions"]:
+            stored_execution = execution_repo.get_verified(raw_execution["id"])
+            assert stored_execution.input_hash == raw_execution["input_hash"]
+            assert stored_execution.scorer_id == raw_execution["scorer_id"]
+            assert stored_execution.scorer_version == raw_execution["scorer_version"]
+
+
+def test_import_rejects_manifest_secrets_and_urls_atomically(session):
+    for mutation in ({"api_key": "secret-value"}, {"note": "https://example.com/v1"}):
+        records = _complete_suite()
+        manifest = dict(records[0]["run"]["manifest"])
+        manifest.update(mutation)
+        records[0]["run"]["manifest"] = manifest
+        records[0]["run"]["manifest_hash"] = _stdlib_manifest_hash(manifest)
+
+        with pytest.raises(ValueError):
+            EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+        _assert_zero_rows(session)
+
+
+def test_import_requires_explicit_run_identity_fields(session):
+    for field in (
+        "experiment_id",
+        "task_case_id",
+        "task_case_version",
+        "variant_id",
+        "run_profile",
+    ):
+        records = _complete_suite()
+        del records[0]["run"][field]
+        with pytest.raises(ValueError):
+            EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+        _assert_zero_rows(session)
+
+
+def test_import_requires_every_identity_key_in_the_manifest(session):
+    for field in ("task_case_version", "run_profile"):
+        records = _complete_suite()
+        manifest = dict(records[0]["run"]["manifest"])
+        del manifest[field]
+        records[0]["run"]["manifest"] = manifest
+        records[0]["run"]["manifest_hash"] = _stdlib_manifest_hash(manifest)
+
+        with pytest.raises(ValueError):
+            EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+        _assert_zero_rows(session)
+
+
+def test_import_rejects_conflicting_run_and_manifest_identity(session):
+    records = _complete_suite()
+    manifest = dict(records[0]["run"]["manifest"])
+    manifest["variant_id"] = "tutor-v3"
+    records[0]["run"]["manifest"] = manifest
+    records[0]["run"]["manifest_hash"] = _stdlib_manifest_hash(manifest)
+
+    with pytest.raises(ValueError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_score_set_without_a_frozen_artifact(session):
+    records = _complete_suite()
+    records[0]["run"].pop("candidate_artifact", None)
+    records[0]["run"].pop("artifact_hash", None)
+
+    with pytest.raises((ValueError, ChecksumMismatchError)):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_score_set_without_explicit_artifact_input_hash(session):
+    records = _complete_suite()
+    del records[0]["score_sets"][0]["artifact_input_hash"]
+
+    with pytest.raises((ValueError, ChecksumMismatchError)):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_nonterminal_score_set_status(session):
+    for status in ("pending", "running", "unknown"):
+        records = _complete_suite()
+        records[0]["score_sets"][0]["status"] = status
+        with pytest.raises(ValueError):
+            EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+        _assert_zero_rows(session)
+
+
+def test_import_rejects_execution_with_a_foreign_parent(session):
+    record = _fixture_records()[0]
+    record["executions"][0]["score_set_id"] = "00000000-0000-0000-0000-000000000000"
+
+    with pytest.raises(ValueError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_execution_with_a_wrong_input_hash(session):
+    record = _fixture_records()[0]
+    record["executions"][0]["input_hash"] = "0" * 64
+
+    with pytest.raises(ChecksumMismatchError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_execution_with_an_undeclared_component_version(session):
+    record = _fixture_records()[0]
+    record["executions"][0]["scorer_version"] = "v9"
+
+    with pytest.raises(ValueError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_execution_with_an_invalid_status(session):
+    record = _fixture_records()[0]
+    record["executions"][0]["status"] = "running"
+
+    with pytest.raises(ValueError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_duplicate_execution_identity(session):
+    records = _fixture_records()
+    donor = records[0]["executions"][0]
+    clone = dict(donor)
+    clone["id"] = "duplicate-execution-id"
+    # Same parent ScoreSet and same scorer id/version as the donor: a duplicate
+    # execution identity that the whole-batch check must reject before commit.
+    records[0]["executions"].append(clone)
+
+    with pytest.raises(ValueError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    _assert_zero_rows(session)
+
+
+def test_import_rejects_nonterminal_run_lifecycle(session):
+    for lifecycle in ("queued", "running", ""):
+        record = _fixture_records()[0]
+        record["run"]["lifecycle"] = lifecycle
+        with pytest.raises(ValueError):
+            EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+        _assert_zero_rows(session)
+
+
+def test_import_rejects_invalid_or_missing_finished_outcome(session):
+    for outcome in ("exploded", None, ""):
+        record = _fixture_records()[0]
+        record["run"]["lifecycle"] = "finished"
+        record["run"]["outcome"] = outcome
+        with pytest.raises(ValueError):
+            EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+        _assert_zero_rows(session)
+
+
+def test_import_rejects_cancelled_run_carrying_an_outcome(session):
+    record = _fixture_records()[0]
+    record["run"]["lifecycle"] = "cancelled"
+    record["run"]["outcome"] = "success"
+
+    with pytest.raises(ValueError):
+        EvalSuiteImportRepository(session, registry=REGISTRY).import_records([record])
+    _assert_zero_rows(session)
+
+
+def test_import_accepts_legitimate_terminal_failure_and_cancelled_rows(session):
+    records = _complete_suite()
+
+    # finished failure without a frozen artifact or ScoreSet.
+    failure = records[0]
+    failure["run"]["lifecycle"] = "finished"
+    failure["run"]["outcome"] = "system_failed"
+    failure["run"].pop("candidate_artifact", None)
+    failure["run"].pop("artifact_hash", None)
+    failure["score_sets"] = []
+    failure["executions"] = []
+
+    # cancelled Run without a frozen artifact or ScoreSet.
+    cancelled = records[1]
+    cancelled["run"]["lifecycle"] = "cancelled"
+    cancelled["run"]["outcome"] = None
+    cancelled["run"].pop("candidate_artifact", None)
+    cancelled["run"].pop("artifact_hash", None)
+    cancelled["score_sets"] = []
+    cancelled["executions"] = []
+
+    # frozen artifact with a cancelled ScoreSet.
+    cancelled_score = records[2]
+    cancelled_score["score_sets"][0]["status"] = "cancelled"
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    assert imported == 24
+
+    run_repo = EvalRunRepository(session)
+    score_repo = EvalScoreSetRepository(session)
+    stored_failure = run_repo.get_verified(failure["run"]["id"])
+    assert stored_failure.outcome == "system_failed"
+    assert stored_failure.artifact_hash is None
+    stored_cancelled = run_repo.get_verified(cancelled["run"]["id"])
+    assert stored_cancelled.lifecycle == "cancelled"
+    assert stored_cancelled.outcome is None
+    stored_cancelled_score = score_repo.get_verified(cancelled_score["score_sets"][0]["id"])
+    assert stored_cancelled_score.status == "cancelled"
+
+
+def test_import_historical_cannot_bypass_verified_read_or_privacy(session):
+    record = _fixture_records()[0]
+    raw = record["run"]
+
+    def _row(**overrides):
+        fields = {
+            "id": "historical-raw",
+            "experiment_id": raw["experiment_id"],
+            "suite_execution_id": raw.get("suite_execution_id"),
+            "task_case_id": raw["task_case_id"],
+            "task_case_version": raw["task_case_version"],
+            "variant_id": raw["variant_id"],
+            "run_profile": raw["run_profile"],
+            "lifecycle": "finished",
+            "outcome": "success",
+            "operational_error_json": None,
+            "manifest_json": raw["manifest"],
+            "manifest_hash": raw["manifest_hash"],
+            "candidate_artifact_json": raw["candidate_artifact"],
+            "artifact_hash": raw["artifact_hash"],
+        }
+        fields.update(overrides)
+        return EvalRun(**fields)
+
+    run_repo = EvalRunRepository(session)
+    with pytest.raises(ChecksumMismatchError):
+        run_repo.import_historical(row=_row(variant_id="mismatch-variant"))
+    _assert_zero_rows(session)
+
+    secret_manifest = dict(raw["manifest"])
+    secret_manifest["api_key"] = "secret-value"
+    with pytest.raises(ValueError):
+        run_repo.import_historical(
+            row=_row(
+                manifest_json=secret_manifest,
+                manifest_hash=canonical_hash(secret_manifest),
+            )
+        )
+    _assert_zero_rows(session)
+
+
+# ---------------------------------------------------------------------------
+# D5d batch A — container alias selection is by key presence, not truthiness.
+# ---------------------------------------------------------------------------
+
+
+def test_import_preserves_empty_primary_container_over_nonempty_alias(session):
+    """An explicit empty primary value must win over a non-empty alias."""
+    records = _fixture_records()
+    score = records[0]["score_sets"][0]
+    score["aggregate_scores"] = {}
+    score["aggregate_scores_json"] = {"groundedness": 4}
+    score["findings"] = []
+    score["findings_json"] = [{"code": "alias"}]
+    execution = records[0]["executions"][0]
+    execution["output"] = {}
+    execution["output_json"] = {"result": {"alias": True}}
+    execution["usage"] = {}
+    execution["usage_json"] = {"input_tokens": 4}
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    assert imported == 24
+
+    stored_score = EvalScoreSetRepository(session).get_verified(score["id"])
+    assert stored_score.aggregate_scores_json == {}
+    assert stored_score.findings_json == []
+    stored_execution = EvalScorerExecutionRepository(session).get_verified(execution["id"])
+    assert stored_execution.output_json == {}
+    assert stored_execution.usage_json == {}
+
+
+def test_import_reads_alias_only_container_fields(session):
+    """Alias-only container fields remain readable when the primary is absent."""
+    records = _fixture_records()
+    score = records[0]["score_sets"][0]
+    score.pop("aggregate_scores", None)
+    score["aggregate_scores_json"] = {"groundedness": 3}
+    score.pop("findings", None)
+    score["findings_json"] = [{"code": "alias-only"}]
+    execution = records[0]["executions"][0]
+    execution.pop("output", None)
+    execution["output_json"] = {"result": 3}
+    execution.pop("usage", None)
+    execution["usage_json"] = {"output_tokens": 2}
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    assert imported == 24
+
+    stored_score = EvalScoreSetRepository(session).get_verified(score["id"])
+    assert stored_score.aggregate_scores_json == {"groundedness": 3}
+    assert stored_score.findings_json == [{"code": "alias-only"}]
+    stored_execution = EvalScorerExecutionRepository(session).get_verified(execution["id"])
+    assert stored_execution.output_json == {"result": 3}
+    assert stored_execution.usage_json == {"output_tokens": 2}
+
+
+def test_import_does_not_fabricate_absent_container_fields(session):
+    """Neither key present stores an explicit None, never a new value."""
+    records = _fixture_records()
+    score = records[0]["score_sets"][0]
+    score.pop("aggregate_scores", None)
+    score.pop("aggregate_scores_json", None)
+    score.pop("findings", None)
+    score.pop("findings_json", None)
+    execution = records[0]["executions"][0]
+    execution.pop("output", None)
+    execution.pop("output_json", None)
+    execution.pop("usage", None)
+    execution.pop("usage_json", None)
+
+    imported = EvalSuiteImportRepository(session, registry=REGISTRY).import_records(records)
+    assert imported == 24
+
+    stored_score = EvalScoreSetRepository(session).get_verified(score["id"])
+    assert stored_score.aggregate_scores_json is None
+    assert stored_score.findings_json is None
+    stored_execution = EvalScorerExecutionRepository(session).get_verified(execution["id"])
+    assert stored_execution.output_json is None
+    assert stored_execution.usage_json is None

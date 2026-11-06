@@ -483,6 +483,20 @@ Comparison requires a non-empty, self-consistent `(scorer_id, scorer_version, sc
 
 This is application-level checksum and identity validation, not authenticated provenance or tamper-proof storage. It does not complete D5d's import privacy/lifecycle/relationship audit or execution-derived ScoreSet/rescore audit. Provider, nested/tool-call and retry accounting remain separate D5c work. Bounded offline evidence is recorded in [EVAL](EVAL.md#d5d-scorer-identity--offline-acceptance).
 
+### D5d remainder: import and execution integrity
+
+Suite import accepts terminal snapshots only: Run `finished` with an explicit supported outcome (including failure outcomes), or `cancelled` with no outcome; ScoreSets must also be terminal. Active snapshots are refused because import is not batch resume. Both suite import and the single historical Run insert validate before writing. Five explicit Run identity fields must agree with the frozen manifest; new import also applies the existing manifest privacy checks. Verified reads reject structured-row identity drift even when the JSON checksum still matches. No registry backfill or historical privacy rewrite is performed.
+
+An imported ScoreSet requires its parent's frozen artifact/hash, a self-consistent scorer snapshot naming the same scorer, and a matching explicit artifact input hash. An execution must name a parent in the same record, match that parent's input hash and declare a supported execution status and frozen component ID/version. Duplicate identities are refused before commit. Historical projected/full scorer snapshots and empty containers remain unchanged; missing fields are not silently replaced by another alias or a success outcome. Import validates the historical records and relationships; it does not rerun their scorers or authenticate their origin.
+
+New live/re-score results are derived from verified persisted executions, ordered by the frozen bundle's components and using the parent's frozen task, not an in-memory callback list or returned summary. A shared stored-envelope restoration feeds the existing pure verdict derivation. The repository checks claimed scoring terminal results against that derivation before UPDATE, including score domain, status, verdict, findings and error code. All terminal score payloads must be null or a valid mapping of integer rubric scores. Cancellation remains `not_evaluated` without a full-component requirement; scoreless failed/partial inconclusive operational fallback remains possible. Timeout drafts are persisted before derivation, and the existing running/CAS guards remain in force.
+
+Live and re-score claims reject task/bundle dimension mismatch or verdict-policy declarations the current scoring algorithm cannot execute. Re-score additionally refuses a missing/invalid frozen task, task ID/version drift, or a missing/non-positive/non-finite frozen hybrid-scoring budget; it does not substitute today's task or budget. This changes neither scorer definitions nor policy semantics for the supported frozen v1/v2 bundles.
+
+Comparison rejects missing task/corpus alignment; non-empty equal comparable dimension sets and subtractable values are required for a controlled delta. Invalid/extended/one-sided explicit axes are informational. Both undeclared axes keep the legacy prompt-only default without claiming the field was frozen or adding it to old hashes. Missing artifact schema retains the documented v1 inference.
+
+Limits: checksums and self-declarations do not authenticate provider, usage or scoring provenance. Artifact usage remains hash-covered opaque historical data, including signed Tutor compensation; execution-usage normalization is not retroactively imposed on it. Registry namespace uniqueness, new manifest-axis versioning, real-provider billing, and generic async/provider policy changes are not introduced. Frozen fixtures/definitions, artifact schema/hash algorithm, database schema and dependency locks remain unchanged. See [acceptance](EVAL.md#d5d-import-and-execution-integrity--offline-acceptance).
+
 ## 9. Frontend Architecture
 
 ```

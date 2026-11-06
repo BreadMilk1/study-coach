@@ -24,11 +24,13 @@ from .contracts import (
     RunManifest,
     ScorerBundle,
     ScorerExecutionDraft,
+    TaskCase,
     as_plain,
     canonical_hash,
     canonical_json_bytes,
     hash_without_field,
 )
+from .scoring import derive_score_set_from_stored
 
 
 class LearningRunRepositoryError(RuntimeError):
@@ -79,6 +81,14 @@ class ReconciliationResult:
 
 
 _RUN_OUTCOMES = {"system_failed", "timed_out", "budget_exceeded"}
+_RUN_FINISHED_OUTCOMES = _RUN_OUTCOMES | {"success"}
+_RUN_IDENTITY_FIELDS = (
+    "experiment_id",
+    "task_case_id",
+    "task_case_version",
+    "variant_id",
+    "run_profile",
+)
 _SCORE_TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled"}
 _QUALITY_VERDICTS = {"pass", "fail", "inconclusive", "not_evaluated"}
 _EXECUTION_STATUSES = {"success", "failed", "skipped"}
@@ -231,6 +241,151 @@ def _validate_manifest_privacy(value: Any, *, path: str = "manifest") -> None:
         raise ValueError(f"manifest contains endpoint URL: {path}")
 
 
+def _require_identity_value(value: Any, *, label: str) -> str:
+    text = "" if value is None else str(value)
+    if not text:
+        raise ValueError(f"{label} must be a non-empty string")
+    return text
+
+
+def _validate_run_identity_fields(
+    manifest: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    """Cross-check the five structured Run identity fields against the manifest.
+
+    Both the frozen manifest and the structured row must carry every identity
+    field as a non-empty value and agree exactly.  A missing field is rejected
+    rather than silently passing as ``"" == ""``, so a partially written row can
+    never validate against itself.
+    """
+
+    for field in _RUN_IDENTITY_FIELDS:
+        manifest_value = _require_identity_value(
+            manifest.get(field), label=f"{label} manifest.{field}"
+        )
+        identity_value = _require_identity_value(
+            identity.get(field), label=f"{label}.{field}"
+        )
+        if manifest_value != identity_value:
+            raise ValueError(f"{label}.{field} does not match manifest")
+
+
+def _validate_score_set_relation(
+    *,
+    snapshot: Any,
+    definition_hash: Any,
+    scorer_id: Any,
+    scorer_version: Any,
+    artifact_input_hash: Any,
+    parent_artifact_hash: Any,
+    label: str,
+) -> None:
+    """Shared ScoreSet relationship check for both reads and suite import."""
+
+    if not parent_artifact_hash or str(artifact_input_hash) != str(parent_artifact_hash):
+        raise ChecksumMismatchError(f"score set artifact input hash mismatch: {label}")
+    if not isinstance(snapshot, Mapping) or not snapshot:
+        raise ChecksumMismatchError(f"score set scorer snapshot missing: {label}")
+    if hash_without_field(snapshot, "definition_hash") != definition_hash:
+        raise ChecksumMismatchError(f"score set scorer snapshot hash mismatch: {label}")
+    if str(snapshot.get("scorer_id") or "") != str(scorer_id):
+        raise ChecksumMismatchError(f"score set scorer id mismatch: {label}")
+    if str(snapshot.get("version") or "") != str(scorer_version):
+        raise ChecksumMismatchError(f"score set scorer version mismatch: {label}")
+
+
+def _validate_execution_component(
+    *,
+    scorer_id: Any,
+    scorer_version: Any,
+    snapshot: Any,
+    label: str,
+) -> None:
+    """Require an execution component to be declared by its frozen parent snapshot.
+
+    Historical suites are never back-filled from the current Registry; only the
+    components frozen into the parent ScoreSet's own snapshot are authoritative.
+    """
+
+    components = snapshot.get("components") if isinstance(snapshot, Mapping) else None
+    if not isinstance(components, (list, tuple)):
+        raise ValueError(f"{label} parent snapshot does not declare components")
+    wanted = (str(scorer_id), str(scorer_version))
+    for component in components:
+        if not isinstance(component, Mapping):
+            continue
+        if (
+            str(component.get("id") or ""),
+            str(component.get("version") or ""),
+        ) == wanted:
+            return
+    raise ValueError(f"{label} scorer component is not declared by the parent snapshot")
+
+
+def _validate_score_domain(aggregate_scores: Any) -> None:
+    """Reject an invalid aggregate-score payload before any terminal write.
+
+    Only true integers on the frozen 1..5 rubric scale are accepted; ``bool``
+    (``True`` is an ``int`` in Python), floats, ``NaN``/``Infinity`` and
+    out-of-range values are all rejected.
+    """
+
+    if aggregate_scores is None:
+        return
+    if not isinstance(aggregate_scores, Mapping):
+        raise ValueError("aggregate scores must be a mapping or null")
+    for dimension, score in aggregate_scores.items():
+        if not isinstance(dimension, str) or not dimension:
+            raise ValueError("aggregate score dimension must be a non-empty string")
+        if type(score) is not int or not 1 <= score <= 5:
+            raise ValueError("aggregate score must be an integer between 1 and 5")
+
+
+def _first_present(mapping: Mapping[str, Any], *keys: str) -> Any:
+    """Return the first alias key that is present, ignoring value truthiness.
+
+    Imported container fields (aggregate scores, findings, execution output and
+    usage) may legitimately be an empty mapping or list.  Selecting by key
+    presence keeps an explicit empty value and an explicit ``None`` instead of
+    falling through to a non-empty alias or fabricating a new value.
+    """
+
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _validate_terminal_run_state(
+    *,
+    lifecycle: Any,
+    outcome: Any,
+    label: str,
+) -> tuple[str, str | None]:
+    """Validate and normalize a terminal Run lifecycle/outcome pair.
+
+    Only terminal Runs are importable: ``finished`` requires an explicit, legal,
+    non-empty outcome, while ``cancelled`` must not carry one.  Both suite import
+    and the raw historical insert share this single rule so their semantics
+    cannot drift.
+    """
+
+    lifecycle_text = "" if lifecycle is None else str(lifecycle)
+    if lifecycle_text not in {"finished", "cancelled"}:
+        raise ValueError(f"{label} run is not terminal")
+    if lifecycle_text == "finished":
+        outcome_text = "" if outcome is None else str(outcome)
+        if outcome_text not in _RUN_FINISHED_OUTCOMES:
+            raise ValueError(f"{label} finished run requires a terminal outcome")
+        return lifecycle_text, outcome_text
+    if outcome is not None:
+        raise ValueError(f"{label} cancelled run must not carry an outcome")
+    return lifecycle_text, None
+
+
 def _validate_manifest_identity(
     manifest: RunManifest,
     *,
@@ -240,16 +395,14 @@ def _validate_manifest_identity(
     variant_id: str,
     run_profile: str,
 ) -> None:
-    expected = {
+    identity = {
         "experiment_id": experiment_id,
         "task_case_id": task_case_id,
         "task_case_version": task_case_version,
         "variant_id": variant_id,
         "run_profile": run_profile,
     }
-    for field, caller_value in expected.items():
-        if str(caller_value) != str(getattr(manifest, field)):
-            raise ValueError(f"{field} does not match manifest")
+    _validate_run_identity_fields(manifest.payload(), identity, label="run")
 
 
 def _error_json(
@@ -531,6 +684,21 @@ class EvalRunRepository:
         row: EvalRun,
         auto_commit: bool = True,
     ) -> EvalRun:
+        if not isinstance(row, EvalRun):
+            raise TypeError("row must be an EvalRun")
+        # A raw historical insert must satisfy the same manifest hash, identity
+        # cross-check, artifact hash, privacy boundary and terminal lifecycle
+        # rule as a suite import so it cannot create a row its own verified read
+        # would reject or an active/non-terminal row that bypasses the import.
+        self._verify_hashes(row)
+        _validate_manifest_privacy(
+            _plain_mapping(row.manifest_json, label="manifest"),
+        )
+        row.lifecycle, row.outcome = _validate_terminal_run_state(
+            lifecycle=row.lifecycle,
+            outcome=row.outcome,
+            label=f"run {row.id}",
+        )
         try:
             self.session.add(row)
             if auto_commit:
@@ -567,6 +735,20 @@ class EvalRunRepository:
             raise ChecksumMismatchError(f"manifest payload malformed for run {row.id}") from exc
         if canonical_hash(manifest_json) != row.manifest_hash:
             raise ChecksumMismatchError(f"manifest hash mismatch for run {row.id}")
+        try:
+            _validate_run_identity_fields(
+                manifest_json,
+                {
+                    "experiment_id": row.experiment_id,
+                    "task_case_id": row.task_case_id,
+                    "task_case_version": row.task_case_version,
+                    "variant_id": row.variant_id,
+                    "run_profile": row.run_profile,
+                },
+                label=f"run {row.id}",
+            )
+        except ValueError as exc:
+            raise ChecksumMismatchError(str(exc)) from exc
         if row.candidate_artifact_json is None:
             if row.artifact_hash is not None:
                 raise ChecksumMismatchError(f"artifact hash without artifact for run {row.id}")
@@ -1083,14 +1265,15 @@ class EvalScoreSetRepository:
 
     def _verify_relation(self, row: EvalScoreSet) -> EvalScoreSet:
         run = self.runs.get_verified(row.run_id)
-        if run.artifact_hash is None or row.artifact_input_hash != run.artifact_hash:
-            raise ChecksumMismatchError(f"score set artifact input hash mismatch: {row.id}")
-        snapshot = row.scorer_snapshot_json or {}
-        if not isinstance(snapshot, dict) or not snapshot:
-            raise ChecksumMismatchError(f"score set scorer snapshot missing: {row.id}")
-        actual = hash_without_field(snapshot, "definition_hash")
-        if actual != row.scorer_definition_hash:
-            raise ChecksumMismatchError(f"score set scorer snapshot hash mismatch: {row.id}")
+        _validate_score_set_relation(
+            snapshot=row.scorer_snapshot_json,
+            definition_hash=row.scorer_definition_hash,
+            scorer_id=row.scorer_id,
+            scorer_version=row.scorer_version,
+            artifact_input_hash=row.artifact_input_hash,
+            parent_artifact_hash=run.artifact_hash,
+            label=row.id,
+        )
         return row
 
     def get_verified(self, score_set_id: str) -> EvalScoreSet:
@@ -1119,6 +1302,64 @@ class EvalScoreSetRepository:
         return [self._verify_relation(row) for row in rows]
 
     list_for_run = list_verified
+
+    def derive_from_executions(self, score_set_id: str) -> Any:
+        """Rebuild the ScoreSet result strictly from persisted rows.
+
+        The frozen task is read from the parent Run's manifest and the frozen
+        bundle from the ScoreSet's own snapshot; neither the current Registry nor
+        any in-memory draft list participates.
+        """
+
+        score_set = self.get_verified(score_set_id)
+        run = self.runs.get_verified(score_set.run_id)
+        task_snapshot = (run.manifest_json or {}).get("task_snapshot")
+        if not isinstance(task_snapshot, Mapping) or not task_snapshot:
+            raise ChecksumMismatchError(f"run has no frozen task snapshot: {run.id}")
+        try:
+            task = TaskCase.from_dict(task_snapshot)
+        except Exception as exc:
+            raise ChecksumMismatchError(
+                f"run frozen task snapshot is invalid: {run.id}"
+            ) from exc
+        # The nested task identity must match the parent Run row; a snapshot that
+        # describes a different task must not be scored under this Run's label.
+        # This reads only the frozen manifest and row, never the current Registry.
+        if (
+            str(task.task_case_id) != str(run.task_case_id)
+            or str(task.task_case_version) != str(run.task_case_version)
+        ):
+            raise ChecksumMismatchError(
+                f"run frozen task snapshot does not match the run: {run.id}"
+            )
+        try:
+            bundle = ScorerBundle.from_dict(score_set.scorer_snapshot_json)
+        except Exception as exc:
+            raise ChecksumMismatchError(
+                f"score set frozen snapshot is invalid: {score_set.id}"
+            ) from exc
+        stored = [
+            {
+                "component_id": row.scorer_id,
+                "component_version": row.scorer_version,
+                "status": row.status,
+                "input_hash": row.input_hash,
+                "output_json": row.output_json,
+                "error_code": row.operational_error_code,
+                "error_message": row.operational_error_message,
+                "latency_ms": row.latency_ms,
+                "usage_json": row.usage_json,
+            }
+            for row in EvalScorerExecutionRepository(self.session).list_verified(
+                score_set_id
+            )
+        ]
+        return derive_score_set_from_stored(
+            task=task,
+            scorer_bundle=bundle,
+            stored_executions=stored,
+            input_hash=score_set.artifact_input_hash,
+        )
 
     def claim_running(
         self,
@@ -1162,6 +1403,47 @@ class EvalScoreSetRepository:
         error_message = _sanitize_message(sanitized_message)
         if error_code is not None:
             error_code = _error_json(error_code, error_message)["code"]
+
+        # Every terminal write must carry a legal aggregate-score payload.  The
+        # narrow failure fallback is allowed to be scoreless (None or an empty
+        # mapping), but a non-mapping or out-of-range value is rejected here
+        # before either the derivation gate or the write.
+        _validate_score_domain(aggregate_scores)
+
+        # A terminal state that claims scoring must be reproducible from the
+        # frozen task/bundle and the already-persisted executions.  This closes
+        # the "write any score with an execution present" gap: a completed/pass
+        # result, or any non-empty aggregate score, is rejected unless it equals
+        # what the stored executions actually derive.
+        requires_derivation = (
+            status == "completed"
+            or quality_verdict in {"pass", "fail"}
+            or (isinstance(aggregate_scores, Mapping) and bool(aggregate_scores))
+        )
+        if requires_derivation:
+            # Preserve the running/CAS contract: a row that is not running keeps
+            # the existing conflict error and is never re-derived.
+            current = _load(self.session, EvalScoreSet, score_set_id)
+            if current.status != "running":
+                raise RepositoryConflictError(
+                    f"score set already terminal or missing: {score_set_id}"
+                )
+            derived = self.derive_from_executions(score_set_id)
+            request_scores = (
+                None if aggregate_scores is None else dict(as_plain(aggregate_scores))
+            )
+            request_findings = None if findings is None else list(as_plain(findings))
+            if (
+                status != derived.status
+                or quality_verdict != derived.verdict
+                or request_scores != dict(derived.aggregate_scores)
+                or request_findings != list(as_plain(derived.findings))
+                or (error_code or None) != (derived.error_code or None)
+            ):
+                raise ChecksumMismatchError(
+                    "score set finalization does not match stored executions"
+                )
+
         values: dict[str, Any] = {
             "status": status,
             "quality_verdict": quality_verdict,
@@ -1278,6 +1560,15 @@ class EvalScorerExecutionRepository:
             scorer_version=scorer_version,
             scorer_bundle_id=scorer_bundle_id,
             scorer_bundle_version=scorer_bundle_version,
+        )
+        # A new execution's component identity must be declared by the parent
+        # ScoreSet's own frozen snapshot; the current Registry is never used to
+        # guess a historical component.
+        _validate_execution_component(
+            scorer_id=resolved_id,
+            scorer_version=resolved_version,
+            snapshot=score_set.scorer_snapshot_json,
+            label=f"score set {score_set_id}",
         )
         if output_json is not None and output is not None:
             raise ValueError("provide output or output_json, not both")
@@ -1456,6 +1747,15 @@ class EvalScorerExecutionRepository:
             raise ChecksumMismatchError(
                 f"scorer execution input hash mismatch: {row.id}"
             )
+        try:
+            _validate_execution_component(
+                scorer_id=row.scorer_id,
+                scorer_version=row.scorer_version,
+                snapshot=score_set.scorer_snapshot_json,
+                label=row.id,
+            )
+        except ValueError as exc:
+            raise ChecksumMismatchError(str(exc)) from exc
         return row
 
     def get_verified(self, execution_id: str) -> EvalScorerExecution:
@@ -1700,6 +2000,21 @@ class EvalSuiteImportRepository:
         pairs = [(item[0].task_case_id, item[0].variant_id) for item in parsed]
         if len(pairs) != len(set(pairs)):
             raise ValueError("suite import contains duplicate case/variant pairs")
+        score_set_ids = [score_set.id for item in parsed for score_set in item[1]]
+        if len(score_set_ids) != len(set(score_set_ids)):
+            raise ChecksumMismatchError("suite import contains duplicate score set ids")
+        execution_ids = [execution.id for item in parsed for execution in item[2]]
+        if len(execution_ids) != len(set(execution_ids)):
+            raise ChecksumMismatchError("suite import contains duplicate execution ids")
+        execution_identities = [
+            (execution.score_set_id, execution.scorer_id, execution.scorer_version)
+            for item in parsed
+            for execution in item[2]
+        ]
+        if len(execution_identities) != len(set(execution_identities)):
+            raise ValueError(
+                "suite import contains duplicate scorer execution identities"
+            )
         expected = {
             (case_id, variant_id)
             for case_id in self.registry.task_cases
@@ -1707,6 +2022,21 @@ class EvalSuiteImportRepository:
         }
         if set(pairs) != expected:
             raise ValueError("suite import does not cover the registry case/variant matrix")
+        # Re-run the exact verified-read validators against the in-memory rows
+        # before any write.  An imported row therefore cannot succeed a write
+        # and then fail its own verified read.
+        for run, score_sets, _executions in parsed:
+            self.runs._verify_hashes(run)
+            for score_set in score_sets:
+                _validate_score_set_relation(
+                    snapshot=score_set.scorer_snapshot_json,
+                    definition_hash=score_set.scorer_definition_hash,
+                    scorer_id=score_set.scorer_id,
+                    scorer_version=score_set.scorer_version,
+                    artifact_input_hash=score_set.artifact_input_hash,
+                    parent_artifact_hash=run.artifact_hash,
+                    label=f"import record {score_set.id}",
+                )
         try:
             for run, score_sets, executions in parsed:
                 self.session.add(run)
@@ -1730,108 +2060,228 @@ class EvalSuiteImportRepository:
         raw_run = record.get("run")
         if not isinstance(raw_run, Mapping):
             raise ValueError(f"import record {index} is missing run")
-        experiment_id = str(raw_run.get("experiment_id") or "")
-        task_case_id = str(raw_run.get("task_case_id") or "")
-        variant_id = str(raw_run.get("variant_id") or "")
-        if experiment_id != self.registry.experiment.experiment_id:
+
+        # A new suite import must carry the full, explicit Run identity.  The
+        # five fields are read from the raw Mapping only; the Registry is never
+        # used to back-fill a missing value.
+        identity: dict[str, str] = {}
+        for field in _RUN_IDENTITY_FIELDS:
+            value = raw_run.get(field)
+            text = "" if value is None else str(value)
+            if not text:
+                raise ValueError(f"import record {index} run is missing {field}")
+            identity[field] = text
+
+        if identity["experiment_id"] != self.registry.experiment.experiment_id:
             raise ValueError(f"unknown experiment in import record {index}")
+        task_case_id = identity["task_case_id"]
         if task_case_id not in self.registry.task_cases:
             raise ValueError(f"unknown task case in import record {index}")
         expected_case_version = str(self.registry.task_cases[task_case_id].task_case_version)
-        actual_case_version = str(raw_run.get("task_case_version") or "")
-        if actual_case_version != expected_case_version:
+        if identity["task_case_version"] != expected_case_version:
             raise ValueError(f"task case version mismatch in import record {index}")
-        if variant_id not in self.registry.experiment.variants:
+        if identity["variant_id"] not in self.registry.experiment.variants:
             raise ValueError(f"unknown variant in import record {index}")
+        if identity["run_profile"] != str(self.registry.experiment.run_profile):
+            raise ValueError(f"run profile mismatch in import record {index}")
+
         manifest = raw_run.get("manifest") or raw_run.get("manifest_json")
         if not isinstance(manifest, Mapping):
             raise ValueError(f"import record {index} manifest is invalid")
+        manifest_json = _plain_mapping(manifest, label=f"import record {index} manifest")
+        _validate_run_identity_fields(
+            manifest_json,
+            identity,
+            label=f"import record {index} run",
+        )
         expected_manifest_hash = str(raw_run.get("manifest_hash") or "")
-        if canonical_hash(manifest) != expected_manifest_hash:
+        if canonical_hash(manifest_json) != expected_manifest_hash:
             raise ChecksumMismatchError(f"import record {index} manifest hash mismatch")
+        # New writes stay inside the same manifest privacy boundary as live
+        # create/claim; the stored hash is still checked against the raw blob.
+        _validate_manifest_privacy(manifest_json, path=f"import record {index} manifest")
+
         artifact = raw_run.get("candidate_artifact") or raw_run.get("candidate_artifact_json")
         artifact_hash = raw_run.get("artifact_hash")
+        artifact_json: dict[str, Any] | None = None
         if artifact is not None:
             if not isinstance(artifact, Mapping):
                 raise ValueError(f"import record {index} artifact is invalid")
-            if canonical_hash(artifact) != str(artifact_hash or ""):
+            artifact_json = _plain_mapping(artifact, label=f"import record {index} artifact")
+            artifact_hash_text = "" if artifact_hash is None else str(artifact_hash)
+            if not artifact_hash_text or canonical_hash(artifact_json) != artifact_hash_text:
                 raise ChecksumMismatchError(f"import record {index} artifact hash mismatch")
         elif artifact_hash:
             raise ChecksumMismatchError(f"import record {index} artifact hash mismatch")
+
+        # Only terminal Runs are importable.  A finished Run needs an explicit,
+        # legal outcome; a cancelled Run must not carry one.  Neither is ever
+        # defaulted to success.  The rule is shared with import_historical.
+        lifecycle, outcome_text = _validate_terminal_run_state(
+            lifecycle=raw_run.get("lifecycle"),
+            outcome=raw_run.get("outcome"),
+            label=f"import record {index}",
+        )
+
         run = EvalRun(
             id=str(raw_run.get("id") or _new_id("run")),
-            experiment_id=experiment_id,
+            experiment_id=identity["experiment_id"],
             suite_execution_id=raw_run.get("suite_execution_id"),
-            task_case_id=task_case_id,
-            task_case_version=str(raw_run.get("task_case_version") or "1"),
-            variant_id=variant_id,
-            run_profile=str(raw_run.get("run_profile") or "evaluation"),
-            lifecycle=str(raw_run.get("lifecycle") or "finished"),
-            outcome=raw_run.get("outcome") or "success",
+            task_case_id=identity["task_case_id"],
+            task_case_version=identity["task_case_version"],
+            variant_id=identity["variant_id"],
+            run_profile=identity["run_profile"],
+            lifecycle=lifecycle,
+            outcome=outcome_text,
             operational_error_json=raw_run.get("operational_error_json"),
-            manifest_json=as_plain(manifest),
+            manifest_json=manifest_json,
             manifest_hash=expected_manifest_hash,
-            candidate_artifact_json=as_plain(artifact) if artifact is not None else None,
+            candidate_artifact_json=artifact_json,
             artifact_hash=str(artifact_hash) if artifact_hash else None,
         )
+
         score_sets: list[EvalScoreSet] = []
+        score_set_snapshots: dict[str, Mapping[str, Any]] = {}
         for raw_score in record.get("score_sets") or ():
             if not isinstance(raw_score, Mapping):
                 raise ValueError(f"import record {index} score set is invalid")
             snapshot = raw_score.get("scorer_snapshot") or raw_score.get("scorer_snapshot_json")
-            definition_hash = str(raw_score.get("scorer_definition_hash") or "")
-            if not isinstance(snapshot, Mapping) or not definition_hash:
+            definition_hash = raw_score.get("scorer_definition_hash")
+            if not isinstance(snapshot, Mapping) or not snapshot:
                 raise ValueError(f"import record {index} score set is missing scorer snapshot")
-            if hash_without_field(snapshot, "definition_hash") != definition_hash:
+            snapshot_json = _plain_mapping(
+                snapshot, label=f"import record {index} score snapshot"
+            )
+            definition_hash_text = "" if definition_hash is None else str(definition_hash)
+            if not definition_hash_text:
+                raise ValueError(
+                    f"import record {index} score set is missing scorer definition hash"
+                )
+            if hash_without_field(snapshot_json, "definition_hash") != definition_hash_text:
                 raise ChecksumMismatchError(f"import record {index} score set hash mismatch")
-            version = str(raw_score.get("scorer_version") or "")
-            known_scorers = getattr(self.registry, "scorers", {self.registry.scorer.version: self.registry.scorer})
-            if version not in known_scorers:
+            raw_scorer_id = raw_score.get("scorer_id")
+            raw_scorer_version = raw_score.get("scorer_version")
+            scorer_id = "" if raw_scorer_id is None else str(raw_scorer_id)
+            scorer_version = "" if raw_scorer_version is None else str(raw_scorer_version)
+            if not scorer_id or not scorer_version:
+                raise ValueError(f"import record {index} score set is missing scorer identity")
+            if scorer_id != str(snapshot_json.get("scorer_id") or ""):
+                raise ChecksumMismatchError(
+                    f"import record {index} score set scorer id mismatch"
+                )
+            if scorer_version != str(snapshot_json.get("version") or ""):
+                raise ChecksumMismatchError(
+                    f"import record {index} score set scorer version mismatch"
+                )
+            known_scorers = getattr(
+                self.registry, "scorers", {self.registry.scorer.version: self.registry.scorer}
+            )
+            if scorer_version not in known_scorers:
                 raise ValueError(f"unknown scorer version in import record {index}")
-            artifact_input_hash = str(raw_score.get("artifact_input_hash") or "")
-            if run.artifact_hash and artifact_input_hash != run.artifact_hash:
+            status = "" if raw_score.get("status") is None else str(raw_score.get("status"))
+            if status not in _SCORE_TERMINAL_STATUSES:
+                raise ValueError(f"import record {index} score set is not terminal")
+            # A ScoreSet can only score a frozen artifact, and its declared input
+            # hash must be explicit and equal to the parent Run's artifact hash.
+            if artifact_json is None:
+                raise ValueError(
+                    f"import record {index} score set requires a frozen artifact"
+                )
+            raw_artifact_input_hash = raw_score.get("artifact_input_hash")
+            artifact_input_hash = (
+                "" if raw_artifact_input_hash is None else str(raw_artifact_input_hash)
+            )
+            if not artifact_input_hash or artifact_input_hash != run.artifact_hash:
                 raise ChecksumMismatchError(
                     f"import record {index} score set artifact input hash mismatch"
                 )
+            score_set_id = str(raw_score.get("id") or _new_id("score-set"))
             score_sets.append(
                 EvalScoreSet(
-                    id=str(raw_score.get("id") or _new_id("score-set")),
+                    id=score_set_id,
                     run_id=run.id,
-                    scorer_id=str(raw_score.get("scorer_id") or "hybrid"),
-                    scorer_version=version,
-                    scorer_snapshot_json=as_plain(snapshot),
-                    scorer_definition_hash=definition_hash,
-                    artifact_input_hash=str(raw_score.get("artifact_input_hash") or run.artifact_hash or ""),
-                    status=str(raw_score.get("status") or "completed"),
+                    scorer_id=scorer_id,
+                    scorer_version=scorer_version,
+                    scorer_snapshot_json=snapshot_json,
+                    scorer_definition_hash=definition_hash_text,
+                    artifact_input_hash=artifact_input_hash,
+                    status=status,
                     quality_verdict=str(raw_score.get("quality_verdict") or "not_evaluated"),
                     operational_error_code=raw_score.get("operational_error_code")
                     or raw_score.get("error_code"),
                     operational_error_message=raw_score.get("operational_error_message")
                     or raw_score.get("error_message"),
-                    aggregate_scores_json=raw_score.get("aggregate_scores") or raw_score.get("aggregate_scores_json"),
-                    findings_json=raw_score.get("findings") or raw_score.get("findings_json"),
+                    aggregate_scores_json=_first_present(
+                        raw_score, "aggregate_scores", "aggregate_scores_json"
+                    ),
+                    findings_json=_first_present(raw_score, "findings", "findings_json"),
                 )
             )
+            score_set_snapshots[score_set_id] = snapshot_json
+
         executions: list[EvalScorerExecution] = []
         for raw_execution in record.get("executions") or ():
             if not isinstance(raw_execution, Mapping):
                 raise ValueError(f"import record {index} execution is invalid")
-            parent_id = str(raw_execution.get("score_set_id") or (score_sets[0].id if score_sets else ""))
+            raw_parent_id = raw_execution.get("score_set_id")
+            parent_id = "" if raw_parent_id is None else str(raw_parent_id)
+            if not parent_id:
+                raise ValueError(
+                    f"import record {index} execution is missing score_set_id"
+                )
+            if parent_id not in score_set_snapshots:
+                raise ValueError(
+                    f"import record {index} execution parent is not in this record"
+                )
+            parent = next(
+                score_set for score_set in score_sets if score_set.id == parent_id
+            )
+            status = (
+                "" if raw_execution.get("status") is None else str(raw_execution.get("status"))
+            )
+            if status not in _EXECUTION_STATUSES:
+                raise ValueError(f"import record {index} execution has an invalid status")
+            raw_input_hash = raw_execution.get("input_hash")
+            input_hash = "" if raw_input_hash is None else str(raw_input_hash)
+            if not input_hash or input_hash != parent.artifact_input_hash:
+                raise ChecksumMismatchError(
+                    f"import record {index} execution input hash mismatch"
+                )
+            raw_execution_scorer_id = raw_execution.get("scorer_id")
+            raw_execution_scorer_version = raw_execution.get("scorer_version")
+            execution_scorer_id = (
+                "" if raw_execution_scorer_id is None else str(raw_execution_scorer_id)
+            )
+            execution_scorer_version = (
+                ""
+                if raw_execution_scorer_version is None
+                else str(raw_execution_scorer_version)
+            )
+            # The execution component must be declared by the parent snapshot;
+            # the current Registry is never used to guess a historical component.
+            _validate_execution_component(
+                scorer_id=execution_scorer_id,
+                scorer_version=execution_scorer_version,
+                snapshot=score_set_snapshots[parent_id],
+                label=f"import record {index} execution",
+            )
             executions.append(
                 EvalScorerExecution(
                     id=str(raw_execution.get("id") or _new_id("scorer")),
                     score_set_id=parent_id,
-                    scorer_id=str(raw_execution.get("scorer_id") or ""),
-                    scorer_version=str(raw_execution.get("scorer_version") or ""),
-                    status=str(raw_execution.get("status") or "success"),
-                    input_hash=str(raw_execution.get("input_hash") or run.artifact_hash or ""),
-                    output_json=raw_execution.get("output") or raw_execution.get("output_json"),
+                    scorer_id=execution_scorer_id,
+                    scorer_version=execution_scorer_version,
+                    status=status,
+                    input_hash=input_hash,
+                    output_json=_first_present(
+                        raw_execution, "output", "output_json"
+                    ),
                     operational_error_code=raw_execution.get("operational_error_code")
                     or raw_execution.get("error_code"),
                     operational_error_message=raw_execution.get("operational_error_message")
                     or raw_execution.get("error_message"),
                     latency_ms=raw_execution.get("latency_ms"),
-                    usage_json=raw_execution.get("usage") or raw_execution.get("usage_json"),
+                    usage_json=_first_present(raw_execution, "usage", "usage_json"),
                 )
             )
         return run, score_sets, executions

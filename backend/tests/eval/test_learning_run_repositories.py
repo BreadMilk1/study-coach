@@ -21,7 +21,11 @@ from sqlalchemy.orm import Session
 
 from app.db import models
 from app.db.models import Base
-from app.eval.learning_run.contracts import CandidateArtifact, RunManifest, ScorerExecutionDraft
+from app.eval.learning_run.contracts import CandidateArtifact, RunManifest, ScorerExecutionDraft, canonical_hash
+from app.eval.learning_run.registry import TaskRegistry
+
+
+REGISTRY = TaskRegistry.load_default()
 
 
 CURATED_FIXTURE_PATH = (
@@ -90,13 +94,18 @@ def _repository_api():
 
 
 def _manifest(label: str = "manifest") -> RunManifest:
+    # The nested task snapshot identity must match the run's own task identity so
+    # the execution-derived finalization can cross-check it against the row.
+    task_snapshot = dict(REGISTRY.task_cases["tgqa-001"].to_dict())
+    task_snapshot["id"] = f"case-{label}"
+    task_snapshot["version"] = "1"
     return RunManifest(
         experiment_id="experiment-test",
         task_case_id=f"case-{label}",
         task_case_version="1",
         variant_id="tutor-v2",
         run_profile="evaluation",
-        task_snapshot={"id": f"case-{label}", "version": "1", "question": "question"},
+        task_snapshot=task_snapshot,
         prompt_text="frozen prompt",
         corpus_snapshot={"snapshot_id": "corpus-test", "version": "1", "aggregate_hash": "c" * 64},
         scorer_snapshot={"id": "hybrid", "version": "v1", "hash": "s" * 64},
@@ -163,6 +172,77 @@ def _finish_run(session, label: str = "run"):
         artifact_hash=artifact.compute_hash(),
     )
     return repo, finished
+
+
+def _create_score_set(session, finished, *, scorer_version: str = "hybrid-v1"):
+    """Create a pending ScoreSet frozen against the full registry document.
+
+    New execution appends and derived finalization require the parent's own
+    frozen components, so the synthetic helpers must carry the complete
+    document rather than a two-key legacy snapshot.
+    """
+
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    bundle = REGISTRY.scorer_for(scorer_version)
+    document = dict(REGISTRY.scorer_document(scorer_version))
+    score_set = ScoreSetRepository(session).create(
+        run_id=finished.id,
+        scorer_bundle=bundle,
+        scorer_snapshot=document,
+        artifact_input_hash=finished.artifact_hash,
+    )
+    return score_set, bundle
+
+
+def _score_set_with_document(session, finished, *, scorer_version: str = "hybrid-v1"):
+    score_set, bundle = _create_score_set(session, finished, scorer_version=scorer_version)
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    claimed = ScoreSetRepository(session).claim_running(score_set.id)
+    return claimed, bundle
+
+
+def _append_success_components(session, score_set, bundle, *, groundedness: int = 4):
+    _, _, _, ExecutionRepository, _ = _repository_api()
+    executions = ExecutionRepository(session)
+    for component in bundle.components:
+        if component.kind == "llm":
+            output = {
+                "groundedness": groundedness,
+                "citation_entailment": groundedness,
+                "coverage": groundedness,
+                "reasoning": "frozen synthetic result",
+                "findings": [],
+            }
+        else:
+            output = {"ok": True}
+        executions.append_draft(
+            score_set.id,
+            ScorerExecutionDraft(
+                component_id=component.component_id,
+                component_version=component.version,
+                scorer_id=component.component_id,
+                scorer_version=component.version,
+                status="success",
+                input_hash=score_set.artifact_input_hash,
+                output=output,
+                findings=(),
+            ),
+        )
+
+
+def _finalize_from_derivation(session, score_set_id):
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    repo = ScoreSetRepository(session)
+    derived = repo.derive_from_executions(score_set_id)
+    return repo.finalize_once(
+        score_set_id,
+        status=derived.status,
+        quality_verdict=derived.verdict,
+        aggregate_scores=derived.aggregate_scores,
+        findings=derived.findings,
+        error_code=derived.error_code,
+        sanitized_message=derived.error_message,
+    )
 
 
 def test_eval_models_expose_exact_local_instance_global_schema(session):
@@ -610,12 +690,7 @@ def test_score_set_history_is_append_only_and_each_row_terminal_once(session):
     score_repo = ScoreSetRepository(session)
     artifact_hash = finished.artifact_hash
 
-    first = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=artifact_hash,
-    )
+    first, bundle = _score_set_with_document(session, finished)
     second = score_repo.create(
         run_id=finished.id,
         scorer_id="hybrid",
@@ -623,21 +698,20 @@ def test_score_set_history_is_append_only_and_each_row_terminal_once(session):
         artifact_input_hash=artifact_hash,
     )
     assert first.id != second.id
-    assert first.status == second.status == "pending"
+    assert second.status == "pending"
     assert first.scorer_snapshot_json
     assert first.scorer_definition_hash
 
-    running = score_repo.claim_running(first.id)
-    assert running.status == "running"
-    completed = score_repo.finalize_once(
-        first.id,
-        status="completed",
-        quality_verdict="pass",
-        aggregate_scores={"groundedness": 4},
-        findings=[],
-    )
+    assert first.status == "running"
+    _append_success_components(session, first, bundle)
+    completed = _finalize_from_derivation(session, first.id)
     assert completed.status == "completed"
-    assert completed.aggregate_scores_json == {"groundedness": 4}
+    assert completed.quality_verdict == "pass"
+    assert completed.aggregate_scores_json == {
+        "groundedness": 4,
+        "citation_entailment": 4,
+        "coverage": 4,
+    }
     with pytest.raises(Conflict):
         score_repo.finalize_once(
             first.id,
@@ -759,18 +833,13 @@ def test_scorer_execution_append_requires_running_score_set_and_rejects_terminal
     _, _, ScoreSetRepository, ExecutionRepository, Conflict = _repository_api()
     score_repo = ScoreSetRepository(session)
     executions = ExecutionRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
+    score_set, bundle = _create_score_set(session, finished)
 
     with pytest.raises(Conflict):
         executions.append(
             score_set_id=score_set.id,
-            scorer_id="deterministic-citations",
-            scorer_version="v1",
+            scorer_id=bundle.components[0].component_id,
+            scorer_version=bundle.components[0].version,
             status="success",
             input_hash=finished.artifact_hash,
             output={"citation_entailment": 4},
@@ -778,21 +847,8 @@ def test_scorer_execution_append_requires_running_score_set_and_rejects_terminal
     assert executions.list_verified(score_set.id) == []
 
     score_repo.claim_running(score_set.id)
-    executions.append(
-        score_set_id=score_set.id,
-        scorer_id="deterministic-citations",
-        scorer_version="v1",
-        status="success",
-        input_hash=finished.artifact_hash,
-        output={"citation_entailment": 4},
-    )
-    score_repo.finalize_once(
-        score_set.id,
-        status="completed",
-        quality_verdict="pass",
-        aggregate_scores={"citation_entailment": 4},
-        findings=[],
-    )
+    _append_success_components(session, score_set, bundle)
+    _finalize_from_derivation(session, score_set.id)
     with pytest.raises(Conflict):
         executions.append(
             score_set_id=score_set.id,
@@ -835,18 +891,13 @@ def test_scorer_executions_append_only_verified_and_duplicate_identity_rejected(
     _, finished = _finish_run(session, "executions")
     ChecksumMismatch, _, ScoreSetRepository, ExecutionRepository, Conflict = _repository_api()
     score_repo = ScoreSetRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
-    score_repo.claim_running(score_set.id)
+    score_set, bundle = _score_set_with_document(session, finished)
+    component = bundle.components[0]
     executions = ExecutionRepository(session)
     execution = executions.append(
         score_set_id=score_set.id,
-        scorer_id="deterministic-citations",
-        scorer_version="v1",
+        scorer_id=component.component_id,
+        scorer_version=component.version,
         status="success",
         input_hash=finished.artifact_hash,
         output={"citation_entailment": 4},
@@ -857,8 +908,8 @@ def test_scorer_executions_append_only_verified_and_duplicate_identity_rejected(
     with pytest.raises(Conflict):
         executions.append(
             score_set_id=score_set.id,
-            scorer_id="deterministic-citations",
-            scorer_version="v1",
+            scorer_id=component.component_id,
+            scorer_version=component.version,
             status="success",
             input_hash=finished.artifact_hash,
             output={"citation_entailment": 5},
@@ -899,20 +950,15 @@ def test_scorer_execution_rejects_fabricated_scalar_usage(
     )
     _, _, ScoreSetRepository, ExecutionRepository, Conflict = _repository_api()
     score_repo = ScoreSetRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
-    score_repo.claim_running(score_set.id)
+    score_set, bundle = _score_set_with_document(session, finished)
+    component = bundle.components[0]
     executions = ExecutionRepository(session)
 
     with pytest.raises((TypeError, ValueError)):
         executions.append(
             score_set_id=score_set.id,
-            scorer_id="scalar-usage-scorer",
-            scorer_version="v1",
+            scorer_id=component.component_id,
+            scorer_version=component.version,
             status="success",
             input_hash=finished.artifact_hash,
             output={"groundedness": 4},
@@ -933,18 +979,12 @@ def test_scorer_execution_accepts_mapping_or_null_usage(
         f"valid-scorer-usage-{usage_field}-{usage_value is None}",
     )
     _, _, ScoreSetRepository, ExecutionRepository, _ = _repository_api()
-    score_repo = ScoreSetRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
-    score_repo.claim_running(score_set.id)
+    score_set, bundle = _score_set_with_document(session, finished)
+    component = bundle.components[0]
     execution = ExecutionRepository(session).append(
         score_set_id=score_set.id,
-        scorer_id="mapping-usage-scorer",
-        scorer_version="v1",
+        scorer_id=component.component_id,
+        scorer_version=component.version,
         status="success",
         input_hash=finished.artifact_hash,
         output={"groundedness": 4},
@@ -1001,10 +1041,12 @@ def test_scorer_execution_append_rechecks_running_parent_atomically_under_interl
             artifact_hash=artifact.compute_hash(),
         )
         score_repo_a = _repository_api()[2](session_a)
+        bundle = REGISTRY.scorer_for("hybrid-v1")
+        document = dict(REGISTRY.scorer_document("hybrid-v1"))
         score_set = score_repo_a.create(
             run_id=finished.id,
-            scorer_id="hybrid",
-            scorer_version="v1",
+            scorer_bundle=bundle,
+            scorer_snapshot=document,
             artifact_input_hash=finished.artifact_hash,
         )
         score_repo_a.claim_running(score_set.id)
@@ -1020,6 +1062,7 @@ def test_scorer_execution_append_rechecks_running_parent_atomically_under_interl
                 stale_snapshot = SimpleNamespace(
                     status=row.status,
                     artifact_input_hash=row.artifact_input_hash,
+                    scorer_snapshot_json=row.scorer_snapshot_json,
                 )
                 assert stale_snapshot.status == "running"
                 session_a.rollback()
@@ -1034,8 +1077,8 @@ def test_scorer_execution_append_rechecks_running_parent_atomically_under_interl
         with pytest.raises(_repository_api()[4]):
             executions.append(
                 score_set_id=score_set.id,
-                scorer_id="race-scorer",
-                scorer_version="v1",
+                scorer_id=bundle.components[0].component_id,
+                scorer_version=bundle.components[0].version,
                 status="success",
                 input_hash=run_repo_a.get_verified(run.id).artifact_hash,
                 output={"groundedness": 4},
@@ -1229,17 +1272,11 @@ def test_generated_repository_ids_are_canonical_uuid_strings(session):
         artifact_hash=artifact.compute_hash(),
     )
     score_repo = ScoreSetRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
-    score_repo.claim_running(score_set.id)
+    score_set, bundle = _score_set_with_document(session, finished)
     execution = ExecutionRepository(session).append(
         score_set_id=score_set.id,
-        scorer_id="uuid-scorer",
-        scorer_version="v1",
+        scorer_id=bundle.components[0].component_id,
+        scorer_version=bundle.components[0].version,
         status="success",
         input_hash=finished.artifact_hash,
         output={"groundedness": 4},
@@ -1284,18 +1321,11 @@ def test_checksum_mismatch_is_direct_sibling_not_cas_conflict():
 def test_foreign_keys_require_child_first_deletion_and_leave_no_violations(session):
     _, finished = _finish_run(session, "delete-order")
     _, _, ScoreSetRepository, ExecutionRepository, _ = _repository_api()
-    score_repo = ScoreSetRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
-    score_repo.claim_running(score_set.id)
+    score_set, bundle = _score_set_with_document(session, finished)
     execution = ExecutionRepository(session).append(
         score_set_id=score_set.id,
-        scorer_id="deterministic-citations",
-        scorer_version="v1",
+        scorer_id=bundle.components[0].component_id,
+        scorer_version=bundle.components[0].version,
         status="skipped",
         input_hash=finished.artifact_hash,
     )
@@ -1318,22 +1348,17 @@ def test_foreign_keys_require_child_first_deletion_and_leave_no_violations(sessi
 def test_append_draft_persists_stable_output_envelope_and_rejects_untyped_values(session):
     _, finished = _finish_run(session, "draft-envelope")
     _, _, ScoreSetRepository, ExecutionRepository, _ = _repository_api()
-    score_repo = ScoreSetRepository(session)
-    score_set = score_repo.create(
-        run_id=finished.id,
-        scorer_id="hybrid",
-        scorer_version="v1",
-        artifact_input_hash=finished.artifact_hash,
-    )
-    score_repo.claim_running(score_set.id)
+    score_set, bundle = _score_set_with_document(session, finished)
     executions = ExecutionRepository(session)
+    first_component = bundle.components[0]
+    second_component = bundle.components[1]
     success = executions.append_draft(
         score_set.id,
         ScorerExecutionDraft(
-            component_id="component-a",
-            component_version="v1",
-            scorer_id="component-a",
-            scorer_version="v1",
+            component_id=first_component.component_id,
+            component_version=first_component.version,
+            scorer_id=first_component.component_id,
+            scorer_version=first_component.version,
             status="success",
             input_hash=finished.artifact_hash,
             output={"score": 4},
@@ -1347,10 +1372,10 @@ def test_append_draft_persists_stable_output_envelope_and_rejects_untyped_values
     skipped = executions.append_draft(
         score_set.id,
         ScorerExecutionDraft(
-            component_id="component-b",
-            component_version="v1",
-            scorer_id="component-b",
-            scorer_version="v1",
+            component_id=second_component.component_id,
+            component_version=second_component.version,
+            scorer_id=second_component.component_id,
+            scorer_version=second_component.version,
             status="skipped",
             input_hash=finished.artifact_hash,
             output={"applicable": False},
@@ -1414,3 +1439,439 @@ def test_legacy_manifest_persists_and_verifies_without_usage_contract(session):
     stored = RunRepository(session).get_verified(finished.id)
     assert "usage_contract" not in stored.manifest_json
     assert stored.manifest_hash == _manifest("legacy-verify").compute_hash()
+
+
+# ---------------------------------------------------------------------------
+# D5d batch A — row identity cross-checks on the verified read path.
+# ---------------------------------------------------------------------------
+
+
+def test_run_identity_column_tamper_is_rejected_without_manifest_change(session):
+    """A structured identity column must match the frozen manifest on read.
+
+    The manifest JSON and its hash are untouched, so only the new cross-check
+    between the row column and the frozen manifest can reject the tamper.
+    """
+    ChecksumMismatch, RunRepository, _, _, _ = _repository_api()
+    _, finished = _finish_run(session, "identity-column-tamper")
+    repo = RunRepository(session)
+
+    session.execute(
+        text("UPDATE eval_runs SET variant_id = :variant WHERE id = :run_id"),
+        {"variant": "tampered-variant", "run_id": finished.id},
+    )
+    session.commit()
+
+    with pytest.raises(ChecksumMismatch):
+        repo.get_verified(finished.id)
+
+
+def test_run_identity_empty_column_is_rejected_not_passed_by_empty_manifest(session):
+    """A missing/empty identity value must fail even when the other side is empty.
+
+    Clearing a structured identity column cannot self-validate as ``"" == ""``.
+    """
+    ChecksumMismatch, RunRepository, _, _, _ = _repository_api()
+    _, finished = _finish_run(session, "identity-empty-column")
+    repo = RunRepository(session)
+
+    session.execute(
+        text("UPDATE eval_runs SET run_profile = '' WHERE id = :run_id"),
+        {"run_id": finished.id},
+    )
+    session.commit()
+
+    with pytest.raises(ChecksumMismatch):
+        repo.get_verified(finished.id)
+
+
+def test_score_set_scorer_identity_column_tamper_is_rejected(session):
+    """A ScoreSet scorer column must stay consistent with its frozen snapshot."""
+    ChecksumMismatch, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "scorer-column-tamper")
+    score_repo = ScoreSetRepository(session)
+    score_set = score_repo.create(
+        run_id=finished.id,
+        scorer_id="hybrid",
+        scorer_version="v1",
+        artifact_input_hash=finished.artifact_hash,
+    )
+
+    session.execute(
+        text(
+            "UPDATE eval_score_sets SET scorer_version = :version "
+            "WHERE id = :score_set_id"
+        ),
+        {"version": "v9", "score_set_id": score_set.id},
+    )
+    session.commit()
+
+    with pytest.raises(ChecksumMismatch):
+        score_repo.get_verified(score_set.id)
+
+
+def test_create_rejects_empty_manifest_identity_before_insert(session):
+    """A live write cannot create a row its own verified read would reject."""
+    _, RunRepository, _, _, _ = _repository_api()
+    repo = RunRepository(session)
+    manifest = replace(_manifest("empty-identity"), experiment_id="")
+
+    with pytest.raises(ValueError):
+        repo.create(
+            id="run-empty-identity",
+            experiment_id="",
+            task_case_id=manifest.task_case_id,
+            task_case_version=manifest.task_case_version,
+            variant_id=manifest.variant_id,
+            run_profile=manifest.run_profile,
+            manifest=manifest,
+            manifest_hash=manifest.compute_hash(),
+        )
+    assert session.execute(text("SELECT COUNT(*) FROM eval_runs")).scalar_one() == 0
+
+
+# ---------------------------------------------------------------------------
+# D5d batch A — the raw historical insert shares the suite-import terminal rule.
+# ---------------------------------------------------------------------------
+
+
+def _historical_row(manifest: RunManifest, *, row_id: str, lifecycle: str, outcome):
+    return models.EvalRun(
+        id=row_id,
+        experiment_id=manifest.experiment_id,
+        suite_execution_id=None,
+        task_case_id=manifest.task_case_id,
+        task_case_version=manifest.task_case_version,
+        variant_id=manifest.variant_id,
+        run_profile=manifest.run_profile,
+        lifecycle=lifecycle,
+        outcome=outcome,
+        operational_error_json=None,
+        manifest_json=manifest.payload(),
+        manifest_hash=manifest.compute_hash(),
+        candidate_artifact_json=None,
+        artifact_hash=None,
+    )
+
+
+def test_import_historical_rejects_nonterminal_lifecycle_without_insert(session):
+    _, RunRepository, _, _, _ = _repository_api()
+    repo = RunRepository(session)
+    manifest = _manifest("historical-nonterminal")
+
+    for lifecycle in ("queued", "running"):
+        row = _historical_row(
+            manifest, row_id=f"historical-{lifecycle}", lifecycle=lifecycle, outcome=None
+        )
+        with pytest.raises(ValueError):
+            repo.import_historical(row=row)
+    assert session.execute(text("SELECT COUNT(*) FROM eval_runs")).scalar_one() == 0
+
+
+def test_import_historical_rejects_invalid_finished_outcome_without_insert(session):
+    _, RunRepository, _, _, _ = _repository_api()
+    repo = RunRepository(session)
+    manifest = _manifest("historical-outcome")
+
+    for outcome in ("exploded", None, ""):
+        row = _historical_row(
+            manifest,
+            row_id="historical-invalid-outcome",
+            lifecycle="finished",
+            outcome=outcome,
+        )
+        with pytest.raises(ValueError):
+            repo.import_historical(row=row)
+    assert session.execute(text("SELECT COUNT(*) FROM eval_runs")).scalar_one() == 0
+
+
+def test_import_historical_accepts_legal_failure_and_cancelled(session):
+    _, RunRepository, _, _, _ = _repository_api()
+    repo = RunRepository(session)
+
+    failed = _historical_row(
+        _manifest("historical-failed"),
+        row_id="historical-failed",
+        lifecycle="finished",
+        outcome="system_failed",
+    )
+    stored_failed = repo.import_historical(row=failed)
+    assert stored_failed.lifecycle == "finished"
+    assert stored_failed.outcome == "system_failed"
+
+    cancelled = _historical_row(
+        _manifest("historical-cancelled"),
+        row_id="historical-cancelled",
+        lifecycle="cancelled",
+        outcome=None,
+    )
+    stored_cancelled = repo.import_historical(row=cancelled)
+    assert stored_cancelled.lifecycle == "cancelled"
+    assert stored_cancelled.outcome is None
+
+    assert session.execute(text("SELECT COUNT(*) FROM eval_runs")).scalar_one() == 2
+
+
+# ---------------------------------------------------------------------------
+# D5d batch B — execution-derived ScoreSet finalization.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_completed_without_executions_is_rejected_and_row_stays_running(session):
+    ChecksumMismatch, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "finalize-no-executions")
+    score_set, _bundle = _score_set_with_document(session, finished)
+    repo = ScoreSetRepository(session)
+
+    with pytest.raises(ChecksumMismatch):
+        repo.finalize_once(
+            score_set.id,
+            status="completed",
+            quality_verdict="pass",
+            aggregate_scores={"groundedness": 4},
+            findings=[],
+        )
+    assert repo.get_verified(score_set.id).status == "running"
+
+
+def test_finalize_with_wrong_verdict_or_scores_is_rejected_and_row_stays_running(session):
+    ChecksumMismatch, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "finalize-mismatch")
+    score_set, bundle = _score_set_with_document(session, finished)
+    _append_success_components(session, score_set, bundle)
+    repo = ScoreSetRepository(session)
+
+    # A passing-looking summary that disagrees with the stored executions.
+    with pytest.raises(ChecksumMismatch):
+        repo.finalize_once(
+            score_set.id,
+            status="completed",
+            quality_verdict="fail",
+            aggregate_scores={"groundedness": 4, "citation_entailment": 4, "coverage": 4},
+            findings=[],
+        )
+    with pytest.raises(ChecksumMismatch):
+        repo.finalize_once(
+            score_set.id,
+            status="completed",
+            quality_verdict="pass",
+            aggregate_scores={"groundedness": 5, "citation_entailment": 4, "coverage": 4},
+            findings=[],
+        )
+    assert repo.get_verified(score_set.id).status == "running"
+
+
+def test_finalize_rejects_out_of_range_scores_even_with_matching_executions(session):
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "finalize-out-of-range")
+    score_set, bundle = _score_set_with_document(session, finished)
+    _append_success_components(session, score_set, bundle)
+    repo = ScoreSetRepository(session)
+
+    for bad_value in (99, 0, True, 4.0):
+        with pytest.raises(ValueError):
+            repo.finalize_once(
+                score_set.id,
+                status="completed",
+                quality_verdict="pass",
+                aggregate_scores={"groundedness": bad_value},
+                findings=[],
+            )
+    assert repo.get_verified(score_set.id).status == "running"
+
+
+def test_finalize_persists_the_derived_values_read_back_from_db(session):
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "finalize-derived")
+    score_set, bundle = _score_set_with_document(session, finished)
+    _append_success_components(session, score_set, bundle)
+    repo = ScoreSetRepository(session)
+    derived = repo.derive_from_executions(score_set.id)
+
+    finalized = repo.finalize_once(
+        score_set.id,
+        status=derived.status,
+        quality_verdict=derived.verdict,
+        aggregate_scores=derived.aggregate_scores,
+        findings=derived.findings,
+        error_code=derived.error_code,
+        sanitized_message=derived.error_message,
+    )
+    assert finalized.status == "completed"
+    assert finalized.quality_verdict == "pass"
+    reread = repo.get_verified(score_set.id)
+    assert reread.aggregate_scores_json == dict(derived.aggregate_scores)
+
+
+def test_derive_from_executions_reflects_persisted_rows_not_memory(session):
+    _, _, ScoreSetRepository, ExecutionRepository, _ = _repository_api()
+    _, finished = _finish_run(session, "derive-from-db")
+    score_set, bundle = _score_set_with_document(session, finished)
+    _append_success_components(session, score_set, bundle)
+    repo = ScoreSetRepository(session)
+    assert repo.derive_from_executions(score_set.id).verdict == "pass"
+
+    llm_id = next(
+        row.id
+        for row in ExecutionRepository(session).list_verified(score_set.id)
+        if row.scorer_id == "grounded-quality-rubric"
+    )
+    session.execute(
+        text(
+            "UPDATE eval_scorer_executions SET output_json = :payload WHERE id = :id"
+        ),
+        {
+            "payload": json.dumps(
+                {
+                    "result": {
+                        "groundedness": 2,
+                        "citation_entailment": 2,
+                        "coverage": 2,
+                        "reasoning": "tampered",
+                        "findings": [],
+                    },
+                    "findings": [],
+                }
+            ),
+            "id": llm_id,
+        },
+    )
+    session.commit()
+
+    derived = repo.derive_from_executions(score_set.id)
+    assert derived.verdict == "fail"
+    assert derived.aggregate_scores["groundedness"] == 2
+
+
+def test_append_rejects_a_component_not_in_the_frozen_snapshot(session):
+    _, _, _, ExecutionRepository, _ = _repository_api()
+    _, finished = _finish_run(session, "append-unknown-component")
+    score_set, _bundle = _score_set_with_document(session, finished)
+
+    with pytest.raises(ValueError):
+        ExecutionRepository(session).append(
+            score_set_id=score_set.id,
+            scorer_id="not-a-frozen-component",
+            scorer_version="v1",
+            status="success",
+            input_hash=finished.artifact_hash,
+            output={"groundedness": 4},
+        )
+    assert ExecutionRepository(session).list_verified(score_set.id) == []
+
+
+def test_execution_read_rejects_a_tampered_component_identity(session):
+    ChecksumMismatch, _, _, ExecutionRepository, _ = _repository_api()
+    _, finished = _finish_run(session, "execution-component-tamper")
+    score_set, bundle = _score_set_with_document(session, finished)
+    component = bundle.components[0]
+    execution = ExecutionRepository(session).append(
+        score_set_id=score_set.id,
+        scorer_id=component.component_id,
+        scorer_version=component.version,
+        status="success",
+        input_hash=finished.artifact_hash,
+        output={"groundedness": 4},
+    )
+
+    session.execute(
+        text(
+            "UPDATE eval_scorer_executions SET scorer_version = :version WHERE id = :id"
+        ),
+        {"version": "v9", "id": execution.id},
+    )
+    session.commit()
+
+    with pytest.raises(ChecksumMismatch):
+        ExecutionRepository(session).get_verified(execution.id)
+
+
+# ---------------------------------------------------------------------------
+# D5d batch B follow-up -- terminal score-domain gate and nested task identity.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["failed", "partial"])
+@pytest.mark.parametrize(
+    "bad_scores",
+    [
+        [99],
+        "bad",
+        1,
+        {"groundedness": 99},
+        {"groundedness": True},
+        {"groundedness": 4.0},
+    ],
+)
+def test_finalize_rejects_invalid_scores_on_the_failure_fallback(session, status, bad_scores):
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "fallback-domain")
+    score_set, _bundle = _score_set_with_document(session, finished)
+    repo = ScoreSetRepository(session)
+
+    with pytest.raises(ValueError):
+        repo.finalize_once(
+            score_set.id,
+            status=status,
+            quality_verdict="inconclusive",
+            aggregate_scores=bad_scores,
+            findings=[],
+        )
+    assert repo.get_verified(score_set.id).status == "running"
+
+
+@pytest.mark.parametrize("empty_scores", [None, {}])
+def test_finalize_keeps_the_scoreless_failure_fallback(session, empty_scores):
+    _, _, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "scoreless-fallback")
+    score_set, _bundle = _score_set_with_document(session, finished)
+    repo = ScoreSetRepository(session)
+
+    finalized = repo.finalize_once(
+        score_set.id,
+        status="failed",
+        quality_verdict="inconclusive",
+        aggregate_scores=empty_scores,
+        findings=[],
+    )
+    assert finalized.status == "failed"
+    assert finalized.quality_verdict == "inconclusive"
+
+
+def test_derive_and_finalize_reject_a_mismatched_nested_task_identity(session):
+    ChecksumMismatch, RunRepository, ScoreSetRepository, _, _ = _repository_api()
+    _, finished = _finish_run(session, "nested-task-identity")
+    score_set, bundle = _score_set_with_document(session, finished)
+    _append_success_components(session, score_set, bundle)
+    repo = ScoreSetRepository(session)
+
+    # Rewrite only the nested task snapshot identity and re-sign the manifest, so
+    # the outer five-field identity check still passes and the nested check is
+    # the one that must fire.
+    run = RunRepository(session).get_verified(finished.id)
+    manifest = dict(run.manifest_json)
+    snapshot = dict(manifest["task_snapshot"])
+    snapshot["id"] = "different-task"
+    snapshot["version"] = "9"
+    manifest["task_snapshot"] = snapshot
+    run.manifest_json = manifest
+    run.manifest_hash = canonical_hash(manifest)
+    session.add(run)
+    session.commit()
+
+    with pytest.raises(ChecksumMismatch):
+        repo.derive_from_executions(score_set.id)
+
+    with pytest.raises(ChecksumMismatch):
+        repo.finalize_once(
+            score_set.id,
+            status="completed",
+            quality_verdict="pass",
+            aggregate_scores={
+                "groundedness": 4,
+                "citation_entailment": 4,
+                "coverage": 4,
+            },
+            findings=[],
+        )
+    assert repo.get_verified(score_set.id).status == "running"

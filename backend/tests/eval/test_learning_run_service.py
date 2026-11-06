@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from app.agent.tutor_attempt import TutorCandidate
-from app.db.models import Base, EvalRun
+from app.db.models import Base, EvalRun, EvalScoreSet, EvalScorerExecution
 from app.eval.learning_run.contracts import (
     ScorerExecutionDraft,
     canonical_hash,
@@ -1595,3 +1595,441 @@ async def test_real_attempt_malformed_block_fails_run_without_scoring(session):
         if event.get("type") == "token"
     )
     assert _SENTINEL not in json.dumps(events, default=str)
+
+
+# ---------------------------------------------------------------------------
+# D5d batch B — DB-derived finalization and request-time re-score gates.
+# ---------------------------------------------------------------------------
+
+
+class _BundleOverrideRegistry:
+    """Resolve the real registry but serve one overridden scorer bundle."""
+
+    def __init__(self, registry, bundle, document):
+        self._registry = registry
+        self._bundle = bundle
+        self._document = document
+
+    def resolve_run(self, **kwargs):
+        return self._registry.resolve_run(**kwargs)
+
+    def scorer_for(self, version):
+        return self._bundle
+
+    def scorer_document(self, version):
+        return self._document
+
+    @property
+    def task_cases(self):
+        return self._registry.task_cases
+
+    @property
+    def experiment(self):
+        return self._registry.experiment
+
+    @property
+    def scorers(self):
+        return self._registry.scorers
+
+
+async def _run_once(session, **kwargs):
+    service = _service(session, RecordingTutorRunner(_candidate()))
+    return await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(scorer_llm=FakeScorerLLM()),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_run_ignores_a_fake_scoring_summary(session):
+    from app.eval.learning_run.contracts import ScoreSetResultDraft
+
+    class FakeScoring:
+        async def score(self, **_kwargs):
+            return ScoreSetResultDraft(
+                status="completed",
+                verdict="pass",
+                aggregate_scores={"groundedness": 5},
+                findings=(),
+                executions=(),
+                input_hash="a" * 64,
+            )
+
+    service = _service(
+        session,
+        RecordingTutorRunner(_candidate()),
+        scoring_factory=lambda _llm, **_kwargs: FakeScoring(),
+    )
+    result = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+
+    # Nothing was persisted, so the terminal summary is derived from the DB as
+    # failed, never the fabricated pass the fake scoring returned.
+    assert result.score_set.status == "failed"
+    assert result.score_set.quality_verdict != "pass"
+    assert EvalScorerExecutionRepository(session).list_verified(result.score_set.id) == []
+
+
+@pytest.mark.asyncio
+async def test_live_run_terminal_summary_reflects_a_mutated_db_row(session):
+    from sqlalchemy import text
+
+    from app.eval.learning_run.contracts import ScoreSetResultDraft
+
+    class MutatingScoring:
+        async def score(self, *, on_execution, candidate, **_kwargs):
+            input_hash = canonical_hash(candidate.to_dict())
+            for component in SCORER.components:
+                on_execution(
+                    ScorerExecutionDraft(
+                        component_id=component.component_id,
+                        component_version=component.version,
+                        scorer_id=component.component_id,
+                        scorer_version=component.version,
+                        status="success",
+                        input_hash=input_hash,
+                        output=(
+                            {
+                                "groundedness": 4,
+                                "citation_entailment": 4,
+                                "coverage": 4,
+                                "reasoning": "ok",
+                                "findings": [],
+                            }
+                            if component.kind == "llm"
+                            else {"ok": True}
+                        ),
+                        findings=(),
+                    )
+                )
+            # A test hook mutates the persisted row: a memory-based summary would
+            # still report pass, the DB-derived summary must report the tamper.
+            rows = session.execute(
+                select(EvalScorerExecution).order_by(EvalScorerExecution.created_at)
+            ).scalars().all()
+            llm_id = next(
+                row.id for row in rows if row.scorer_id == "grounded-quality-rubric"
+            )
+            session.execute(
+                text(
+                    "UPDATE eval_scorer_executions SET output_json = :payload WHERE id = :id"
+                ),
+                {
+                    "payload": json.dumps(
+                        {
+                            "result": {
+                                "groundedness": 1,
+                                "citation_entailment": 1,
+                                "coverage": 1,
+                                "reasoning": "tampered",
+                                "findings": [],
+                            },
+                            "findings": [],
+                        }
+                    ),
+                    "id": llm_id,
+                },
+            )
+            session.commit()
+            return ScoreSetResultDraft(
+                status="completed",
+                verdict="pass",
+                aggregate_scores={"groundedness": 4},
+                findings=(),
+                executions=(),
+                input_hash=input_hash,
+            )
+
+    service = _service(
+        session,
+        RecordingTutorRunner(_candidate()),
+        scoring_factory=lambda _llm, **_kwargs: MutatingScoring(),
+    )
+    result = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+
+    assert result.score_set.status == "completed"
+    assert result.score_set.quality_verdict == "fail"
+    assert result.score_set.aggregate_scores_json["groundedness"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rescore_ignores_a_fake_scoring_summary(session):
+    from app.eval.learning_run.contracts import ScoreSetResultDraft
+
+    first = await _run_once(session)
+
+    class FakeScoring:
+        async def score(self, **_kwargs):
+            return ScoreSetResultDraft(
+                status="completed",
+                verdict="pass",
+                aggregate_scores={"groundedness": 5},
+                findings=(),
+                executions=(),
+                input_hash="a" * 64,
+            )
+
+    service = _service(
+        session,
+        RecordingTutorRunner(_candidate()),
+        scoring_factory=lambda _llm, **_kwargs: FakeScoring(),
+    )
+    result = await service.rescore(
+        run_id=first.run.id,
+        scorer_version="hybrid-v2",
+        connection=_connection(scorer_llm=FakeScorerLLM()),
+    )
+
+    assert result.status == "failed"
+    assert result.quality_verdict != "pass"
+
+
+@pytest.mark.asyncio
+async def test_prepare_rescore_rejects_a_missing_or_mismatched_frozen_task_before_claim(
+    session,
+):
+    _, RunRequestError, _, _, _ = _service_api()
+    service = _service(session, RecordingTutorRunner(_candidate()))
+    first = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+    before = len(EvalScoreSetRepository(session).list_for_run(first.run.id))
+    original_manifest = dict(first.run.manifest_json)
+
+    for mutation in ("missing", "mismatch"):
+        manifest = dict(original_manifest)
+        if mutation == "missing":
+            manifest.pop("task_snapshot", None)
+        else:
+            snapshot = dict(manifest["task_snapshot"])
+            snapshot["id"] = "tgqa-002"
+            manifest["task_snapshot"] = snapshot
+        first.run.manifest_json = manifest
+        first.run.manifest_hash = canonical_hash(manifest)
+        session.add(first.run)
+        session.commit()
+
+        scorer_llm = FakeScorerLLM()
+        with pytest.raises(RunRequestError) as caught:
+            service.prepare_rescore(
+                run_id=first.run.id,
+                scorer_version="hybrid-v2",
+                connection=_connection(scorer_llm=scorer_llm),
+            )
+        assert caught.value.code == "manifest_invalid"
+        assert len(EvalScoreSetRepository(session).list_for_run(first.run.id)) == before
+        assert scorer_llm.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_rescore_rejects_an_incompatible_bundle_or_policy_before_claim(
+    session,
+):
+    _, RunRequestError, _, _, _ = _service_api()
+    first = await _run_once(session)
+    before = len(EvalScoreSetRepository(session).list_for_run(first.run.id))
+    base = REGISTRY.scorer_for("hybrid-v2")
+    document = REGISTRY.scorer_document("hybrid-v2")
+
+    incompatible_dimensions = replace(
+        base, required_dimensions_by_case_type={"answerable": ("groundedness",)}
+    )
+    unsupported_policy = replace(
+        base,
+        verdict_policy={**dict(base.verdict_policy), "fallback_verdict": "pass"},
+    )
+
+    for bundle in (incompatible_dimensions, unsupported_policy):
+        registry = _BundleOverrideRegistry(REGISTRY, bundle, document)
+        service = _service(session, RecordingTutorRunner(_candidate()), registry=registry)
+        scorer_llm = FakeScorerLLM()
+        with pytest.raises(RunRequestError) as caught:
+            service.prepare_rescore(
+                run_id=first.run.id,
+                scorer_version="hybrid-v2",
+                connection=_connection(scorer_llm=scorer_llm),
+            )
+        assert caught.value.code == "manifest_invalid"
+        assert len(EvalScoreSetRepository(session).list_for_run(first.run.id)) == before
+        assert scorer_llm.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_rescore_rejects_a_missing_or_invalid_frozen_budget(session):
+    _, RunRequestError, _, _, _ = _service_api()
+    service = _service(session, RecordingTutorRunner(_candidate()))
+    first = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+    before = len(EvalScoreSetRepository(session).list_for_run(first.run.id))
+    original_manifest = dict(first.run.manifest_json)
+
+    for mutation in ("missing", "zero", "text"):
+        manifest = dict(original_manifest)
+        budget = dict(manifest["budget"])
+        if mutation == "missing":
+            budget.pop("hybrid_scoring_seconds", None)
+        elif mutation == "zero":
+            budget["hybrid_scoring_seconds"] = 0
+        else:
+            budget["hybrid_scoring_seconds"] = "fast"
+        manifest["budget"] = budget
+        first.run.manifest_json = manifest
+        first.run.manifest_hash = canonical_hash(manifest)
+        session.add(first.run)
+        session.commit()
+
+        scorer_llm = FakeScorerLLM()
+        with pytest.raises(RunRequestError) as caught:
+            service.prepare_rescore(
+                run_id=first.run.id,
+                scorer_version="hybrid-v2",
+                connection=_connection(scorer_llm=scorer_llm),
+            )
+        assert caught.value.code == "manifest_invalid"
+        assert len(EvalScoreSetRepository(session).list_for_run(first.run.id)) == before
+        assert scorer_llm.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rescore_uses_the_frozen_manifest_budget(session):
+    from app.eval.learning_run.scoring import ScoringService as _ScoringService
+
+    service = _service(session, RecordingTutorRunner(_candidate()))
+    first = await service.run(
+        experiment_id="tutor-prompt-regression-v1",
+        task_case_id="tgqa-001",
+        variant_id="tutor-v3",
+        run_profile="evaluation",
+        connection=_connection(),
+    )
+    manifest = dict(first.run.manifest_json)
+    budget = dict(manifest["budget"])
+    budget["hybrid_scoring_seconds"] = 0.5
+    manifest["budget"] = budget
+    first.run.manifest_json = manifest
+    first.run.manifest_hash = canonical_hash(manifest)
+    session.add(first.run)
+    session.commit()
+
+    seen: dict[str, float] = {}
+
+    def factory(_llm, *, timeout_seconds):
+        seen["timeout"] = timeout_seconds
+        return _ScoringService(_llm, timeout_seconds=timeout_seconds)
+
+    rescoring = _service(
+        session, RecordingTutorRunner(_candidate()), scoring_factory=factory
+    )
+    result = await rescoring.rescore(
+        run_id=first.run.id,
+        scorer_version="hybrid-v2",
+        connection=_connection(scorer_llm=FakeScorerLLM()),
+    )
+
+    assert seen["timeout"] == 0.5
+    assert result.status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# D5d batch B1 -- the live prepare path shares the frozen-bundle gate.
+# ---------------------------------------------------------------------------
+
+
+def _self_consistent_bundle_and_document(bundle):
+    """Return a self-consistent ``(document, bundle)`` pair for a modified bundle.
+
+    The document must project onto the bundle and carry a matching, recomputed
+    definition hash, so ``freeze_scorer_document`` passes and the later
+    policy/dimension gate is what rejects -- not an earlier hash mismatch.
+    """
+
+    document = dict(bundle.payload())
+    document["schema_version"] = "scorer-bundle-v1"
+    document["definition_hash"] = hash_without_field(document, "definition_hash")
+    return document, replace(bundle, definition_hash=document["definition_hash"])
+
+
+class _LiveBundleOverrideRegistry:
+    """Resolve a run with an overridden scorer bundle and its frozen document."""
+
+    def __init__(self, registry, bundle, document):
+        self._registry = registry
+        self._bundle = bundle
+        self._document = document
+
+    def resolve_run(self, **kwargs):
+        return replace(self._registry.resolve_run(**kwargs), scorer=self._bundle)
+
+    def scorer_for(self, version):
+        return self._bundle
+
+    def scorer_document(self, version):
+        return self._document
+
+    @property
+    def task_cases(self):
+        return self._registry.task_cases
+
+    @property
+    def experiment(self):
+        return self._registry.experiment
+
+    @property
+    def scorers(self):
+        return self._registry.scorers
+
+
+@pytest.mark.asyncio
+async def test_live_prepare_rejects_unsupported_bundle_before_any_write(session):
+    _, RunRequestError, _, _, _ = _service_api()
+    base = REGISTRY.scorer_for("hybrid-v1")
+    incompatible_dimensions = replace(
+        base, required_dimensions_by_case_type={"answerable": ("groundedness",)}
+    )
+    unsupported_policy = replace(
+        base,
+        verdict_policy={**dict(base.verdict_policy), "fallback_verdict": "pass"},
+    )
+
+    for bundle in (incompatible_dimensions, unsupported_policy):
+        document, bundle = _self_consistent_bundle_and_document(bundle)
+        registry = _LiveBundleOverrideRegistry(REGISTRY, bundle, document)
+        service = _service(session, RecordingTutorRunner(_candidate()), registry=registry)
+        scorer_llm = FakeScorerLLM()
+        with pytest.raises(RunRequestError) as caught:
+            service.prepare(
+                experiment_id="tutor-prompt-regression-v1",
+                task_case_id="tgqa-001",
+                variant_id="tutor-v3",
+                run_profile="evaluation",
+                connection=_connection(scorer_llm=scorer_llm),
+            )
+        assert caught.value.code == "manifest_invalid"
+        assert scorer_llm.calls == 0
+
+    assert session.execute(select(EvalRun)).scalars().all() == []
+    assert session.execute(select(EvalScoreSet)).scalars().all() == []

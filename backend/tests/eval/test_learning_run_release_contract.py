@@ -368,7 +368,13 @@ def test_non_finite_scores_are_not_comparable():
 
 
 def test_compare_delta_stays_renderable_when_a_stored_score_is_non_finite():
-    """Mirrors Starlette's renderer: a delta must survive `allow_nan=False`."""
+    """Mirrors Starlette's renderer: a delta must survive `allow_nan=False`.
+
+    A non-finite stored value is not a comparable dimension, so the pair has an
+    empty/differing dimension set and is informational with a None delta. The
+    safety purpose is unchanged: no exception and nothing non-finite is
+    serialized.
+    """
     import json as _json
 
     from app.eval.learning_run.compare import compare_score_sets
@@ -397,7 +403,8 @@ def test_compare_delta_stays_renderable_when_a_stored_score_is_non_finite():
         side("l", "tutor-v2", 4), side("r", "tutor-v3", float("nan"))
     )
 
-    assert result["delta"] == {}
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
     _json.dumps(result, allow_nan=False)
 
 

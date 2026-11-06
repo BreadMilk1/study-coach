@@ -212,6 +212,70 @@ def _undeclared_diffs(
     return tuple(diffs)
 
 
+def _align_present(value: Any) -> bool:
+    """Whether an alignment field is present and non-empty on one side.
+
+    A missing or empty value must never align by matching the other side's
+    missing/empty value: two ``None``s are not evidence the two runs share a
+    task, version or corpus.
+    """
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def _resolve_axes(
+    left_manifest: Mapping[str, Any],
+    right_manifest: Mapping[str, Any],
+) -> tuple[tuple[str, ...], str | None]:
+    """Resolve the declared experiment axes for one comparison.
+
+    ``RunManifest.payload()`` does not write ``experiment_axes``, so a real
+    frozen manifest carries no such key.  When neither side declares the field we
+    keep the historical single-axis default (``prompt_version``) exactly as
+    before; this is a legacy compatibility default, not a schema guarantee that
+    every run was actually controlled on that axis.
+
+    When either side does declare the field, both must declare the same legal
+    single ``prompt_version`` axis.  A one-sided, malformed, differing, empty or
+    extended declaration is informational, so a declaration can never widen the
+    controlled surface or let an imported axis bypass the other gates.
+    """
+
+    left_declared = "experiment_axes" in left_manifest
+    right_declared = "experiment_axes" in right_manifest
+    if not left_declared and not right_declared:
+        return _DECLARED_AXES_DEFAULT, None
+
+    def _parse(value: Any) -> tuple[str, ...] | None:
+        if not isinstance(value, (list, tuple)):
+            return None
+        return tuple(value)
+
+    left_axes = _parse(left_manifest.get("experiment_axes")) if left_declared else None
+    right_axes = _parse(right_manifest.get("experiment_axes")) if right_declared else None
+    if not left_declared or not right_declared:
+        return _DECLARED_AXES_DEFAULT, (
+            "experiment axes declared on one side only; comparison is informational"
+        )
+    if left_axes is None or right_axes is None:
+        return _DECLARED_AXES_DEFAULT, (
+            "experiment axes are malformed; comparison is informational"
+        )
+    if left_axes != right_axes:
+        return _DECLARED_AXES_DEFAULT, (
+            "experiment axes differ; comparison is informational"
+        )
+    if left_axes != _DECLARED_AXES_DEFAULT:
+        return _DECLARED_AXES_DEFAULT, (
+            "unsupported experiment axes; comparison is informational"
+        )
+    return left_axes, None
+
+
 def compare_score_sets(
     left: Mapping[str, Any],
     right: Mapping[str, Any],
@@ -231,7 +295,13 @@ def compare_score_sets(
         notes.append(f"artifact schema not declared; assumed {CANDIDATE_ARTIFACT_SCHEMA}")
 
     for field in _ALIGN_FIELDS:
-        if left_manifest.get(field) != right_manifest.get(field):
+        left_value = left_manifest.get(field)
+        right_value = right_manifest.get(field)
+        if (
+            not _align_present(left_value)
+            or not _align_present(right_value)
+            or left_value != right_value
+        ):
             reasons.append(f"cannot align {field}")
     if left_schema != right_schema or not left_schema:
         reasons.append("cannot align artifact schema")
@@ -252,14 +322,13 @@ def compare_score_sets(
             "rescore_required": False,
         }
 
-    axes = tuple(
-        left_manifest.get("experiment_axes")
-        or right_manifest.get("experiment_axes")
-        or _DECLARED_AXES_DEFAULT
-    )
+    axes, axes_reason = _resolve_axes(left_manifest, right_manifest)
     undeclared = _undeclared_diffs(left_manifest, right_manifest, axes=axes)
     compatibility = "informational" if undeclared else "controlled"
     reasons.extend(undeclared)
+    if axes_reason is not None:
+        compatibility = "informational"
+        reasons.append(axes_reason)
 
     usage_reason = _usage_contract_reason(left_manifest, right_manifest)
     if usage_reason is not None:
@@ -278,28 +347,55 @@ def compare_score_sets(
     rescore_required = left_scorer != right_scorer
     delta = None
     if not rescore_required and compatibility == "controlled":
-        left_scores = _score_set(left).get("aggregate_scores") or {}
-        right_scores = _score_set(right).get("aggregate_scores") or {}
-        if isinstance(left_scores, Mapping) and isinstance(right_scores, Mapping):
-            delta = {}
-            for key in sorted(set(left_scores) | set(right_scores)):
-                left_value = left_scores.get(key)
-                right_value = right_scores.get(key)
-                if is_dimension_score(left_value) and is_dimension_score(right_value):
+        left_scores = _score_set(left).get("aggregate_scores")
+        right_scores = _score_set(right).get("aggregate_scores")
+        if not isinstance(left_scores, Mapping) or not isinstance(right_scores, Mapping):
+            compatibility = "informational"
+            reasons.append(
+                "aggregate scores are not comparable (not a mapping); "
+                "delta is informational"
+            )
+        else:
+            left_keys = {
+                key for key, value in left_scores.items() if is_dimension_score(value)
+            }
+            right_keys = {
+                key for key, value in right_scores.items() if is_dimension_score(value)
+            }
+            if not left_keys or not right_keys or left_keys != right_keys:
+                compatibility = "informational"
+                reasons.append(
+                    "aggregate score dimensions are not comparable "
+                    "(empty or differing dimension sets); delta is informational"
+                )
+            else:
+                candidate_delta: dict[str, Any] = {}
+                not_subtractable = False
+                for key in sorted(left_keys):
+                    left_value = left_scores[key]
+                    right_value = right_scores[key]
                     try:
                         difference = right_value - left_value
                     except OverflowError:
-                        # Comparable does not imply subtractable. `<` is exact
-                        # for an oversized int, but subtracting it against a
-                        # float coerces to float and overflows. Drop the
-                        # dimension the same way a non-numeric value is
-                        # skipped, rather than failing the whole compare.
-                        continue
-                    delta[key] = {
+                        # Comparable does not imply subtractable: subtracting an
+                        # oversized int against a float coerces to float and
+                        # raises. Do not emit a partial or empty delta as if it
+                        # were controlled; downgrade the whole comparison.
+                        not_subtractable = True
+                        break
+                    candidate_delta[key] = {
                         "left": left_value,
                         "right": right_value,
                         "delta": difference,
                     }
+                if not_subtractable:
+                    compatibility = "informational"
+                    reasons.append(
+                        "aggregate score dimensions are not subtractable; "
+                        "delta is informational"
+                    )
+                else:
+                    delta = candidate_delta
 
     return {
         "compatibility": compatibility,
