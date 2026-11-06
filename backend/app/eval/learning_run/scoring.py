@@ -383,7 +383,38 @@ def _valid_scorer_bundle_for_scoring(bundle: ScorerBundle) -> bool:
             return False
     except Exception:
         return False
+    # The frozen verdict policy must be executable by the existing algorithm.
+    # Only the supported declarations are accepted; an unsupported policy is a
+    # fail-closed rejection rather than a silently different scoring behaviour.
+    policy = bundle.verdict_policy
+    if not isinstance(policy, Mapping):
+        return False
+    if policy.get("critical_findings_fail") is not True:
+        return False
+    if policy.get("scorer_failure_verdict") != "inconclusive":
+        return False
+    if policy.get("fallback_verdict") != "never_pass":
+        return False
+    required_minimum = policy.get("required_minimum")
+    if type(required_minimum) is not int or not 1 <= required_minimum <= 5:
+        return False
+    if policy.get("average_cannot_cover_dimension_below") != required_minimum:
+        return False
     return True
+
+
+def scorer_bundle_supports_scoring(bundle: ScorerBundle) -> bool:
+    """Public single-source gate shared by the service pre-check and derive."""
+
+    return _valid_scorer_bundle_for_scoring(bundle)
+
+
+def task_dimensions_compatible(task: TaskCase | CalibrationTaskInput, scorer_bundle: ScorerBundle) -> bool:
+    """Whether the frozen task's dimensions are compatible with the bundle."""
+
+    if not isinstance(scorer_bundle, ScorerBundle):
+        return False
+    return bool(_task_dimensions(task, scorer_bundle))
 
 
 def _safe_candidate_payload(candidate: CandidateArtifact) -> Mapping[str, Any]:
@@ -1048,6 +1079,82 @@ def derive_score_set(
     )
 
 
+def restore_execution_draft(
+    *,
+    component_id: str,
+    component_version: str,
+    status: str,
+    input_hash: str,
+    output_json: Any = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    latency_ms: int | None = None,
+    usage_json: Any = None,
+) -> ScorerExecutionDraft:
+    """Rebuild one immutable draft from the persisted execution envelope.
+
+    The single restoration rule reads the stored ``{"result", "findings"}``
+    envelope produced by the repository, so a later reader never has to guess
+    the in-memory shape that originally produced the row.
+    """
+
+    result: Any = None
+    findings: tuple[Mapping[str, Any], ...] = ()
+    if isinstance(output_json, Mapping):
+        result = output_json.get("result")
+        raw_findings = output_json.get("findings")
+        if isinstance(raw_findings, list):
+            findings = tuple(
+                finding for finding in raw_findings if isinstance(finding, Mapping)
+            )
+    return ScorerExecutionDraft(
+        component_id=str(component_id),
+        component_version=str(component_version),
+        scorer_id=str(component_id),
+        scorer_version=str(component_version),
+        status=str(status),
+        input_hash=str(input_hash),
+        output=result,
+        error_code=error_code,
+        error_message=error_message,
+        latency_ms=latency_ms,
+        usage=usage_json if isinstance(usage_json, Mapping) else None,
+        findings=findings,
+    )
+
+
+def derive_score_set_from_stored(
+    *,
+    task: TaskCase | CalibrationTaskInput,
+    scorer_bundle: ScorerBundle,
+    stored_executions: Sequence[Mapping[str, Any]],
+    input_hash: str,
+) -> ScoreSetResultDraft:
+    """Derive a ScoreSet strictly from persisted execution rows.
+
+    Drafts are restored from the stored envelope and ordered by the parent
+    bundle's frozen component order; ``derive_score_set`` then enforces unique
+    identity, exact component membership and the input hash.
+    """
+
+    drafts = [restore_execution_draft(**stored) for stored in stored_executions]
+    order = {
+        component.component_id: index
+        for index, component in enumerate(scorer_bundle.components)
+    }
+    known = sorted(
+        (draft for draft in drafts if draft.component_id in order),
+        key=lambda draft: order[draft.component_id],
+    )
+    unknown = [draft for draft in drafts if draft.component_id not in order]
+    return derive_score_set(
+        task=task,
+        scorer_bundle=scorer_bundle,
+        executions=tuple(known + unknown),
+        input_hash=input_hash,
+    )
+
+
 # Explicit aliases keep the parser boundary discoverable to callers without
 # introducing a second implementation or a permissive parser.
 parse_llm_output = parse_rubric_output
@@ -1060,8 +1167,12 @@ __all__ = [
     "ScoringService",
     "VerdictDecision",
     "derive_score_set",
+    "derive_score_set_from_stored",
     "derive_verdict",
     "parse_llm_output",
     "parse_rubric_output",
     "parse_scorer_output",
+    "restore_execution_draft",
+    "scorer_bundle_supports_scoring",
+    "task_dimensions_compatible",
 ]

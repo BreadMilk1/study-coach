@@ -1370,3 +1370,154 @@ async def test_hybrid_v2_calibration_anchors_match_versioned_labels():
             on_execution=lambda _: None,
         )
         assert result.verdict == labels[candidate.candidate_id]
+
+
+# ---------------------------------------------------------------------------
+# D5d batch B — executable policy gate and stored-execution restoration.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {
+            "required_minimum": 4,
+            "critical_findings_fail": False,
+            "scorer_failure_verdict": "inconclusive",
+            "fallback_verdict": "never_pass",
+            "average_cannot_cover_dimension_below": 4,
+        },
+        {
+            "required_minimum": 4,
+            "critical_findings_fail": True,
+            "scorer_failure_verdict": "fail",
+            "fallback_verdict": "never_pass",
+            "average_cannot_cover_dimension_below": 4,
+        },
+        {
+            "required_minimum": 4,
+            "critical_findings_fail": True,
+            "scorer_failure_verdict": "inconclusive",
+            "fallback_verdict": "pass",
+            "average_cannot_cover_dimension_below": 4,
+        },
+        {
+            "required_minimum": 4,
+            "critical_findings_fail": True,
+            "scorer_failure_verdict": "inconclusive",
+            "fallback_verdict": "never_pass",
+            "average_cannot_cover_dimension_below": 3,
+        },
+        {
+            "required_minimum": 6,
+            "critical_findings_fail": True,
+            "scorer_failure_verdict": "inconclusive",
+            "fallback_verdict": "never_pass",
+            "average_cannot_cover_dimension_below": 6,
+        },
+        {
+            "required_minimum": True,
+            "critical_findings_fail": True,
+            "scorer_failure_verdict": "inconclusive",
+            "fallback_verdict": "never_pass",
+            "average_cannot_cover_dimension_below": True,
+        },
+    ],
+)
+def test_unsupported_verdict_policy_declarations_are_rejected(policy):
+    from app.eval.learning_run.scoring import scorer_bundle_supports_scoring
+
+    assert scorer_bundle_supports_scoring(SCORER) is True
+    assert scorer_bundle_supports_scoring(replace(SCORER, verdict_policy=policy)) is False
+
+
+def test_restore_execution_draft_preserves_an_empty_result_container():
+    from app.eval.learning_run.scoring import restore_execution_draft
+
+    draft = restore_execution_draft(
+        component_id="component",
+        component_version="v1",
+        status="success",
+        input_hash="a" * 64,
+        output_json={"result": {}, "findings": []},
+    )
+    assert dict(draft.output) == {}
+    assert draft.findings == ()
+
+
+def _stored_executions(input_hash: str, *, groundedness: int = 4):
+    stored = []
+    for component in SCORER.components:
+        if component.kind == "llm":
+            output_json = {
+                "result": {
+                    "groundedness": groundedness,
+                    "citation_entailment": groundedness,
+                    "coverage": groundedness,
+                    "reasoning": "ok",
+                    "findings": [],
+                },
+                "findings": [],
+            }
+        else:
+            output_json = {"result": {"ok": True}, "findings": []}
+        stored.append(
+            {
+                "component_id": component.component_id,
+                "component_version": component.version,
+                "status": "success",
+                "input_hash": input_hash,
+                "output_json": output_json,
+                "error_code": None,
+                "error_message": None,
+                "latency_ms": None,
+                "usage_json": None,
+            }
+        )
+    return stored
+
+
+def test_derive_score_set_from_stored_reads_only_the_persisted_envelope():
+    from app.eval.learning_run.scoring import derive_score_set_from_stored
+
+    input_hash = "a" * 64
+    derived = derive_score_set_from_stored(
+        task=ANSWERABLE,
+        scorer_bundle=SCORER,
+        stored_executions=_stored_executions(input_hash),
+        input_hash=input_hash,
+    )
+    assert derived.status == "completed"
+    assert derived.verdict == "pass"
+    assert dict(derived.aggregate_scores) == {
+        "groundedness": 4,
+        "citation_entailment": 4,
+        "coverage": 4,
+    }
+
+
+def test_derive_score_set_from_stored_rejects_an_undeclared_component():
+    from app.eval.learning_run.scoring import derive_score_set_from_stored
+
+    input_hash = "a" * 64
+    stored = [
+        {
+            "component_id": "not-a-frozen-component",
+            "component_version": "v1",
+            "status": "success",
+            "input_hash": input_hash,
+            "output_json": {"result": {"ok": True}, "findings": []},
+            "error_code": None,
+            "error_message": None,
+            "latency_ms": None,
+            "usage_json": None,
+        }
+    ]
+    derived = derive_score_set_from_stored(
+        task=ANSWERABLE,
+        scorer_bundle=SCORER,
+        stored_executions=stored,
+        input_hash=input_hash,
+    )
+    assert derived.status in {"partial", "failed"}
+    assert derived.verdict != "pass"

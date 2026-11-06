@@ -157,7 +157,14 @@ def test_missing_artifact_cannot_align():
     assert "cannot align artifact schema" in result["reasons"]
 
 
-def test_curated_fixture_prompt_axis_pair_is_controlled_without_schema_version():
+def test_curated_fixture_empty_scores_are_informational_without_schema_version():
+    """The committed fixture's empty aggregate scores cannot form a controlled delta.
+
+    The fixture is not edited: its hybrid-v1 ScoreSets carry no comparable
+    dimensions, so the new dimension gate must report informational rather than
+    a controlled empty delta. The artifact-schema inference is still exercised
+    because the fixture predates the field.
+    """
     by_pair: dict[tuple[str, str], dict] = {}
     for raw in FIXTURE_PATH.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
@@ -182,6 +189,10 @@ def test_curated_fixture_prompt_axis_pair_is_controlled_without_schema_version()
         for item in right_record["score_sets"]
         if item["scorer_version"] == "hybrid-v1"
     )
+    # The fixture's frozen scores are empty; the gate must not be relaxed to
+    # keep a controlled verdict for a fixture that carries no dimensions.
+    assert left_score["aggregate_scores"] == {}
+    assert right_score["aggregate_scores"] == {}
 
     result = compare_score_sets(
         {
@@ -212,9 +223,11 @@ def test_curated_fixture_prompt_axis_pair_is_controlled_without_schema_version()
         },
     )
 
-    assert result["compatibility"] == "controlled"
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
     assert result["rescore_required"] is False
     assert result["scope"] == "case"
+    assert any("dimension" in reason for reason in result["reasons"])
 
 
 def test_incompatible_when_task_or_corpus_or_artifact_schema_cannot_align():
@@ -288,15 +301,16 @@ def test_single_case_copy_cannot_claim_suite_or_general_quality():
     assert "quality" not in result["caption"]
 
 
-def test_compare_omits_a_delta_it_cannot_subtract():
+def test_overflowing_dimension_downgrades_the_whole_comparison_to_informational():
     """Comparable does not imply subtractable.
 
     `is_dimension_score` answers "can these be compared", and comparison is
     safe for an oversized int (`10**1000 < 4.5` is False, no raise). Building a
     delta needs more: `10**1000 - 4.5` coerces the int to float and raises
     OverflowError, so a mixed pair from the unvalidated import path would turn
-    `/api/eval/compare` into a 500. Drop the dimension instead, the same way a
-    non-numeric value is already skipped.
+    `/api/eval/compare` into a 500. A partial or empty controlled delta would be
+    a wrong answer, so the whole comparison is downgraded to informational with
+    a None delta rather than emitting a hole.
     """
     import json as _json
 
@@ -307,8 +321,10 @@ def test_compare_omits_a_delta_it_cannot_subtract():
 
     result = compare_score_sets(left, right)
 
-    assert result["compatibility"] == "controlled"
-    assert result["delta"] == {}
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("not subtractable" in reason for reason in result["reasons"])
+    # The original safety purpose is unchanged: no exception, no NaN/Infinity.
     _json.dumps(result, allow_nan=False)
 
 
@@ -653,3 +669,154 @@ def test_empty_score_set_mapping_is_informational():
     assert result["compatibility"] == "informational"
     assert result["delta"] is None
     assert any("scorer identity" in reason for reason in result["reasons"])
+
+
+# ---------------------------------------------------------------------------
+# D5d batch C -- alignment presence, comparable dimension sets and the
+# declared-axis gate.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["task_case_id", "task_case_version", "corpus_snapshot_hash"])
+@pytest.mark.parametrize("side", ["left", "right", "both"])
+def test_missing_align_field_never_aligns_by_mutual_absence(field, side):
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    if side in ("left", "both"):
+        del left["manifest"][field]
+    if side in ("right", "both"):
+        del right["manifest"][field]
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "incompatible"
+    assert result["delta"] is None
+    assert f"cannot align {field}" in result["reasons"]
+
+
+@pytest.mark.parametrize("field", ["task_case_id", "task_case_version", "corpus_snapshot_hash"])
+def test_empty_align_field_is_incompatible(field):
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["manifest"][field] = ""
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "incompatible"
+    assert result["delta"] is None
+    assert f"cannot align {field}" in result["reasons"]
+
+
+def test_empty_dimension_sets_are_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["score_set"]["aggregate_scores"] = {}
+    right["score_set"]["aggregate_scores"] = {}
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("dimension" in reason for reason in result["reasons"])
+
+
+def test_asymmetric_dimension_sets_are_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["score_set"]["aggregate_scores"] = {"groundedness": 4}
+    right["score_set"]["aggregate_scores"] = {"groundedness": 4, "coverage": 3}
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("dimension" in reason for reason in result["reasons"])
+
+
+def test_non_mapping_or_missing_aggregate_scores_are_informational():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["score_set"]["aggregate_scores"] = [4]
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("not a mapping" in reason for reason in result["reasons"])
+
+    del left["score_set"]["aggregate_scores"]
+    missing = compare_score_sets(left, right)
+    assert missing["compatibility"] == "informational"
+    assert missing["delta"] is None
+
+
+def test_both_missing_axes_keep_the_legacy_prompt_default():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    del left["manifest"]["experiment_axes"]
+    del right["manifest"]["experiment_axes"]
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+    assert result["delta"] == {"groundedness": {"left": 4, "right": 4, "delta": 0}}
+
+
+def test_explicit_matching_prompt_axis_stays_controlled():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["manifest"]["experiment_axes"] = ["prompt_version"]
+    right["manifest"]["experiment_axes"] = ("prompt_version",)
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "controlled"
+
+
+@pytest.mark.parametrize(
+    "left_axes,right_axes",
+    [
+        pytest.param(("prompt_version",), None, id="one-sided"),
+        pytest.param(
+            ("prompt_version",), ("prompt_version", "model"), id="differing"
+        ),
+        pytest.param(
+            ("prompt_version", "model"), ("prompt_version", "model"), id="extended"
+        ),
+        pytest.param((), (), id="empty"),
+        pytest.param("prompt_version", "prompt_version", id="malformed-string"),
+        pytest.param(5, 5, id="malformed-int"),
+        pytest.param(None, ("prompt_version",), id="one-sided-right"),
+    ],
+)
+def test_nonconforming_declared_axes_are_informational(left_axes, right_axes):
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    if left_axes is None:
+        del left["manifest"]["experiment_axes"]
+    else:
+        left["manifest"]["experiment_axes"] = left_axes
+    if right_axes is None:
+        del right["manifest"]["experiment_axes"]
+    else:
+        right["manifest"]["experiment_axes"] = right_axes
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("experiment axes" in reason for reason in result["reasons"])
+
+
+def test_declared_axis_cannot_bypass_the_usage_gate():
+    left = _side(run_id="left")
+    right = _side(run_id="right", variant_id="tutor-v3", prompt_version="tutor-v3")
+    left["manifest"]["usage_contract"] = "tutor-chunk-sum-v1"
+    left["manifest"]["experiment_axes"] = ("prompt_version",)
+    right["manifest"]["experiment_axes"] = ("prompt_version",)
+
+    result = compare_score_sets(left, right)
+
+    assert result["compatibility"] == "informational"
+    assert result["delta"] is None
+    assert any("usage contract" in reason for reason in result["reasons"])

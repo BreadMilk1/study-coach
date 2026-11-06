@@ -18,6 +18,7 @@
 - [Learning Run Harness — Tutor Prompt Regression](#learning-run-harness--tutor-prompt-regression)
 - [D5c Tutor Usage — Offline Acceptance](#d5c-tutor-usage--offline-acceptance)
 - [D5d Scorer Identity — Offline Acceptance](#d5d-scorer-identity--offline-acceptance)
+- [D5d Import and Execution Integrity — Offline Acceptance](#d5d-import-and-execution-integrity--offline-acceptance)
 - [Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring](#cloud-capability-offline-contracts--protocol-data-lifecycle-budget-scoring)
 
 ## TL;DR
@@ -742,6 +743,27 @@ The R1 failure and both launcher revisions remain retained, not overwritten. R2'
 The publication branch was fast-forwarded to `ac7cc73169d75026ebdf03aa0407ddbb33a9f8c0` (PR #28) before restoring the saved D5d batch 1 changes. The only content conflict was in ROADMAP; both D5c-3 and D5d records were retained. All eleven D5d production/test files remained byte-identical to their prior accepted versions. PR #28's four-node test file retained SHA-256 `c51967a2b24022dfc53694d73cc14de73830ffc8d63b36ed022f1bc1a6049814`.
 
 On that integrated source, independent offline focused acceptance passed **295 tests** (the seven D5d files plus the unchanged PR #28 test file), and the full backend passed **2,051 tests**. Both exited 0, with no failures/skips/xfails/xpasses or collection errors and empty stderr. Full includes focused; these counts are not additive. The launcher retains R2's spawn-safe entry and guards, with separate new logs/results; no business/test expectation or dependency changes were needed for integration. Prior snapshots, stash and acceptance/failure records are preserved outside Git in `Study-Coach-Handoffs/D5D-1-PUBLICATION-2026-11-04`.
+
+# D5d Import and Execution Integrity — Offline Acceptance
+
+Acceptance on `fix/d5d-artifact-integrity`, based on main `2433e09de140d1bd12174de7ec3f8c07579d7b1e` (PR #32), 2026-11-05. This follows the published D5d scorer-identity batch; implementation and local verification did not modify main or the completed D5c test files. Publication was separately authorized on 2026-11-06, not inherited from the earlier batch; remote CI/review/merge evidence belongs to the associated pull request.
+
+The bounded contract covers terminal-only atomic import, manifest privacy and five-field identity, frozen parent/child hash and component binding, execution-derived live/re-score results and request-time frozen-task/policy/budget rejection. Comparison additionally refuses missing alignment or empty/asymmetric/unsubtractable dimensions while preserving the legacy both-undeclared prompt-axis default. Historical fixtures, scorer definitions and hashes are not re-signed; historical import/read is not rescore or provenance authentication.
+
+| Attempt | Result | Interpretation |
+|---|---|---|
+| Phase A import/repository/API/races | **182 passed** | Exit 0; bounded import/read implementation, before the execution-derived changes. |
+| First combined focused | **416 passed / 1 failed** | A new nested-task rejection test omitted the `canonical_hash` import and raised NameError before reaching its target assertion. Execution stopped; complete logs retained. |
+| R2 combined focused | **417 passed** | After explicit approval, only that test import was added; no production or expected-value change. Exit 0, no failures/skips/xfails/xpasses or collection errors; stderr empty. |
+| R2 full backend | **2,144 passed** | Exit 0, no failures/skips/xfails/xpasses or collection errors; stderr empty. Includes focused and the earlier Phase A cases, not an additive total. Four multiprocessing workers recorded the protected bootstrap without re-entering pytest. |
+
+Combined focused comprises `tests/eval/test_learning_run_{import,repositories,races,service,scoring,compare,release_contract}.py` and `tests/api/test_eval_routes.py`. It revalidates Phase A and is not additive with the earlier 182 count. Cases include original 24-record fixture Run/ScoreSet/execution verified reads, invalid import zero writes, row-identity tampering, cancelled/failure snapshots, DB mutation versus in-memory summaries, arbitrary-score rejection even with executions present, nested-task mismatch, pre-claim rejection without model calls, timeout/cancel races and conservative compare gates. Independent Oracle static reviews preceded execution; the main-agent review also closed two direct repository bypasses. These are not strict RED→GREEN or separate security-review claims.
+
+The spawn-safe task-local launcher uses Python 3.11.15 and lock-checked packages, `-I -S -B`, validated venv prefixes and explicit checkout source paths, synthetic credentials, temporary data/cache paths, disabled downloads and pre-import socket/DNS guards. Focused parent guard hits were zero; fixture replacement of guards and process-local counters mean this is not an OS network sandbox or a global attempt count. All seven protected source/fixture/lock hashes remained unchanged. Launcher revisions, baseline/diff snapshots and both successful and failed logs remain outside Git in `Study-Coach-Handoffs/D5D-REMAINDER-2026-11-05`.
+
+Final original-protection verification exited 0 with stdout byte-equal to the fixed expectation. All seven protected hashes and all twelve production/test file hashes captured before R2 were unchanged. During implementation and local acceptance, local main and GitHub main remained at the baseline `2433e09`; changes were confined to the independent feature checkout. Final source/diff snapshots and acceptance hashes are preserved outside Git. This records the agreed local implementation/offline verification, not deployment, real-data migration, real provider/model or frontend/browser verification.
+
+Final independent Oracle review on 2026-11-06 returned **APPROVE** after reviewing the complete sixteen-file diff and matching its hashes to the accepted snapshot, including both final repository bypass corrections. It checked the 417/2,144 result records without rerunning tests. Publication preparation changes only acceptance-status prose; production and test bytes remain those reviewed and executed.
 
 # Cloud Capability Offline Contracts — protocol, data, lifecycle, budget, scoring
 

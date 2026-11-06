@@ -263,16 +263,32 @@ class _UnavailableEvalService(_FakeEvalService):
 
 
 def _seed_historical_run() -> str:
+    """Seed a finished historical Run with one completed, execution-derived ScoreSet.
+
+    The D5d batch B contract requires a complete frozen scorer document, a
+    frozen task snapshot and the four declared-component executions; the ScoreSet
+    is terminalized from those stored executions rather than a fabricated
+    summary. The case id, variant, run id and score-set id are unchanged so the
+    read-only, hash-tamper, busy and cancel API scenarios still exercise the
+    same identities.
+    """
+    from app.eval.learning_run.contracts import ScorerExecutionDraft
+    from app.eval.learning_run.registry import TaskRegistry
+
+    registry = TaskRegistry.load_default()
+    bundle = registry.scorer_for("hybrid-v1")
+    document = dict(registry.scorer_document("hybrid-v1"))
+    task = registry.task_cases["tgqa-004"]
     manifest = RunManifest(
         experiment_id="tutor-prompt-regression-v1",
         task_case_id="tgqa-004",
         task_case_version="1",
         variant_id="tutor-v3",
         run_profile="evaluation",
-        task_snapshot={"id": "tgqa-004", "version": "1", "question": "question"},
+        task_snapshot=task.to_dict(),
         prompt_text="frozen prompt",
         corpus_snapshot={"snapshot_id": "corpus-test", "version": "1", "aggregate_hash": "c" * 64},
-        scorer_snapshot={"scorer_id": "hybrid-v1", "version": "v1"},
+        scorer_snapshot=document,
         connection_fingerprint="d" * 64,
         corpus_snapshot_id="corpus-test",
         corpus_snapshot_version="1",
@@ -280,7 +296,7 @@ def _seed_historical_run() -> str:
         prompt_version="tutor-v3",
         prompt_hash="p" * 64,
         scorer_bundle_version="hybrid-v1",
-        scorer_bundle_hash="s" * 64,
+        scorer_bundle_hash=document["definition_hash"],
         provider="ollama",
         model="llama3.2",
         model_parameters={"temperature": 0, "top_p": 1},
@@ -288,7 +304,7 @@ def _seed_historical_run() -> str:
         reranker_config={"version": "test-reranker-v1"},
         chunking_config_version="chunking-v1",
         embedding_config_version="embedding-v1",
-        budget={"total_seconds": 90},
+        budget=dict(registry.experiment.budget),
         runtime_judge=False,
         runner_version="runner-v1",
         schema_version="learning-run-test-v1",
@@ -321,26 +337,45 @@ def _seed_historical_run() -> str:
         score_repo = EvalScoreSetRepository(session)
         score_set = score_repo.create(
             run_id=run.id,
-            scorer_id="hybrid-v1",
-            scorer_version="v1",
+            scorer_bundle=bundle,
+            scorer_snapshot=document,
             artifact_input_hash=run.artifact_hash,
             id="historical-score-set-001",
         )
         score_repo.claim_running(score_set.id)
-        EvalScorerExecutionRepository(session).append(
-            score_set_id=score_set.id,
-            scorer_id="retrieval-integrity",
-            scorer_version="v1",
-            status="success",
-            input_hash=run.artifact_hash,
-            output={"result": {"evidence_count": 0}, "findings": []},
+        executions = EvalScorerExecutionRepository(session)
+        required_dimensions = tuple(
+            bundle.required_dimensions_by_case_type[task.case_type]
         )
+        for component in bundle.components:
+            if component.kind == "llm":
+                output = {dimension: 4 for dimension in required_dimensions}
+                output["reasoning"] = "frozen synthetic result"
+                output["findings"] = []
+            else:
+                output = {"ok": True}
+            executions.append_draft(
+                score_set.id,
+                ScorerExecutionDraft(
+                    component_id=component.component_id,
+                    component_version=component.version,
+                    scorer_id=component.component_id,
+                    scorer_version=component.version,
+                    status="success",
+                    input_hash=run.artifact_hash,
+                    output=output,
+                    findings=(),
+                ),
+            )
+        derived = score_repo.derive_from_executions(score_set.id)
         score_repo.finalize_once(
             score_set.id,
-            status="completed",
-            quality_verdict="pass",
-            aggregate_scores={"groundedness": 4},
-            findings=[],
+            status=derived.status,
+            quality_verdict=derived.verdict,
+            aggregate_scores=derived.aggregate_scores,
+            findings=derived.findings,
+            error_code=derived.error_code,
+            sanitized_message=derived.error_message,
         )
     return run.id
 
@@ -726,7 +761,7 @@ def test_eval_get_lists_and_detail_are_read_only_and_checksum_verified(eval_clie
     assert len(detail.json()["score_sets"]) == 1
     assert detail.json()["score_sets"][0]["scorer_snapshot"]
     assert detail.json()["score_sets"][0]["scorer_definition_hash"]
-    assert len(detail.json()["scorer_executions"]) == 1
+    assert len(detail.json()["scorer_executions"]) == 4
     missing = client.get("/api/eval/runs/not-found", headers=headers)
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "evaluation_not_found"

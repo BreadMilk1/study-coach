@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -16,6 +17,7 @@ from .contracts import (
     RunManifest,
     ScorerExecutionDraft,
     ScoreSetResultDraft,
+    TaskCase,
     as_plain,
 )
 from .repositories import (
@@ -31,7 +33,11 @@ from .repositories import (
     freeze_scorer_document,
 )
 from .runner import RunnerOperationalError
-from .scoring import ScoringService, derive_score_set
+from .scoring import (
+    ScoringService,
+    scorer_bundle_supports_scoring,
+    task_dimensions_compatible,
+)
 
 
 class RunRequestError(ValueError):
@@ -159,6 +165,7 @@ class PreparedRescore:
     bundle: Any
     task: Any
     connection: EvalModelConnection
+    hybrid_scoring_seconds: float
     cancellation: CancellationToken = field(default_factory=CancellationToken, compare=False)
 
 
@@ -174,6 +181,28 @@ def _safe_exception_message(prefix: str, exc: BaseException | None = None) -> st
     if exc is None:
         return prefix
     return f"{prefix} ({type(exc).__name__})"
+
+
+def _frozen_hybrid_scoring_seconds(manifest_json: Mapping[str, Any] | None) -> float:
+    """Read the frozen hybrid scoring budget from a historical manifest.
+
+    The historical re-score must keep the boundary the Run was frozen under; it
+    never silently substitutes today's Registry budget.  A missing or illegal
+    value is a request-time fail-closed rejection.
+    """
+
+    budget = (manifest_json or {}).get("budget")
+    if not isinstance(budget, Mapping):
+        raise RunRequestError("manifest_invalid", "frozen budget is missing")
+    value = budget.get("hybrid_scoring_seconds")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise RunRequestError("manifest_invalid", "frozen hybrid scoring budget is invalid")
+    return float(value)
 
 
 def _event(events: Any, payload: Mapping[str, Any]) -> None:
@@ -507,6 +536,21 @@ class RunService:
                 self.registry.scorer_document(definition.scorer.version),
                 bundle=definition.scorer,
             )[0]
+            # A live run must execute under the same frozen-bundle gate as a
+            # historical re-score: the bundle has to be dimension-compatible with
+            # the frozen task and declare only an executable verdict policy.
+            # This is checked after the self-consistent document check and before
+            # any Run row is written.
+            if not task_dimensions_compatible(definition.task, definition.scorer):
+                raise RunRequestError(
+                    "manifest_invalid",
+                    "scorer bundle is not compatible with the frozen task",
+                )
+            if not scorer_bundle_supports_scoring(definition.scorer):
+                raise RunRequestError(
+                    "manifest_invalid",
+                    "scorer bundle is not supported for scoring",
+                )
             manifest = self._manifest(definition, connection, scorer_snapshot)
         except RunRequestError:
             raise
@@ -709,7 +753,6 @@ class RunService:
         callback_error: BaseException | None = None
         appended_count = 0
         success_persisted = False
-        persisted_drafts: list[ScorerExecutionDraft] = []
 
         def finalize_success_and_emit(score_set_value: Any) -> tuple[Any, tuple[Any, ...]]:
             nonlocal run, success_persisted
@@ -766,7 +809,6 @@ class RunService:
                 try:
                     self.scorer_executions.append_draft(score_set.id, draft)
                     appended_count += 1
-                    persisted_drafts.append(draft)
                     event_type = "scorer_completed" if draft.status != "failed" else "scorer_failed"
                     _event(
                         events,
@@ -788,7 +830,6 @@ class RunService:
                     raise _CooperativeCancellation()
                 self.scorer_executions.append_draft(score_set.id, draft)
                 appended_count += 1
-                persisted_drafts.append(draft)
                 _event(
                     events,
                     {
@@ -800,24 +841,16 @@ class RunService:
                     },
                 )
 
-            def ordered_drafts() -> tuple[ScorerExecutionDraft, ...]:
-                by_component = {draft.component_id: draft for draft in persisted_drafts}
-                return tuple(
-                    by_component[component.component_id]
-                    for component in definition.scorer.components
-                    if component.component_id in by_component
-                )
-
             def derive_persisted_score_set() -> ScoreSetResultDraft:
-                return derive_score_set(
-                    task=definition.task,
-                    scorer_bundle=definition.scorer,
-                    drafts=ordered_drafts(),
-                    input_hash=run.artifact_hash,
-                )
+                # The persisted executions are the single source of truth; the
+                # in-memory draft list never participates in the terminal result.
+                return self.score_sets.derive_from_executions(score_set.id)
 
             def append_missing_timeout_drafts(error_code: str, error_message: str) -> None:
-                existing = {draft.component_id for draft in persisted_drafts}
+                existing = {
+                    row.scorer_id
+                    for row in self.scorer_executions.list_verified(score_set.id)
+                }
                 for component in definition.scorer.components:
                     if component.component_id in existing:
                         continue
@@ -1040,18 +1073,47 @@ class RunService:
         if artifact.compute_hash() != run.artifact_hash:
             raise RunRequestError("manifest_invalid", "frozen artifact hash mismatch")
 
+        # The frozen task snapshot is authoritative; a missing or invalid
+        # snapshot is rejected rather than silently back-filled from today's
+        # Registry.
+        task_snapshot = (run.manifest_json or {}).get("task_snapshot")
+        if not isinstance(task_snapshot, Mapping) or not task_snapshot:
+            raise RunRequestError("manifest_invalid", "frozen task snapshot is missing")
+        try:
+            task = TaskCase.from_dict(task_snapshot)
+        except Exception as exc:
+            raise RunRequestError("manifest_invalid", "frozen task snapshot is invalid") from exc
+        if (
+            str(task.task_case_id) != str(run.task_case_id)
+            or str(task.task_case_version) != str(run.task_case_version)
+        ):
+            raise RunRequestError(
+                "manifest_invalid",
+                "frozen task snapshot does not match the run",
+            )
+
         try:
             bundle = self.registry.scorer_for(scorer_version)
-            document = self.registry.scorer_document(scorer_version)
-            task_snapshot = (run.manifest_json or {}).get("task_snapshot")
-            if isinstance(task_snapshot, Mapping) and task_snapshot:
-                from .contracts import TaskCase
-
-                task = TaskCase.from_dict(task_snapshot)
-            else:
-                task = self.registry.task_cases[run.task_case_id]
         except Exception as exc:
-            raise RunRequestError("manifest_invalid", "scorer version is not in the registry") from exc
+            raise RunRequestError(
+                "manifest_invalid", "scorer version is not in the registry"
+            ) from exc
+        if not task_dimensions_compatible(task, bundle):
+            raise RunRequestError(
+                "manifest_invalid",
+                "scorer bundle is not compatible with the frozen task",
+            )
+        if not scorer_bundle_supports_scoring(bundle):
+            raise RunRequestError(
+                "manifest_invalid",
+                "scorer bundle is not supported for scoring",
+            )
+        try:
+            document = self.registry.scorer_document(scorer_version)
+        except Exception as exc:
+            raise RunRequestError(
+                "manifest_invalid", "scorer version is not in the registry"
+            ) from exc
 
         try:
             # Validate the frozen document against the bundle that will execute
@@ -1062,6 +1124,9 @@ class RunService:
                 "manifest_invalid",
                 "scorer document does not match the executing bundle",
             ) from exc
+
+        # Keep the historical budget boundary: read it from the frozen manifest.
+        hybrid_scoring_seconds = _frozen_hybrid_scoring_seconds(run.manifest_json)
 
         scorer_config = as_plain(bundle.model_config)
         expected_scorer = {
@@ -1099,6 +1164,7 @@ class RunService:
             bundle=bundle,
             task=task,
             connection=connection,
+            hybrid_scoring_seconds=hybrid_scoring_seconds,
         )
 
     async def execute_rescore(self, prepared: PreparedRescore, events: Any = None) -> Any:
@@ -1149,7 +1215,7 @@ class RunService:
                 },
             )
 
-        hybrid_limit = float(self.registry.experiment.budget["hybrid_scoring_seconds"])
+        hybrid_limit = float(prepared.hybrid_scoring_seconds)
         scoring = (
             self.scoring_service_factory(
                 prepared.connection.scorer_llm, timeout_seconds=hybrid_limit
@@ -1160,7 +1226,10 @@ class RunService:
             )
         )
         try:
-            score_result = await scoring.score(
+            # The scoring summary is deliberately ignored: the terminal result
+            # is always re-derived from the persisted executions so a fake or
+            # drifting summary cannot be written as a passing ScoreSet.
+            await scoring.score(
                 task=prepared.task,
                 candidate=prepared.artifact,
                 scorer_bundle=prepared.bundle,
@@ -1168,14 +1237,15 @@ class RunService:
             )
         except _CooperativeCancellation:
             return self.score_sets.cancel_once(score_set.id)
+        derived = self.score_sets.derive_from_executions(score_set.id)
         score_set = self.score_sets.finalize_once(
             score_set.id,
-            status=score_result.status,
-            quality_verdict=score_result.verdict,
-            aggregate_scores=score_result.aggregate_scores,
-            findings=score_result.findings,
-            error_code=score_result.error_code,
-            sanitized_message=score_result.error_message,
+            status=derived.status,
+            quality_verdict=derived.verdict,
+            aggregate_scores=derived.aggregate_scores,
+            findings=derived.findings,
+            error_code=derived.error_code,
+            sanitized_message=derived.error_message,
         )
         _event(
             events,
